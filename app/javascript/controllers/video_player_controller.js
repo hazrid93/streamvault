@@ -16,9 +16,13 @@ const BUFFER_AHEAD_SECONDS = 10
 // upstream throughput dip is absorbed instead of immediately re-stalling.
 // Initial start keeps BUFFER_AHEAD_SECONDS (fast playback start, floored
 // by BUFFER_AHEAD_MAX_WAIT_MS); only the rebuffer gate uses this larger
-// value.  ~15 MB extra memory at 4 Mbps — negligible.
-const REBUFFER_AHEAD_SECONDS = 30
-const BUFFER_AHEAD_MAX_WAIT_MS = 10000
+// value.  ~7.5 MB extra memory at 4 Mbps — negligible.
+const REBUFFER_AHEAD_SECONDS = 15
+// Max wait before resuming from a rebuffer with whatever we have.
+// Without this, a slow trickle of data keeps the rebuffer gate
+// waiting forever for REBUFFER_AHEAD_SECONDS while the user stares
+// at "Buffering...".
+const REBUFFER_MAX_WAIT_MS = 15000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -91,6 +95,7 @@ export default class extends Controller {
     // rebuffer gate in maybeStartPlayback must never auto-resume a
     // user pause — only a rebuffer pause (buffer ran dry).
     this.userPaused = false
+    this.rebufferDeadline = null
     // True once navigateBack has saved progress and aborted the fetch;
     // suppresses the duplicate save in the beforeunload handler.
     this.navigatingAway = false
@@ -158,6 +163,7 @@ export default class extends Controller {
     this.stopProgressWatchdog()
     this.playbackStarted = false
     this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     this.cancelSeekDrag()
     this.element.removeEventListener("mousemove", this.mouseMoveHandler)
     document.removeEventListener("keydown", this.keydownHandler)
@@ -241,6 +247,7 @@ export default class extends Controller {
     this.playbackStarted = false
     this.userPaused = false
     this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     // Clear any stall watchdog from the previous connection so a
     // pending timer can't fire into the new MSE pipeline.
     this.clearStallWatchdog()
@@ -621,6 +628,13 @@ export default class extends Controller {
       }
       this.stopProgressWatchdog()
       this.showBufferingOverlay()
+      // Set a rebuffer deadline: if the rebuffer gate doesn't reach
+      // REBUFFER_AHEAD_SECONDS within REBUFFER_MAX_WAIT_MS, resume
+      // with whatever buffer we have.  Without this, a slow trickle
+      // of data keeps the gate waiting forever.
+      if (this.playbackStarted) {
+        this.rebufferDeadline = Date.now() + REBUFFER_MAX_WAIT_MS
+      }
       this.startStallWatchdog()
     }, 500)
   }
@@ -911,7 +925,9 @@ export default class extends Controller {
     // Also skip while a subtitle load holds playback (isSeeking) — the
     // hold's own finishSubtitlePlaybackHold resumes when ready.
     if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
-      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS) {
+      const rebufferDeadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
+      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || rebufferDeadlineReached) {
+        this.rebufferDeadline = null
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
       }
