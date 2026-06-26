@@ -37,7 +37,19 @@ class ContentStreamingService
     return ServiceResult.failure("RealDebrid API key not configured") unless @user.has_realdebrid_key?
 
     selected_stream = { resolve_url: resolve_url, filename: filename }
-    result = resolve_stream(selected_stream) || resolve_fallback_streams(resolve_url, imdb_id, type, season: season, episode: episode)
+    result = resolve_stream(selected_stream)
+
+    if result
+      Rails.logger.info("[ContentStreamingService] User-selected stream resolved: #{result[:streaming_url]} (filename: #{result[:filename]})")
+    else
+      Rails.logger.warn("[ContentStreamingService] User-selected stream failed to resolve, falling back: #{resolve_url}")
+      result = resolve_fallback_streams(resolve_url, imdb_id, type, season: season, episode: episode)
+      if result
+        Rails.logger.info("[ContentStreamingService] Fallback stream resolved: #{result[:streaming_url]} (filename: #{result[:filename]})")
+      else
+        Rails.logger.warn("[ContentStreamingService] No valid stream found via fallback")
+      end
+    end
 
     if result
       stream_result(result, imdb_id: imdb_id, type: type, season: season, episode: episode)
