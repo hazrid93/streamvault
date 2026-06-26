@@ -361,8 +361,15 @@ export default class extends Controller {
   // Stops the current session, starts a new one with the updated
   // start_seconds, and swaps the video source to the new playlist.
   async restartHlsSession(startSeconds) {
-    // Stop the old session (kills ffmpeg, cleans up segments).
-    await this.stopHlsSession()
+    // Pause the video immediately so it doesn't keep playing the
+    // old stream behind the seeking overlay.
+    this.videoTarget.pause()
+
+    // Fire the stop request without awaiting — it runs in parallel
+    // with the new session start.  The old ffmpeg process is killed
+    // server-side; we don't need to wait for that before starting
+    // the new transcode.
+    this.stopHlsSession()
 
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
@@ -416,13 +423,13 @@ export default class extends Controller {
       }
       this.videoTarget.addEventListener('playing', onPlaying, { once: true })
 
-      // Safety: hide overlay after 15s even if 'playing' never fires
+      // Safety: hide overlay after 30s even if 'playing' never fires
       setTimeout(() => {
         if (this.isSeeking) {
           this.isSeeking = false
           this.hideSeekingOverlay()
         }
-      }, 15000)
+      }, 30000)
     } catch (e) {
       console.warn('HLS seek: error', e)
       this.isSeeking = false
