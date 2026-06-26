@@ -15,16 +15,20 @@ const BUFFER_AHEAD_SECONDS = 10
 const BUFFER_AHEAD_MAX_WAIT_MS = 10000
 // After a stall, rebuild a deeper buffer before resuming so the next
 // upstream throughput dip is absorbed instead of immediately re-stalling.
-// Initial start keeps BUFFER_AHEAD_SECONDS (fast playback start, floored
-// by BUFFER_AHEAD_MAX_WAIT_MS); only the rebuffer gate uses this larger
-// value.  ~7.5 MB extra memory at 4 Mbps — negligible.
-const REBUFFER_AHEAD_SECONDS = 15
+// Kept small (4s) — the goal is just enough to avoid an instant re-stall,
+// not to build a huge buffer.  Large values cause the rebuffer gate to
+// wait too long on slow sources, and the stall watchdog fires before the
+// gate reaches the threshold, triggering unnecessary reconnects that
+// discard the buffer built so far ("Seeking..." cycle).
+const REBUFFER_AHEAD_SECONDS = 4
 // Stall watchdog timeout for rebuffer stalls (playback already started).
-// Shorter than the initial 60s — a rebuffer stall often means the fetch
-// has ended (server closed the response) and no data is arriving, so
-// reconnect sooner instead of leaving the user on "Buffering" for a
-// full minute.
-const REBUFFER_STALL_TIMEOUT_MS = 15000
+// Must be longer than the time to accumulate REBUFFER_AHEAD_SECONDS at a
+// reasonable source speed, so trickling data doesn't trigger a reconnect
+// before the rebuffer gate has a chance to resume.  30s is a good
+// balance: long enough for slow-but-alive sources, short enough that a
+// truly dead fetch (server closed the response) doesn't leave the user
+// staring at "Buffering" for a full minute.
+const REBUFFER_STALL_TIMEOUT_MS = 30000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
