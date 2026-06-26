@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_25_180000) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_26_092806) do
   create_table "episode_progresses", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.integer "duration_seconds", default: 0, null: false
@@ -43,6 +43,22 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_25_180000) do
     t.index ["user_id", "imdb_id"], name: "index_library_entries_on_user_id_and_imdb_id", unique: true
     t.index ["user_id"], name: "index_library_entries_on_user_id"
     t.index ["watch_status"], name: "index_library_entries_on_watch_status"
+  end
+
+  create_table "recommendations", force: :cascade do |t|
+    t.string "content_type"
+    t.datetime "created_at", null: false
+    t.string "imdb_id", null: false
+    t.integer "position", default: 0, null: false
+    t.string "poster_url"
+    t.string "title"
+    t.integer "tmdb_id", null: false
+    t.datetime "updated_at", null: false
+    t.integer "user_id", null: false
+    t.string "year"
+    t.index ["user_id", "position"], name: "index_recommendations_on_user_id_and_position"
+    t.index ["user_id", "tmdb_id"], name: "index_recommendations_on_user_id_and_tmdb_id", unique: true
+    t.index ["user_id"], name: "index_recommendations_on_user_id"
   end
 
   create_table "solid_cache_entries", force: :cascade do |t|
@@ -231,6 +247,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_25_180000) do
 
   add_foreign_key "episode_progresses", "users"
   add_foreign_key "library_entries", "users"
+  add_foreign_key "recommendations", "users"
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_claimed_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_failed_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

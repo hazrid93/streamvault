@@ -6,7 +6,9 @@ class HomeController < ApplicationController
   def index
     torrentio = TorrentioService.new(rd_api_key: current_user.realdebrid_api_key)
     @recommendations = ServiceResult.success(
-      Rails.cache.fetch(RefreshRecommendationsJob.cache_key(current_user.id), expires_in: 1.hour) { [] }
+      policy_scope(Recommendation).ordered.limit(20).map { |r|
+        { tmdb_id: r.tmdb_id, imdb_id: r.imdb_id, title: r.title, poster_url: r.poster_url, type: r.content_type, year: r.year }
+      }
     )
     @continue_watching = fetch_continue_watching
     @recently_added = policy_scope(LibraryEntry).where("created_at > ?", 2.weeks.ago).recently_added.limit(20)

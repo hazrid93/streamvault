@@ -33,13 +33,16 @@ class ProgressTrackingService
     show_imdb_val = type == "show" ? imdb_id : nil
     show_title_val = type == "show" ? resolved_title : nil
 
+    is_new_entry = false
     entry = user.watch_history_entries.find_or_initialize_by(
       content_type: content_type_val,
       imdb_id: imdb_id,
       show_imdb_id: show_imdb_val,
       season_number: season_val,
       episode_number: episode_val
-    )
+    ) do |e|
+      is_new_entry = true
+    end
     entry.assign_attributes(
       title: resolved_title,
       poster_url: resolved_poster,
@@ -59,9 +62,10 @@ class ProgressTrackingService
     # Update library entry watch status
     update_library_watch_status(user, imdb_id, type, progress_pct)
 
-    # Refresh recommendations in the background (debounced — only
-    # runs once per 10 minutes per user despite 5s progress saves).
-    RefreshRecommendationsJob.enqueue_debounced(user.id)
+    # Refresh recommendations only when the user starts watching
+    # new content (not on every 5s progress tick).  Debounced to max
+    # one job per 10 minutes per user.
+    RefreshRecommendationsJob.enqueue_debounced(user.id) if is_new_entry
 
     ServiceResult.success(entry)
   rescue ActiveRecord::RecordInvalid => e

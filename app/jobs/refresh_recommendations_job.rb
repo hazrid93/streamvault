@@ -1,39 +1,54 @@
+# frozen_string_literal: true
+
 class RefreshRecommendationsJob < ApplicationJob
   queue_as :default
 
-  # Fetches personalised recommendations from TMDB and caches them
-  # as JSON in Rails.cache. The home page reads from cache instead of
-  # making live TMDB API calls on every page load.
+  DEBOUNCE_TTL = 10.minutes
+
+  # Fetches personalised recommendations from TMDB and stores them
+  # in the recommendations table (no expiry — they persist until the
+  # next refresh replaces them).
   #
-  # Triggered after each progress save (every 5s during playback) —
-  # but debounced via a short lock so it only runs once per 10 minutes
-  # per user, not on every single progress tick.
+  # Triggered after each progress save, but debounced so only one job
+  # runs per DEBOUNCE_TTL per user.
   def perform(user_id)
     user = User.find_by(id: user_id)
     return unless user
     return if ENV["TMDB_READ_ACCESS_TOKEN"].blank?
 
     result = RecommendationService.recommendations(user)
-    recommendations = result.success? ? result.data : []
+    items = result.success? ? result.data : []
 
-    Rails.cache.write(self.class.cache_key(user_id), recommendations, expires_in: 1.hour)
+    replace_recommendations(user, items)
   rescue StandardError => e
     Rails.logger.error("[RefreshRecommendationsJob] error: #{e.message}")
   end
 
-  # Cache key for a user's recommendations.
-  def self.cache_key(user_id)
-    "recommendations:#{user_id}"
+  # Replace all of a user's recommendations in a single transaction.
+  # Deletes old rows and inserts new ones with sequential positions.
+  def self.replace_recommendations(user, items)
+    transaction do
+      user.recommendations.delete_all
+      items.each_with_index do |item, index|
+        user.recommendations.create!(
+          tmdb_id: item[:tmdb_id],
+          imdb_id: item[:imdb_id],
+          title: item[:title],
+          poster_url: item[:poster_url],
+          content_type: item[:type],
+          year: item[:year]&.to_s,
+          position: index
+        )
+      end
+    end
   end
 
   # Debounce: only enqueue if the job hasn't been enqueued recently.
-  # Called with a lock so rapid progress saves (every 5s) don't
-  # enqueue redundant jobs.
   def self.enqueue_debounced(user_id)
     lock_key = "recommendations:job:#{user_id}"
     return if Rails.cache.read(lock_key)
 
-    Rails.cache.write(lock_key, true, expires_in: 10.minutes)
+    Rails.cache.write(lock_key, true, expires_in: DEBOUNCE_TTL)
     perform_later(user_id)
   end
 end
