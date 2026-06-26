@@ -868,13 +868,14 @@ export default class extends Controller {
   onBufferUpdateEnd() {
     this.bufferAppending = false
     this.evictOldBuffer()
-    // Data arrived — the fetch is alive.  Restart the stall watchdog
-    // with the default timeout (60s) so the countdown begins fresh
-    // from this chunk.  If no more data arrives within 60s, the
-    // watchdog fires and reconnects.  Meanwhile, the rebuffer gate in
-    // maybeStartPlayback keeps the video paused until the buffer has
-    // refilled to REBUFFER_AHEAD_SECONDS.
-    this.startStallWatchdog()
+    // Data arrived — the fetch is alive.  Restart the stall watchdog.
+    // If the video is paused (rebuffering), use the shorter timeout so
+    // trickling data doesn't keep resetting the 60s timer indefinitely —
+    // the rebuffer gate may never reach REBUFFER_AHEAD_SECONDS on a
+    // slow source, and the shorter timeout triggers recovery sooner.
+    // If the video is playing, use the default 60s.
+    const stalled = this.videoTarget.paused && !this.userPaused && this.playbackStarted
+    this.startStallWatchdog(stalled ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
     this.flushBufferQueue()
@@ -1992,6 +1993,10 @@ export default class extends Controller {
     console.warn("[SEEK DEBUG] showSeekingOverlay called", { message, isSeeking: this.isSeeking })
     if (this.hasSeekingOverlayMessageTarget) this.seekingOverlayMessageTarget.textContent = message
     if (this.isSeeking) {
+      // Seeking/error overlays ARE interactive (e.g. onVideoError
+      // adds a click-to-retry handler). Remove pointer-events-none
+      // that showBufferingOverlay may have set.
+      this.seekingOverlayTarget.classList.remove("pointer-events-none")
       this.seekingOverlayTarget.classList.remove("hidden")
     }
   }
@@ -2013,6 +2018,10 @@ export default class extends Controller {
       currentTime: this.videoTarget.currentTime
     })
     if (this.hasSeekingOverlayMessageTarget) this.seekingOverlayMessageTarget.textContent = "Buffering..."
+    // pointer-events-none so the user can still seek/click while the
+    // buffering spinner is visible — the overlay is visual feedback,
+    // not a modal.
+    this.seekingOverlayTarget.classList.add("pointer-events-none")
     this.seekingOverlayTarget.classList.remove("hidden")
   }
 
@@ -2020,6 +2029,7 @@ export default class extends Controller {
     if (this.subtitlePlaybackHoldToken !== null) return
     this.isSeeking = false
     this.seekingOverlayTarget.classList.add("hidden")
+    this.seekingOverlayTarget.classList.remove("pointer-events-none")
 
     if (this.pendingSeekSeconds !== null) {
       const target = this.pendingSeekSeconds
