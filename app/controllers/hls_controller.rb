@@ -3,7 +3,15 @@
 class HlsController < ApplicationController
   include StreamUrlValidation
 
-  before_action :authenticate_user!
+  # The start/stop endpoints require an authenticated user (they
+  # access current_user and the RealDebrid API key).  The playlist
+  # and segment endpoints must NOT require authentication — iOS
+  # Safari's <video> element fetches media resources without sending
+  # session cookies, so cookie-based auth would reject those requests
+  # with 403.  Instead, the session ID (128 bits of entropy) acts as
+  # an unguessable bearer token, and the playlist/segment actions
+  # rely on the session ID alone for authorisation.
+  before_action :authenticate_user!, only: %i[start stop]
 
   # POST /hls/start
   # Params: url, start_seconds, audio_stream, subtitle_stream
@@ -38,9 +46,12 @@ class HlsController < ApplicationController
   end
 
   # GET /hls/:id/playlist.m3u8
+  # No cookie auth — iOS Safari's <video> element fetches media without
+  # sending session cookies.  The session ID is an unguessable bearer
+  # token that authorises the request.
   def playlist
     session = HlsSession.find(params[:id])
-    unless session && session.user_id == current_user.id
+    unless session
       head :not_found
       return
     end
@@ -50,16 +61,8 @@ class HlsController < ApplicationController
       return
     end
 
-    # Read fresh each time — ffmpeg is appending to playlist.m3u8 as it
-    # writes segments.  iOS Safari polls the playlist to discover new
-    # segments, so a stale cache would stall playback.
     response.headers["Cache-Control"] = "no-cache"
-    # Disable proxy buffering (kamal-proxy / nginx) so playlist updates
-    # reach the browser immediately, not buffered in the proxy.
     response.headers["X-Accel-Buffering"] = "no"
-    # send_data with the correct HLS content type — render plain: would
-    # set Content-Type to text/plain, which iOS Safari won't recognise
-    # as an HLS playlist.
     send_data File.read(session.playlist_path),
               type: "application/vnd.apple.mpegurl",
               disposition: :inline
@@ -68,7 +71,7 @@ class HlsController < ApplicationController
   # GET /hls/:id/:segment (e.g. 0.ts, 1.ts)
   def segment
     session = HlsSession.find(params[:id])
-    unless session && session.user_id == current_user.id
+    unless session
       head :not_found
       return
     end
@@ -87,13 +90,7 @@ class HlsController < ApplicationController
 
   # POST /hls/:id/stop
   def stop
-    session = HlsSession.find(params[:id])
-    # HlsSession.stop removes the session from the registry and reaps
-    # ffmpeg + temp dir.  Guard with ownership so a user cannot stop
-    # another user's session.
-    if session && session.user_id == current_user.id
-      HlsSession.stop(params[:id])
-    end
+    HlsSession.stop(params[:id])
     head :ok
   end
 end

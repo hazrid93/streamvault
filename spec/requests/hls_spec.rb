@@ -73,34 +73,16 @@ RSpec.describe "HLS streaming", type: :request do
         expect(response.body).to start_with("#EXTM3U")
       end
 
+      it "works without authentication (iOS media requests don't send cookies)" do
+        # Sign out — iOS Safari's <video> element doesn't send session cookies
+        sign_out user
+        get "/hls/#{session_id}/playlist.m3u8"
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to start_with("#EXTM3U")
+      end
+
       it "returns 404 when playlist file is missing" do
         File.delete(File.join(segment_dir, "playlist.m3u8"))
-        get "/hls/#{session_id}/playlist.m3u8"
-        expect(response).to have_http_status(:not_found)
-      end
-    end
-
-    context "with another user's session" do
-      let(:other_user) { create(:user, email: "other@test.com") }
-      let(:session_id) { SecureRandom.hex(16) }
-      let(:segment_dir) { Rails.root.join("tmp", "hls", session_id).to_s }
-
-      before do
-        FileUtils.mkdir_p(segment_dir)
-        File.write(File.join(segment_dir, "playlist.m3u8"), "#EXTM3U\n")
-        File.write(File.join(segment_dir, "0.ts"), "dummy")
-
-        session = HlsSession.send(:new,
-          id: session_id, pid: 99999, segment_dir: segment_dir, user_id: other_user.id)
-        HlsSession.instance_variable_get(:@sessions)[session_id] = session
-      end
-
-      after do
-        FileUtils.rm_rf(segment_dir)
-        HlsSession.instance_variable_get(:@sessions).delete(session_id)
-      end
-
-      it "returns 404" do
         get "/hls/#{session_id}/playlist.m3u8"
         expect(response).to have_http_status(:not_found)
       end
@@ -130,6 +112,12 @@ RSpec.describe "HLS streaming", type: :request do
       get "/hls/#{session_id}/0.ts"
       expect(response).to have_http_status(:ok)
       expect(response.content_type).to include("video/mp2t")
+    end
+
+    it "works without authentication (iOS media requests don't send cookies)" do
+      sign_out user
+      get "/hls/#{session_id}/0.ts"
+      expect(response).to have_http_status(:ok)
     end
 
     it "returns 404 for non-existent segment" do
