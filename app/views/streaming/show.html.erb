@@ -19,7 +19,8 @@
      data-video-player-resume-url-value="<%= resume_streaming_index_path %>">
 
   <%# Back button %>
-  <div class="absolute top-4 left-4 z-50 opacity-100 transition-opacity duration-500" data-video-player-target="backButton">
+  <div class="absolute top-4 left-4 z-50 opacity-100 transition-opacity duration-500" data-video-player-target="backButton"
+       style="top: calc(env(safe-area-inset-top, 0px) + 1rem); left: calc(env(safe-area-inset-left, 0px) + 1rem);">
     <%= link_to content_path(type: @type, imdb_id: @imdb_id, season: @season),
           class: "flex items-center gap-2 px-3 py-2 bg-black/60 rounded-lg text-white hover:bg-black/80 transition-colors",
           data: { action: "click->video-player#navigateBack" } do %>
@@ -29,7 +30,8 @@
   </div>
 
   <%# Source info (top right, auto-hides) %>
-  <div data-video-player-target="sourceInfo" class="hidden absolute top-4 right-4 z-10 max-w-lg opacity-100 transition-opacity duration-500">
+  <div data-video-player-target="sourceInfo" class="hidden absolute top-4 right-4 z-10 max-w-lg opacity-100 transition-opacity duration-500"
+       style="top: calc(env(safe-area-inset-top, 0px) + 1rem); right: calc(env(safe-area-inset-right, 0px) + 1rem);">
     <button data-action="click->video-player#toggleSourceInfo" data-video-player-target="sourceToggle" class="px-2 py-1 bg-black/60 rounded text-xs text-sv-text-muted hover:text-white transition-colors">
       Stream info
     </button>
@@ -65,7 +67,8 @@
 
   <%# Custom controls bar %>
   <div data-video-player-target="controls"
-       class="absolute bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-16 pb-3 px-4 opacity-100 transition-opacity duration-500">
+       class="absolute bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-16 pb-3 px-4 opacity-100 transition-opacity duration-500"
+       style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem); padding-left: calc(env(safe-area-inset-left, 0px) + 1rem); padding-right: calc(env(safe-area-inset-right, 0px) + 1rem);">
 
     <%# Seek bar %>
     <div data-video-player-target="seekBar"

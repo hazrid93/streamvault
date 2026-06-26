@@ -1602,10 +1602,20 @@ export default class extends Controller {
   // ── Fullscreen ────────────────────────────────────────────────────
 
   toggleFullscreen() {
+    // Standard Fullscreen API — works on desktop and Android.
     if (document.fullscreenElement) {
       document.exitFullscreen()
-    } else {
+    } else if (this.element.requestFullscreen) {
       this.element.requestFullscreen()
+    } else {
+      // iOS Safari (including PWA standalone mode) doesn't support
+      // the Fullscreen API on arbitrary elements.  Use the video
+      // element's native webkitEnterFullscreen instead — it enters
+      // iOS's built-in fullscreen video player.
+      const video = this.videoTarget
+      if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen()
+      }
     }
   }
 

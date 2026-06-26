@@ -191,7 +191,12 @@ body {
   right: 0;
   bottom: 0;
   width: 100vw;
+  /* Use dynamic viewport height so the player fills the screen in
+     iOS PWA standalone mode and Safari's dynamic toolbar doesn't
+     push controls below the visible area.  The fallback chain
+     covers older browsers that don't support dvh/svh. */
   height: 100vh;
+  height: 100dvh;
   z-index: 9999;
   background-color: black;
   display: flex;
