@@ -830,14 +830,48 @@ export default class extends Controller {
   // restartPlaybackAt and setupMseSource already clear it, and
   // restoring it to true afterwards would permanently block all
   // further recovery if the reconnect fetch produces no data (the
-  // only on-success clearer is the firstChunk block, which never
-  // runs on a dead source).  Let firstChunk clear the counter when
-  // data actually arrives; until then, a failed reconnect must remain
-  // recoverable.
   reconnectFromCurrentPosition() {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
     const savedAttempts = this.streamRecoveryAttempts
-    this.restartPlaybackAt(targetSeconds)
+
+    // Don't show the "Seeking..." overlay for automatic recovery —
+    // it sets isSeeking=true which blocks the seek bar and shows a
+    // jarring "Seeking" message for what is actually a rebuffer.
+    // Instead, keep the existing "Buffering..." overlay (already
+    // shown by showBufferingOverlay, which has pointer-events-none).
+    // We only set isSeeking + show "Seeking..." for explicit user
+    // seeks (performSeek → restartPlaybackAt).
+    this.streamRecoveryAttempts = 0
+    this.streamRecoveryActive = false
+    this.startSecondsValue = targetSeconds
+    this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+
+    const url = new URL(this.streamingUrlValue, window.location.origin)
+    if (targetSeconds > 0) {
+      url.searchParams.set("start_seconds", targetSeconds)
+    } else {
+      url.searchParams.delete("start_seconds")
+    }
+
+    if (this.selectedAudioStream) {
+      url.searchParams.set("audio_stream", this.selectedAudioStream)
+    } else {
+      url.searchParams.delete("audio_stream")
+    }
+
+    if (this.burnedSubtitleSelected()) {
+      url.searchParams.set("subtitle_stream", this.selectedSubtitleStream)
+    } else {
+      url.searchParams.delete("subtitle_stream")
+    }
+
+    const nextSrc = url.pathname + url.search
+    this.streamingUrlValue = nextSrc
+    this.element.dataset.videoPlayerStreamingUrlValue = nextSrc
+
+    this.setupMseSource(nextSrc)
+
+    this.clearSubtitleCues()
     this.streamRecoveryAttempts = savedAttempts
   }
 
