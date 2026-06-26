@@ -12,6 +12,7 @@ const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const BUFFER_AHEAD_SECONDS = 10
+const BUFFER_AHEAD_MAX_WAIT_MS = 10000
 // After a stall, rebuild a deeper buffer before resuming so the next
 // upstream throughput dip is absorbed instead of immediately re-stalling.
 // Initial start keeps BUFFER_AHEAD_SECONDS (fast playback start, floored
