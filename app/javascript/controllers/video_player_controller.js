@@ -19,11 +19,12 @@ const BUFFER_AHEAD_MAX_WAIT_MS = 10000
 // by BUFFER_AHEAD_MAX_WAIT_MS); only the rebuffer gate uses this larger
 // value.  ~7.5 MB extra memory at 4 Mbps — negligible.
 const REBUFFER_AHEAD_SECONDS = 15
-// Max wait before resuming from a rebuffer with whatever we have.
-// Without this, a slow trickle of data keeps the rebuffer gate
-// waiting forever for REBUFFER_AHEAD_SECONDS while the user stares
-// at "Buffering...".
-const REBUFFER_MAX_WAIT_MS = 15000
+// Stall watchdog timeout for rebuffer stalls (playback already started).
+// Shorter than the initial 60s — a rebuffer stall often means the fetch
+// has ended (server closed the response) and no data is arriving, so
+// reconnect sooner instead of leaving the user on "Buffering" for a
+// full minute.
+const REBUFFER_STALL_TIMEOUT_MS = 15000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -96,7 +97,6 @@ export default class extends Controller {
     // rebuffer gate in maybeStartPlayback must never auto-resume a
     // user pause — only a rebuffer pause (buffer ran dry).
     this.userPaused = false
-    this.rebufferDeadline = null
     // True once navigateBack has saved progress and aborted the fetch;
     // suppresses the duplicate save in the beforeunload handler.
     this.navigatingAway = false
@@ -164,7 +164,6 @@ export default class extends Controller {
     this.stopProgressWatchdog()
     this.playbackStarted = false
     this.bufferAheadDeadline = null
-    this.rebufferDeadline = null
     this.cancelSeekDrag()
     this.element.removeEventListener("mousemove", this.mouseMoveHandler)
     document.removeEventListener("keydown", this.keydownHandler)
@@ -248,7 +247,6 @@ export default class extends Controller {
     this.playbackStarted = false
     this.userPaused = false
     this.bufferAheadDeadline = null
-    this.rebufferDeadline = null
     // Clear any stall watchdog from the previous connection so a
     // pending timer can't fire into the new MSE pipeline.
     this.clearStallWatchdog()
@@ -629,14 +627,11 @@ export default class extends Controller {
       }
       this.stopProgressWatchdog()
       this.showBufferingOverlay()
-      // Set a rebuffer deadline: if the rebuffer gate doesn't reach
-      // REBUFFER_AHEAD_SECONDS within REBUFFER_MAX_WAIT_MS, resume
-      // with whatever buffer we have.  Without this, a slow trickle
-      // of data keeps the gate waiting forever.
-      if (this.playbackStarted) {
-        this.rebufferDeadline = Date.now() + REBUFFER_MAX_WAIT_MS
-      }
-      this.startStallWatchdog()
+      // After a stall with playback already started, use a shorter
+      // stall watchdog timeout — the 60s default is for initial
+      // connection; a rebuffer stall means the fetch may have ended
+      // and no data is arriving, so reconnect sooner.
+      this.startStallWatchdog(this.playbackStarted ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     }, 500)
   }
 
@@ -655,7 +650,7 @@ export default class extends Controller {
     return false
   }
 
-  startStallWatchdog() {
+  startStallWatchdog(timeoutMs = STREAM_STALL_TIMEOUT_MS) {
     this.clearStallWatchdog()
     this.stallWatchdogTimer = setTimeout(() => {
       this.stallWatchdogTimer = null
@@ -670,7 +665,7 @@ export default class extends Controller {
         return
       }
       this.handleStreamStall()
-    }, STREAM_STALL_TIMEOUT_MS)
+    }, timeoutMs)
   }
 
   clearStallWatchdog() {
@@ -874,12 +869,11 @@ export default class extends Controller {
     this.bufferAppending = false
     this.evictOldBuffer()
     // Data arrived — the fetch is alive.  Restart the stall watchdog
-    // (rather than leaving the old one running) so the 60s countdown
-    // begins fresh from this chunk.  If no more data arrives within
-    // 60s, the watchdog fires and reconnects.  Meanwhile, the rebuffer
-    // gate in maybeStartPlayback keeps the video paused until the
-    // buffer has refilled (BUFFER_AHEAD_SECONDS on initial start,
-    // REBUFFER_AHEAD_SECONDS after a stall).
+    // with the default timeout (60s) so the countdown begins fresh
+    // from this chunk.  If no more data arrives within 60s, the
+    // watchdog fires and reconnects.  Meanwhile, the rebuffer gate in
+    // maybeStartPlayback keeps the video paused until the buffer has
+    // refilled to REBUFFER_AHEAD_SECONDS.
     this.startStallWatchdog()
     this.resetProgressBaseline()
     this.maybeStartPlayback()
@@ -926,9 +920,7 @@ export default class extends Controller {
     // Also skip while a subtitle load holds playback (isSeeking) — the
     // hold's own finishSubtitlePlaybackHold resumes when ready.
     if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
-      const rebufferDeadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
-      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || rebufferDeadlineReached) {
-        this.rebufferDeadline = null
+      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS) {
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
       }
