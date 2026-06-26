@@ -19,28 +19,9 @@ class RefreshRecommendationsJob < ApplicationJob
     result = RecommendationService.recommendations(user)
     items = result.success? ? result.data : []
 
-    replace_recommendations(user, items)
+    Recommendation.replace_recommendations(user, items)
   rescue StandardError => e
     Rails.logger.error("[RefreshRecommendationsJob] error: #{e.message}")
-  end
-
-  # Replace all of a user's recommendations in a single transaction.
-  # Deletes old rows and inserts new ones with sequential positions.
-  def self.replace_recommendations(user, items)
-    transaction do
-      user.recommendations.delete_all
-      items.each_with_index do |item, index|
-        user.recommendations.create!(
-          tmdb_id: item[:tmdb_id],
-          imdb_id: item[:imdb_id],
-          title: item[:title],
-          poster_url: item[:poster_url],
-          content_type: item[:type],
-          year: item[:year]&.to_s,
-          position: index
-        )
-      end
-    end
   end
 
   # Debounce: only enqueue if the job hasn't been enqueued recently.
