@@ -270,6 +270,15 @@ export default class extends Controller {
     return /iPhone|iPod/.test(ua) && !/iPad/.test(ua)
   }
 
+  // True when using native HLS playback (iOS).  All MSE-specific
+  // machinery (stall watchdog, progress watchdog, reconnect, buffer
+  // management) must be skipped on this path — MediaSource doesn't
+  // exist on iPhone Safari, and the native HLS player handles its
+  // own buffering and recovery.
+  isHls() {
+    return !!this.hlsSessionId
+  }
+
   // iOS-only fallback: start a server-side HLS transcode and hand the
   // playlist to Safari's native player.  iOS Safari can't play the
   // chunked fMP4 stream the MSE pipeline produces, so ffmpeg segments
@@ -310,7 +319,28 @@ export default class extends Controller {
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
       const p = this.videoTarget.play()
-      if (p?.catch) p.catch(() => {})
+      if (p?.catch) p.catch(() => {
+        // iOS autoplay policy may block play() when not in a user
+        // gesture context (the async fetch broke the gesture chain).
+        // Show a tap-to-play overlay — the user's tap provides the
+        // gesture needed to start playback.
+        if (this.hasStartupOverlayTarget) {
+          this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
+          this.startupOverlayTarget.setAttribute("aria-hidden", "false")
+          const spinner = this.startupOverlayTarget.querySelector(".animate-spin")
+          if (spinner) spinner.style.display = "none"
+          const label = this.startupOverlayTarget.querySelector("span.text-white")
+          if (label) label.textContent = "Tap to play"
+          const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
+          if (sub) sub.textContent = ""
+          const onTap = () => {
+            this.videoTarget.play().catch(() => {})
+            this.hideStartupOverlay()
+            this.startupOverlayTarget.removeEventListener("click", onTap)
+          }
+          this.startupOverlayTarget.addEventListener("click", onTap)
+        }
+      })
     } catch (e) {
       console.warn('HLS: start error', e)
     }
@@ -401,6 +431,11 @@ export default class extends Controller {
   // fires and the watchdog never triggers.
 
   onVideoWaiting() {
+    // In HLS mode, iOS Safari manages its own buffering.  The MSE
+    // stall watchdog would try to reconnect via setupMseSource — which
+    // crashes on iPhone Safari (no MediaSource).  Let the native HLS
+    // player handle stalls.
+    if (this.isHls()) return
     // Browsers fire "waiting" even when buffered data remains ahead —
     // the media element preempts a potential underrun.  Only show the
     // overlay if the buffer is actually empty at the current position.
@@ -492,6 +527,7 @@ export default class extends Controller {
   // trip it.
 
   startProgressWatchdog() {
+    if (this.isHls()) return  // iOS HLS manages its own playback
     if (this.progressWatchdogArmed) return
     this.lastProgressPosition = this.videoTarget.currentTime
     this.lastProgressTime = Date.now()
@@ -556,6 +592,7 @@ export default class extends Controller {
   // current fetch and reconnects from the current playback position,
   // up to STREAM_MAX_RECOVERY_ATTEMPTS times.
   handleStreamStall() {
+    if (this.isHls()) return  // iOS HLS handles its own recovery
     if (this.streamRecoveryActive) return
     if (this.streamRecoveryAttempts >= STREAM_MAX_RECOVERY_ATTEMPTS) {
       console.warn("Stream recovery limit reached — giving up.")
@@ -1607,6 +1644,25 @@ export default class extends Controller {
   }
 
   restartPlaybackAt(targetSeconds) {
+    // In HLS mode (iOS), use native seeking — the video element
+    // handles it directly.  No need to restart ffmpeg or touch MSE
+    // (which doesn't exist on iPhone Safari).
+    if (this.isHls()) {
+      this.isSeeking = true
+      this.showSeekingOverlay()
+      this.startSecondsValue = targetSeconds
+      this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+      this.videoTarget.currentTime = targetSeconds
+      this.clearSubtitleCues()
+      const unseek = () => {
+        this.isSeeking = false
+        this.hideSeekingOverlay()
+        this.videoTarget.removeEventListener("seeked", unseek)
+      }
+      this.videoTarget.addEventListener("seeked", unseek, { once: true })
+      return
+    }
+
     this.isSeeking = true
     console.warn("[SEEK DEBUG] restartPlaybackAt called", {
       targetSeconds,
