@@ -120,6 +120,8 @@ export default class extends Controller {
     this.videoTarget.addEventListener("canplay", this.videoReadyHandler)
     this.videoEndedHandler = () => this.onVideoEnded()
     this.videoTarget.addEventListener("ended", this.videoEndedHandler)
+    this.videoErrorHandler = (e) => this.onVideoError(e)
+    this.videoTarget.addEventListener("error", this.videoErrorHandler)
 
     // Resume: transcode streams already start at the resume position
     // via ffmpeg -ss, so no client-side seek needed.
@@ -169,6 +171,7 @@ export default class extends Controller {
     this.videoTarget.removeEventListener("playing", this.videoReadyHandler)
     this.videoTarget.removeEventListener("canplay", this.videoReadyHandler)
     this.videoTarget.removeEventListener("ended", this.videoEndedHandler)
+    this.videoTarget.removeEventListener("error", this.videoErrorHandler)
     window.removeEventListener("beforeunload", this.beforeUnloadHandler)
     this.removeTextSubtitleTrack()
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
@@ -319,11 +322,12 @@ export default class extends Controller {
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
       const p = this.videoTarget.play()
-      if (p?.catch) p.catch(() => {
+      if (p?.catch) p.catch((err) => {
         // iOS autoplay policy may block play() when not in a user
         // gesture context (the async fetch broke the gesture chain).
         // Show a tap-to-play overlay — the user's tap provides the
         // gesture needed to start playback.
+        console.warn('HLS: autoplay blocked, showing tap-to-play', err)
         if (this.hasStartupOverlayTarget) {
           this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
           this.startupOverlayTarget.setAttribute("aria-hidden", "false")
@@ -333,10 +337,17 @@ export default class extends Controller {
           if (label) label.textContent = "Tap to play"
           const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
           if (sub) sub.textContent = ""
-          const onTap = () => {
-            this.videoTarget.play().catch(() => {})
-            this.hideStartupOverlay()
-            this.startupOverlayTarget.removeEventListener("click", onTap)
+          const onTap = (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            this.videoTarget.play().then(() => {
+              this.hideStartupOverlay()
+              this.startupOverlayTarget.removeEventListener("click", onTap)
+            }).catch((playErr) => {
+              console.warn('HLS: play() failed after tap, will retry', playErr)
+              if (label) label.textContent = "Tap to retry"
+              // Keep the listener — user can tap again
+            })
           }
           this.startupOverlayTarget.addEventListener("click", onTap)
         }
@@ -837,6 +848,42 @@ export default class extends Controller {
     if (this.resumeUrlValue) {
       const url = `${this.resumeUrlValue}?type=show&show_imdb_id=${encodeURIComponent(this.imdbIdValue)}`
       window.location.href = url
+    }
+  }
+
+  onVideoError(e) {
+    const video = this.videoTarget
+    const err = video.error
+    if (!err) return
+
+    console.error("Video error:", {
+      code: err.code,
+      message: err.message,
+      src: video.src,
+      currentSrc: video.currentSrc,
+      readyState: video.readyState,
+      networkState: video.networkState,
+      isHls: this.isHls()
+    })
+
+    if (this.isHls()) {
+      // In HLS mode, a media error usually means the playlist or
+      // segments can't be loaded/decoded.  Show an error message
+      // instead of leaving the user on a black screen.
+      this.showSeekingOverlay("Stream error — tap to retry")
+      const overlay = this.seekingOverlayTarget
+      const onRetry = () => {
+        overlay.removeEventListener("click", onRetry)
+        this.hideSeekingOverlay()
+        // Reload the playlist
+        if (this.hlsSessionId) {
+          video.load()
+          video.play().catch(() => {})
+        } else {
+          this.startHlsPlayback()
+        }
+      }
+      overlay.addEventListener("click", onRetry)
     }
   }
 
