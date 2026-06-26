@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_26_092806) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_26_102104) do
   create_table "episode_progresses", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.integer "duration_seconds", default: 0, null: false
@@ -25,6 +25,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_26_092806) do
     t.index ["user_id", "show_imdb_id", "season_number", "episode_number"], name: "idx_episode_progresses_unique", unique: true
     t.index ["user_id", "show_imdb_id"], name: "index_episode_progresses_on_user_id_and_show_imdb_id"
     t.index ["user_id"], name: "index_episode_progresses_on_user_id"
+  end
+
+  create_table "hls_sessions", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.integer "pid"
+    t.string "segment_dir", null: false
+    t.string "session_id", null: false
+    t.datetime "updated_at", null: false
+    t.integer "user_id", null: false
+    t.index ["session_id"], name: "index_hls_sessions_on_session_id", unique: true
+    t.index ["user_id"], name: "index_hls_sessions_on_user_id"
   end
 
   create_table "library_entries", force: :cascade do |t|
@@ -246,6 +257,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_26_092806) do
   end
 
   add_foreign_key "episode_progresses", "users"
+  add_foreign_key "hls_sessions", "users"
   add_foreign_key "library_entries", "users"
   add_foreign_key "recommendations", "users"
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

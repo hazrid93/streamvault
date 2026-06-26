@@ -56,14 +56,17 @@ RSpec.describe "HLS streaming", type: :request do
         File.write(File.join(segment_dir, "playlist.m3u8"), playlist_content)
         File.write(File.join(segment_dir, "0.ts"), "dummy_ts_data")
 
-        session = HlsSession.send(:new,
-          id: session_id, pid: 99999, segment_dir: segment_dir, user_id: user.id)
-        HlsSession.instance_variable_get(:@sessions)[session_id] = session
+        HlsSessionRecord.create!(
+          user: user,
+          session_id: session_id,
+          segment_dir: segment_dir,
+          pid: 99999
+        )
       end
 
       after do
         FileUtils.rm_rf(segment_dir)
-        HlsSession.instance_variable_get(:@sessions).delete(session_id)
+        HlsSessionRecord.find_by(session_id: session_id)&.destroy
       end
 
       it "returns the playlist with correct Content-Type" do
@@ -74,7 +77,6 @@ RSpec.describe "HLS streaming", type: :request do
       end
 
       it "works without authentication (iOS media requests don't send cookies)" do
-        # Sign out — iOS Safari's <video> element doesn't send session cookies
         sign_out user
         get "/hls/#{session_id}/playlist.m3u8"
         expect(response).to have_http_status(:ok)
@@ -98,14 +100,17 @@ RSpec.describe "HLS streaming", type: :request do
       File.write(File.join(segment_dir, "playlist.m3u8"), "#EXTM3U\n")
       File.write(File.join(segment_dir, "0.ts"), "dummy_ts_segment_data")
 
-      session = HlsSession.send(:new,
-        id: session_id, pid: 99999, segment_dir: segment_dir, user_id: user.id)
-      HlsSession.instance_variable_get(:@sessions)[session_id] = session
+      HlsSessionRecord.create!(
+        user: user,
+        session_id: session_id,
+        segment_dir: segment_dir,
+        pid: 99999
+      )
     end
 
     after do
       FileUtils.rm_rf(segment_dir)
-      HlsSession.instance_variable_get(:@sessions).delete(session_id)
+      HlsSessionRecord.find_by(session_id: session_id)&.destroy
     end
 
     it "returns the segment with correct Content-Type" do
@@ -134,15 +139,18 @@ RSpec.describe "HLS streaming", type: :request do
       FileUtils.mkdir_p(segment_dir)
       File.write(File.join(segment_dir, "playlist.m3u8"), "#EXTM3U\n")
 
-      session = HlsSession.send(:new,
-        id: session_id, pid: 99999, segment_dir: segment_dir, user_id: user.id)
-      HlsSession.instance_variable_get(:@sessions)[session_id] = session
+      HlsSessionRecord.create!(
+        user: user,
+        session_id: session_id,
+        segment_dir: segment_dir,
+        pid: 99999
+      )
     end
 
     it "returns ok and removes the session" do
       post "/hls/#{session_id}/stop"
       expect(response).to have_http_status(:ok)
-      expect(HlsSession.find(session_id)).to be_nil
+      expect(HlsSessionRecord.find_by(session_id: session_id)).to be_nil
     end
   end
 end
