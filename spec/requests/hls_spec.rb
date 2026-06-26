@@ -83,10 +83,10 @@ RSpec.describe "HLS streaming", type: :request do
         expect(response.body).to start_with("#EXTM3U")
       end
 
-      it "returns 404 when playlist file is missing" do
+      it "returns 202 when playlist file is not ready yet" do
         File.delete(File.join(segment_dir, "playlist.m3u8"))
         get "/hls/#{session_id}/playlist.m3u8"
-        expect(response).to have_http_status(:not_found)
+        expect(response).to have_http_status(:accepted)
       end
     end
   end

@@ -56,8 +56,18 @@ class HlsController < ApplicationController
       return
     end
 
+    # If ffmpeg failed before producing any segments, return a
+    # descriptive error so the client can stop polling and show it.
+    error = HlsSession.error(params[:id])
+    if error
+      render json: { error: error }, status: :failed_dependency
+      return
+    end
+
+    # Playlist not ready yet — ffmpeg is still transcoding the first
+    # segment.  Return 202 so the client knows to keep polling.
     unless File.exist?(session.playlist_path)
-      head :not_found
+      head :accepted
       return
     end
 

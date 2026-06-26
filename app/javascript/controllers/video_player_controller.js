@@ -318,6 +318,23 @@ export default class extends Controller {
       const data = await response.json()
       this.hlsSessionId = data.session_id
 
+      // Poll the playlist URL until ffmpeg has produced the first
+      // segment (200) or failed (424).  The server returns 202
+      // (Accepted) while the playlist isn't ready yet.  This avoids
+      // setting a video src that points to a non-existent playlist,
+      // which would cause iOS Safari to fail silently.
+      const playlistReady = await this.waitForPlaylist(data.playlist_url)
+      if (!playlistReady) {
+        console.warn('HLS: playlist not ready or ffmpeg failed')
+        if (this.hasStartupOverlayTarget) {
+          const label = this.startupOverlayTarget.querySelector("span.text-white")
+          const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
+          if (label) label.textContent = "Stream failed to start"
+          if (sub) sub.textContent = "Try going back and selecting another stream"
+        }
+        return
+      }
+
       // Native HLS playback — iOS Safari handles the playlist natively.
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
@@ -326,26 +343,36 @@ export default class extends Controller {
         // iOS autoplay policy may block play() when not in a user
         // gesture context (the async fetch broke the gesture chain).
         // Show a tap-to-play overlay — the user's tap provides the
-        // gesture needed to start playback.
+        // gesture needed to start playback.  Keep the spinner visible
+        // so the user sees something is loading, and show the spinner
+        // again after the tap while play() resolves.
         console.warn('HLS: autoplay blocked, showing tap-to-play', err)
         if (this.hasStartupOverlayTarget) {
           this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
           this.startupOverlayTarget.setAttribute("aria-hidden", "false")
           const spinner = this.startupOverlayTarget.querySelector(".animate-spin")
-          if (spinner) spinner.style.display = "none"
           const label = this.startupOverlayTarget.querySelector("span.text-white")
-          if (label) label.textContent = "Tap to play"
           const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
-          if (sub) sub.textContent = ""
+          if (label) label.textContent = "Tap to play"
+          if (sub) sub.textContent = "Tap anywhere to start"
           const onTap = (e) => {
             e.preventDefault()
             e.stopPropagation()
+            // Show a loading spinner immediately so the user sees
+            // feedback — play() may take a moment to resolve.
+            if (spinner) spinner.style.display = ""
+            if (label) label.textContent = "Starting playback"
+            if (sub) sub.textContent = "Loading stream..."
             this.videoTarget.play().then(() => {
-              this.hideStartupOverlay()
+              // Don't hide the overlay here — onVideoReady will hide
+              // it once the video is actually playing.  This covers
+              // the gap between play() resolving and the first frame.
               this.startupOverlayTarget.removeEventListener("click", onTap)
             }).catch((playErr) => {
               console.warn('HLS: play() failed after tap, will retry', playErr)
+              if (spinner) spinner.style.display = "none"
               if (label) label.textContent = "Tap to retry"
+              if (sub) sub.textContent = "Tap anywhere to try again"
               // Keep the listener — user can tap again
             })
           }
@@ -355,6 +382,36 @@ export default class extends Controller {
     } catch (e) {
       console.warn('HLS: start error', e)
     }
+  }
+
+  // Poll the HLS playlist URL until it's ready (200), ffmpeg fails
+  // (424), or a timeout is reached.  Returns true if the playlist is
+  // ready, false otherwise.  Uses HEAD requests to avoid downloading
+  // the playlist body on every poll — iOS Safari will fetch it
+  // properly when the video src is set.
+  async waitForPlaylist(playlistUrl) {
+    const maxAttempts = 150  // 150 × 200ms = 30s max wait
+    const pollInterval = 200
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const res = await fetch(playlistUrl, { method: "HEAD" })
+        if (res.ok) return true
+        if (res.status === 424) {
+          // ffmpeg failed — extract error message if available
+          try {
+            const body = await res.json()
+            console.warn('HLS: ffmpeg failed:', body.error)
+          } catch {}
+          return false
+        }
+        // 202 (Accepted) — playlist not ready yet, keep polling
+      } catch {
+ // network error — keep polling
+      }
+      await new Promise(resolve => setTimeout(resolve, pollInterval))
+    }
+    console.warn('HLS: playlist poll timed out after', maxAttempts * pollInterval / 1000, 's')
+    return false
   }
 
   // Restart the HLS transcode from a new position (seek).
@@ -405,6 +462,16 @@ export default class extends Controller {
 
       const data = await response.json()
       this.hlsSessionId = data.session_id
+
+      // Wait for the playlist to be ready before swapping the video
+      // source — same as initial playback.
+      const playlistReady = await this.waitForPlaylist(data.playlist_url)
+      if (!playlistReady) {
+        console.warn('HLS seek: playlist not ready or ffmpeg failed')
+        this.isSeeking = false
+        this.hideSeekingOverlay()
+        return
+      }
 
       // Swap to the new playlist.  iOS Safari handles the source
       // change and starts playing from the beginning of the new

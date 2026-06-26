@@ -25,7 +25,7 @@ class TranscodeService
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
   # HLS segment duration in seconds — balances latency against overhead.
-  HLS_SEGMENT_DURATION = 4
+  HLS_SEGMENT_DURATION = 2
   # HLS flags: temp_file writes segments via a .tmp~ sidecar and renames
   # them only once complete, so clients never read a partial segment.
   HLS_FLAGS = "temp_file".freeze
@@ -144,8 +144,14 @@ class TranscodeService
   # segment appears on disk.  Raises TranscodeError if ffmpeg exits before
   # producing any output (bad URL, auth failure, expired link) or if the
   # first segment does not appear within FIRST_SEGMENT_TIMEOUT_SECONDS.
+  #
+  # When wait_for_first_segment is false (used by HlsSession for faster
+  # iOS startup), the method returns immediately after spawning ffmpeg
+  # without waiting for the first segment.  The caller is responsible
+  # for monitoring ffmpeg and detecting failure — the client polls the
+  # playlist endpoint until the playlist file appears.
   # Returns the pid so the caller can kill the group later.
-  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [])
+  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], wait_for_first_segment: true)
     FileUtils.mkdir_p(segment_dir)
 
     cmd = build_ffmpeg_command(
@@ -170,6 +176,19 @@ class TranscodeService
     stderr_thread = Thread.new do
       loop { stderr_buf << err_rd.readpartial(4096) }
     rescue EOFError, IOError, Errno::EBADF
+    end
+
+    # Non-blocking mode: spawn ffmpeg and return immediately without
+    # waiting for the first segment.  A background monitor thread
+    # (started by the caller via HlsSession) detects ffmpeg failure.
+    # The client polls the playlist endpoint until the playlist file
+    # appears.  This eliminates the server-side wait for the first
+    # segment, significantly reducing time-to-playback on iOS.
+    unless wait_for_first_segment
+      stderr_thread.kill
+      stderr_thread.join(1)
+      err_rd.close
+      return pid
     end
 
     playlist_path = File.join(segment_dir, "playlist.m3u8")
@@ -549,7 +568,18 @@ class TranscodeService
 
   def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil)
     header_str = ffmpeg_headers(headers)
-    video_stream = probe_video_stream(input_url, headers: headers)
+    # Probe video stream and media tracks in parallel — these are
+    # independent ffprobe calls that each take 1-3s on a cold cache.
+    # Running them concurrently halves the probe latency.
+    video_stream = nil
+    probe_thread = Thread.new { video_stream = probe_video_stream(input_url, headers: headers) }
+    # probe_media_tracks is called inside selected_audio_stream_index
+    # and selected_burn_subtitle_track; running it now warms the cache
+    # so both callers get the cached result.
+    media_tracks_thread = Thread.new { probe_media_tracks(input_url, headers: headers) }
+    probe_thread.join
+    media_tracks_thread.join
+
     selected_audio_index = selected_audio_stream_index(
       input_url,
       headers: headers,
