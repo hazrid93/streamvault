@@ -50,7 +50,20 @@ export default class extends Controller {
     // Only show for unmodified clicks (not cmd+click, etc.)
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
 
+    // Prevent the default navigation so we can show the overlay first.
+    // On iOS Safari, DOM mutations in a click handler that triggers
+    // navigation may never be painted — the browser starts unloading
+    // before repainting.  By preventing default and navigating
+    // programmatically, the overlay is guaranteed to paint first.
+    event.preventDefault()
     this.showOverlay("Loading...")
+
+    const link = event.currentTarget
+    // Navigate on the next frame so the overlay paints before the
+    // browser starts unloading the page.
+    requestAnimationFrame(() => {
+      window.location.href = link.href
+    })
   }
 
   showOverlay(message) {
