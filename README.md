@@ -237,7 +237,7 @@ The author's deployment uses a **two-server architecture** that separates comput
 │  • FFmpeg (transcoding)             │   tunnel    │  • Jackett (torrent indexer)     │
 │                                     │             │                                  │
 │  Why: needs CPU/RAM for transcoding │             │  Why: clean IP not blocked by    │
-│  and bandwidth for streaming        │             │  Cloudflare; cheap to run         │
+│  and bandwidth for streaming        │             │  Cloudflare; cheap to run        │
 └─────────────────────────────────────┘             └──────────────────────────────────┘
 ```
 
