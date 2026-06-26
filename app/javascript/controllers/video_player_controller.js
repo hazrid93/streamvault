@@ -357,6 +357,79 @@ export default class extends Controller {
     }
   }
 
+  // Restart the HLS transcode from a new position (seek).
+  // Stops the current session, starts a new one with the updated
+  // start_seconds, and swaps the video source to the new playlist.
+  async restartHlsSession(startSeconds) {
+    // Stop the old session (kills ffmpeg, cleans up segments).
+    await this.stopHlsSession()
+
+    const directUrl = this.directUrlValue || this.extractRawUrl()
+    if (!directUrl) {
+      console.warn('HLS seek: no direct URL available')
+      this.isSeeking = false
+      this.hideSeekingOverlay()
+      return
+    }
+
+    try {
+      const params = new URLSearchParams({ url: directUrl })
+      if (startSeconds > 0) {
+        params.set('start_seconds', startSeconds)
+      }
+      const audioStream = this.currentUrlParam('audio_stream')
+      if (audioStream) params.set('audio_stream', audioStream)
+      const subtitleStream = this.currentUrlParam('subtitle_stream')
+      if (subtitleStream) params.set('subtitle_stream', subtitleStream)
+
+      const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
+      const response = await fetch('/hls/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
+        body: params.toString()
+      })
+
+      if (!response.ok) {
+        console.warn('HLS seek: start failed', response.status)
+        this.isSeeking = false
+        this.hideSeekingOverlay()
+        return
+      }
+
+      const data = await response.json()
+      this.hlsSessionId = data.session_id
+
+      // Swap to the new playlist.  iOS Safari handles the source
+      // change and starts playing from the beginning of the new
+      // HLS stream (which starts at the seek position thanks to
+      // ffmpeg -ss).
+      this.videoTarget.src = data.playlist_url
+      this.videoTarget.load()
+      const p = this.videoTarget.play()
+      if (p?.catch) p.catch(() => {})
+
+      // Hide the seeking overlay once playback actually starts.
+      const onPlaying = () => {
+        this.isSeeking = false
+        this.hideSeekingOverlay()
+        this.videoTarget.removeEventListener('playing', onPlaying)
+      }
+      this.videoTarget.addEventListener('playing', onPlaying, { once: true })
+
+      // Safety: hide overlay after 15s even if 'playing' never fires
+      setTimeout(() => {
+        if (this.isSeeking) {
+          this.isSeeking = false
+          this.hideSeekingOverlay()
+        }
+      }, 15000)
+    } catch (e) {
+      console.warn('HLS seek: error', e)
+      this.isSeeking = false
+      this.hideSeekingOverlay()
+    }
+  }
+
   // Best-effort: tell the backend to kill the ffmpeg HLS process for
   // the current session.  Fire-and-forget — disconnect must not block,
   // and the session TTL cleans up if the request never lands.
@@ -1701,22 +1774,20 @@ export default class extends Controller {
   }
 
   restartPlaybackAt(targetSeconds) {
-    // In HLS mode (iOS), use native seeking — the video element
-    // handles it directly.  No need to restart ffmpeg or touch MSE
-    // (which doesn't exist on iPhone Safari).
+    // In HLS mode (iOS), seeking requires restarting the ffmpeg HLS
+    // transcode with a new start_seconds.  The HLS timeline always
+    // starts at 0 (ffmpeg -ss shifts the source), so setting
+    // video.currentTime to an absolute position doesn't work — the
+    // content at that position may not have been transcoded yet.
+    // Instead: stop the current session, start a new one from the
+    // target position, and set video.src to the new playlist.
     if (this.isHls()) {
       this.isSeeking = true
-      this.showSeekingOverlay()
+      this.showSeekingOverlay("Seeking...")
       this.startSecondsValue = targetSeconds
       this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
-      this.videoTarget.currentTime = targetSeconds
       this.clearSubtitleCues()
-      const unseek = () => {
-        this.isSeeking = false
-        this.hideSeekingOverlay()
-        this.videoTarget.removeEventListener("seeked", unseek)
-      }
-      this.videoTarget.addEventListener("seeked", unseek, { once: true })
+      this.restartHlsSession(targetSeconds)
       return
     }
 
