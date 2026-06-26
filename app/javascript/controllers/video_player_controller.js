@@ -401,7 +401,7 @@ export default class extends Controller {
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const res = await fetch(playlistUrl, { method: "HEAD" })
-        if (res.ok) return true
+        if (res.status === 200) return true
         if (res.status === 424) {
           // ffmpeg failed — extract error message if available
           try {
