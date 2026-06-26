@@ -154,6 +154,20 @@ class HlsSession
     File.join(segment_dir, "#{index}.ts")
   end
 
+  # Returns true if the playlist file exists AND contains at least
+  # one segment entry.  ffmpeg writes the #EXTM3U header immediately
+  # but doesn't add segment lines until the first segment is complete.
+  # Checking only File.exist? would treat an empty header-only
+  # playlist as ready, causing the client to set it as the video src
+  # before any segments are available.
+  def playlist_ready?
+    return false unless File.exist?(playlist_path)
+    content = File.read(playlist_path)
+    content.include?("#EXTINF") || content.include?("#EXT-X-ENDLIST")
+  rescue StandardError
+    false
+  end
+
   private
 
   def initialize(id:, pid:, segment_dir:, user_id:)

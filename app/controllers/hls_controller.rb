@@ -64,9 +64,11 @@ class HlsController < ApplicationController
       return
     end
 
-    # Playlist not ready yet — ffmpeg is still transcoding the first
-    # segment.  Return 202 so the client knows to keep polling.
-    unless File.exist?(session.playlist_path)
+    # Playlist not ready yet — either the file doesn't exist, or
+    # ffmpeg has written the #EXTM3U header but no segment entries
+    # yet (the first segment isn't complete).  Return 202 so the
+    # client keeps polling.
+    unless session.playlist_ready?
       head :accepted
       return
     end
