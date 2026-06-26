@@ -148,7 +148,8 @@ export default class extends Controller {
   disconnect() {
     this.stopHlsSession()
     this.stopProgressTracking()
-    this.saveProgressSync()
+    // Save progress only if navigateBack hasn't already done it.
+    if (!this.navigatingAway) this.saveProgressSync()
     this.clearUiHideTimer()
     this.clearStartupOverlayTimer()
     this.clearSuppressSeekClickTimer()
@@ -177,7 +178,12 @@ export default class extends Controller {
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
     this.pendingSeekSeconds = null
-    this.pauseAndDetachVideo()
+    // Skip video element teardown when navigating away — the page is
+    // being destroyed and pauseAndDetachVideo's videoTarget.load()
+    // forces a synchronous decode-pipeline flush that blocks the
+    // main thread, delaying the new page from rendering.  The browser
+    // tears down the video element during unload.
+    if (!this.navigatingAway) this.pauseAndDetachVideo()
   }
 
   async probeDuration() {
