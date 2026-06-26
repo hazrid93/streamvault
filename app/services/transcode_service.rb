@@ -22,6 +22,8 @@ class TranscodeService
   FFMPEG_PATH = "ffmpeg"
   FFPROBE_PATH = "ffprobe"
   FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets"
+  # Maximum bytes of stderr to include in error messages.
+  STDERR_MAX_BYTES = 4096
   # HLS segment duration in seconds — balances latency against overhead.
   HLS_SEGMENT_DURATION = 4
   # HLS flags: temp_file writes segments via a .tmp~ sidecar and renames
@@ -177,9 +179,17 @@ class TranscodeService
 
       loop do
         # ffmpeg may exit quickly on failure (bad URL, auth) — detect that
-        # before the timeout so the error surfaces fast.
         _, status = Process.waitpid2(pid, Process::WNOHANG)
         if status
+          # ffmpeg exited.  It may have finished successfully after
+          # producing all segments — check before declaring failure.
+          # With short sources (or very fast machines), ffmpeg can
+          # produce the first segment and exit between two iterations
+          # of this loop, so the produced_segment flag hasn't been set yet.
+          if status.success? && File.exist?(playlist_path) && Dir.glob(File.join(segment_dir, "*.ts")).any?
+            produced_segment = true
+            break
+          end
           raise TranscodeError, "FFmpeg exited (status #{status.exitstatus}) without producing segments. #{stderr_summary(stderr_buf)}" unless produced_segment
           break  # ffmpeg finished naturally after producing segments
         end

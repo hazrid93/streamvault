@@ -53,12 +53,16 @@ class HlsController < ApplicationController
     # Read fresh each time — ffmpeg is appending to playlist.m3u8 as it
     # writes segments.  iOS Safari polls the playlist to discover new
     # segments, so a stale cache would stall playback.
-    response.headers["Content-Type"] = "application/vnd.apple.mpegurl"
     response.headers["Cache-Control"] = "no-cache"
     # Disable proxy buffering (kamal-proxy / nginx) so playlist updates
     # reach the browser immediately, not buffered in the proxy.
     response.headers["X-Accel-Buffering"] = "no"
-    render plain: File.read(session.playlist_path)
+    # send_data with the correct HLS content type — render plain: would
+    # set Content-Type to text/plain, which iOS Safari won't recognise
+    # as an HLS playlist.
+    send_data File.read(session.playlist_path),
+              type: "application/vnd.apple.mpegurl",
+              disposition: :inline
   end
 
   # GET /hls/:id/:segment (e.g. 0.ts, 1.ts)
@@ -77,9 +81,8 @@ class HlsController < ApplicationController
       return
     end
 
-    response.headers["Content-Type"] = "video/mp2t"
     response.headers["Cache-Control"] = "no-cache"
-    send_file path, disposition: :inline
+    send_file path, type: "video/mp2t", disposition: :inline
   end
 
   # POST /hls/:id/stop
