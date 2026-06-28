@@ -111,11 +111,6 @@ class StreamingController < ApplicationController
     resume_at = target[:resume_at]
 
     service = ContentStreamingService.new(current_user)
-    # Fetch stream resolution and metadata concurrently — they hit
-    # different services (RealDebrid resolve vs Cinemeta) and are
-    # independent. Running them in parallel cuts the "Loading..."
-    # time from stream_resolved + metadata_fetched to max(the two).
-    metadata_thread = Thread.new { fetch_show_metadata(imdb_id, type) }
     result = service.start_stream(
       imdb_id,
       type,
@@ -124,7 +119,9 @@ class StreamingController < ApplicationController
     )
 
     if result.success?
-      metadata = metadata_thread.value
+      # Metadata (title, poster_url, duration) comes from the DB
+      # progress row loaded by resume_target — no Cinemeta round-trip
+      # needed. This eliminates a 1-10s HTTP call on every resume.
       redirect_to streaming_path(
         "play",
         streaming_url: result.data[:streaming_url],
@@ -133,10 +130,10 @@ class StreamingController < ApplicationController
         type: type,
         season: target_season,
         episode: target_episode,
-        title: metadata[:title],
-        poster_url: metadata[:poster_url],
+        title: target[:title],
+        poster_url: target[:poster_url],
         resume_at: resume_at,
-        duration: metadata[:runtime_seconds].to_i
+        duration: target[:duration_seconds].to_i
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -187,38 +184,40 @@ class StreamingController < ApplicationController
       .first
   end
 
-  # Resolve which episode/movie to play and where to start.
-  # Returns { season:, episode:, resume_at: } (season/episode are 0 for movies).
+  # Resolve which episode/movie to play, where to start, and metadata
+ # (title, poster_url, duration) from the existing DB progress row.
+ # Returns { season:, episode:, resume_at:, title:, poster_url:, duration_seconds: }.
+ #
+ # For shows resuming an in-progress episode, the episode_progresses row
+ # holds show_title and duration_seconds. For movies, the watch_history_entries
+ # row holds title, poster_url, and duration_seconds.
+ #
+ # When advancing to a next episode (progress >= 95%), no DB row exists
+ # for the next episode yet — duration falls back to 0 and the player's
+ # probeDuration fills it in. When no progress row exists at all (first
+ # play), metadata is empty and the player page handles the fallback.
   def resume_target(imdb_id, type)
     if type == "movie"
       last = current_user.watch_history_entries.where(imdb_id: imdb_id).order(watched_at: :desc).first
-      return { season: 0, episode: 0, resume_at: 0 } if last.nil?
-      return { season: 0, episode: 0, resume_at: 0 } if last.progress_percentage >= 95
-      return { season: 0, episode: 0, resume_at: last.progress_seconds }
+      return { season: 0, episode: 0, resume_at: 0, title: nil, poster_url: nil, duration_seconds: 0 } if last.nil?
+      return { season: 0, episode: 0, resume_at: 0, title: last.title, poster_url: last.poster_url, duration_seconds: last.duration_seconds } if last.progress_percentage >= 95
+      return { season: 0, episode: 0, resume_at: last.progress_seconds, title: last.title, poster_url: last.poster_url, duration_seconds: last.duration_seconds }
     end
 
     last = current_user.episode_progresses.for_show(imdb_id).recently_watched.first
-    return { season: 1, episode: 1, resume_at: 0 } if last.nil?
+    return { season: 1, episode: 1, resume_at: 0, title: nil, poster_url: nil, duration_seconds: 0 } if last.nil?
 
     if last.progress_percentage >= 95
       next_ep = ProgressTrackingService.next_episode(current_user, imdb_id, last.season_number, last.episode_number)
       if next_ep.success?
-        { season: next_ep.data[:season], episode: next_ep.data[:episode], resume_at: 0 }
+        { season: next_ep.data[:season], episode: next_ep.data[:episode], resume_at: 0, title: last.show_title, poster_url: nil, duration_seconds: 0 }
       else
         # Series finale: replay the finished episode from the start
-        { season: last.season_number, episode: last.episode_number, resume_at: 0 }
+        { season: last.season_number, episode: last.episode_number, resume_at: 0, title: last.show_title, poster_url: nil, duration_seconds: last.duration_seconds }
       end
     else
-      { season: last.season_number, episode: last.episode_number, resume_at: last.progress_seconds }
+      { season: last.season_number, episode: last.episode_number, resume_at: last.progress_seconds, title: last.show_title, poster_url: nil, duration_seconds: last.duration_seconds }
     end
-  end
-
-  def fetch_show_metadata(imdb_id, type)
-    meta_result = TorrentioService.new(rd_api_key: current_user.realdebrid_api_key).metadata(imdb_id, type)
-    return { title: nil, poster_url: nil, runtime_seconds: 0 } if meta_result.failure?
-    { title: meta_result.data[:title], poster_url: meta_result.data[:poster_url], runtime_seconds: meta_result.data[:runtime_seconds].to_i }
-  rescue StandardError
-    { title: nil, poster_url: nil, runtime_seconds: 0 }
   end
 
   def find_duration_seconds(progress_entry, imdb_id, type, season, episode)

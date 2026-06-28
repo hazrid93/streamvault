@@ -266,7 +266,7 @@ RSpec.describe "Streaming", type: :request do
     before { cinemeta_stub }
 
     it "resumes a partially-watched episode at the saved position" do
-      create(:episode_progress, user: user, show_imdb_id: "tt0903747",
+      progress = create(:episode_progress, user: user, show_imdb_id: "tt0903747",
              season_number: 1, episode_number: 1,
              progress_seconds: 600, duration_seconds: 3480)
 
@@ -281,6 +281,9 @@ RSpec.describe "Streaming", type: :request do
 
       get resume_streaming_index_path(show_imdb_id: "tt0903747", type: "show")
 
+      # Metadata (title, duration) now comes from the DB progress row,
+      # not a Cinemeta round-trip — resume is faster and no external
+      # metadata call is made.
       expect(response).to redirect_to(streaming_path("play",
         streaming_url: "https://download.real-debrid.com/d/bb/bb.mp4",
         filename: "bb.mp4",
@@ -288,15 +291,15 @@ RSpec.describe "Streaming", type: :request do
         type: "show",
         season: 1,
         episode: 1,
-        title: "Breaking Bad",
+        title: progress.show_title,
         poster_url: nil,
         resume_at: 600,
-        duration: 0
+        duration: 3480
       ))
     end
 
     it "advances to the next episode when the last-watched is >= 95%" do
-      create(:episode_progress, user: user, show_imdb_id: "tt0903747",
+      progress = create(:episode_progress, user: user, show_imdb_id: "tt0903747",
              season_number: 1, episode_number: 1,
              progress_seconds: 3400, duration_seconds: 3480) # ~98%
 
@@ -311,6 +314,8 @@ RSpec.describe "Streaming", type: :request do
 
       get resume_streaming_index_path(show_imdb_id: "tt0903747", type: "show")
 
+      # Title comes from the DB progress row's show_title; duration is 0
+      # because no progress row exists yet for the next episode.
       expect(response).to redirect_to(streaming_path("play",
         streaming_url: "https://download.real-debrid.com/d/bb2/bb2.mp4",
         filename: "bb2.mp4",
@@ -318,7 +323,7 @@ RSpec.describe "Streaming", type: :request do
         type: "show",
         season: 1,
         episode: 2,
-        title: "Breaking Bad",
+        title: progress.show_title,
         poster_url: nil,
         resume_at: 0,
         duration: 0
