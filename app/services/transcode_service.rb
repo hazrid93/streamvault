@@ -60,12 +60,18 @@ class TranscodeService
     "-preset", "ultrafast",
     "-crf", "23",
     "-profile:v", "high",
-    "-pix_fmt", "yuv420p"
+    "-pix_fmt", "yuv420p",
+    # No B-frames: MSE's fMP4 chunk demuxer requires each fragment to start
+    # with a random access point (I-frame).  With B-frames, +frag_keyframe
+    # fragments at keyframes in display order but the first packet by DTS
+    # is a B-frame → CHUNK_DEMUXER_ERROR_APPEND_FAILED.
+    "-bf", "0"
   ].freeze
   VIDEOTOOLBOX_TRANSCODE_ARGS = [
     "-c:v", "h264_videotoolbox",
     "-b:v", "4000k",
-    "-pix_fmt", "yuv420p"
+    "-pix_fmt", "yuv420p",
+    "-bf", "0"
   ].freeze
   SAFE_H264_PIXEL_FORMATS = %w[yuv420p].freeze
   TEXT_SUBTITLE_CODECS = %w[subrip ass ssa webvtt mov_text].freeze
@@ -987,7 +993,7 @@ class TranscodeService
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     cmd += [
       "-select_streams", "v:0",
-      "-show_entries", "stream=codec_name,width,height,pix_fmt",
+      "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames",
       "-of", "json",
       input_url
     ]
@@ -1008,7 +1014,8 @@ class TranscodeService
       codec_name: stream["codec_name"].to_s.downcase,
       width: positive_integer(stream["width"]),
       height: positive_integer(stream["height"]),
-      pix_fmt: stream["pix_fmt"].to_s.downcase
+      pix_fmt: stream["pix_fmt"].to_s.downcase,
+      has_b_frames: positive_integer(stream["has_b_frames"]).to_i > 0
     }
   rescue JSON::ParserError
     {}
@@ -1028,7 +1035,14 @@ class TranscodeService
       height.positive? &&
       width <= MAX_COPY_VIDEO_WIDTH &&
       height <= MAX_COPY_VIDEO_HEIGHT &&
-      SAFE_H264_PIXEL_FORMATS.include?(pix_fmt)
+      SAFE_H264_PIXEL_FORMATS.include?(pix_fmt) &&
+      !stream[:has_b_frames]
+    # Sources with B-frames cannot be stream-copied to fragmented MP4 for
+    # MSE: +frag_keyframe fragments at keyframes in display order, but the
+    # first packet by DTS in each fragment is a B-frame that depends on
+    # the previous fragment's keyframe.  Chrome's MSE chunk demuxer rejects
+    # these fragments with CHUNK_DEMUXER_ERROR_APPEND_FAILED.  Forcing a
+    # re-encode (without B-frames) avoids the decode error.
   end
   private_class_method :browser_safe_video?
 

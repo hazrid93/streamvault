@@ -197,6 +197,7 @@ export default class extends Controller {
     this.removeTextSubtitleTrack()
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
+    this.fmp4Buffer = null
     this.pendingSeekSeconds = null
     // Skip video element teardown when navigating away — the page is
     // being destroyed and pauseAndDetachVideo's videoTarget.load()
@@ -257,6 +258,7 @@ export default class extends Controller {
     // Abort current fetch and clear queue
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
+    this.fmp4Buffer = null
     this.playbackStarted = false
     this.isStalled = false
     this.userPaused = false
@@ -963,18 +965,113 @@ export default class extends Controller {
     this.streamRecoveryAttempts = savedAttempts
   }
 
+  // fMP4 box parser: the HTTP response delivers arbitrary byte chunks
+  // that don't align with fMP4 box boundaries.  Appending a partial
+  // moof or mdat box to SourceBuffer triggers
+  // CHUNK_DEMUXER_ERROR_APPEND_FAILED.  This parser accumulates bytes
+  // and only feeds complete top-level boxes (or moof+mdat pairs) to
+  // appendBuffer, holding back partial boxes until more data arrives.
   queueBufferChunk(chunk) {
-    this.bufferQueue.push(chunk)
+    // Append to the accumulation buffer
+    const newBuf = new Uint8Array((this.fmp4Buffer?.length || 0) + chunk.byteLength)
+    if (this.fmp4Buffer) newBuf.set(this.fmp4Buffer, 0)
+    newBuf.set(new Uint8Array(chunk), this.fmp4Buffer?.length || 0)
+    this.fmp4Buffer = newBuf
     this.flushBufferQueue()
+  }
+
+  // Extract complete top-level boxes from fmp4Buffer.  Each fMP4 box
+  // starts with a 4-byte big-endian size and a 4-byte type.  We scan
+  // forward, collecting boxes.  moof and mdat are paired (a fragment
+  // is moof+mdat).  moov (init segment) and other boxes are appended
+  // individually.  Returns the bytes to append and leaves partial boxes
+  // in fmp4Buffer.
+  extractCompleteBoxes() {
+    if (!this.fmp4Buffer || this.fmp4Buffer.length < 8) return null
+    const boxes = []
+    let offset = 0
+    let lastComplete = 0
+
+    while (offset + 8 <= this.fmp4Buffer.length) {
+      // Read box size (4 bytes big-endian)
+      const size = (this.fmp4Buffer[offset] << 24) |
+                   (this.fmp4Buffer[offset + 1] << 16) |
+                   (this.fmp4Buffer[offset + 2] << 8) |
+                   this.fmp4Buffer[offset + 3]
+      const type = String.fromCharCode(
+        this.fmp4Buffer[offset + 4],
+        this.fmp4Buffer[offset + 5],
+        this.fmp4Buffer[offset + 6],
+        this.fmp4Buffer[offset + 7]
+      )
+
+      // size 0 means "box extends to end of file" — not valid in streaming
+      if (size === 0) break
+      // size 1 means 64-bit extended size (next 8 bytes) — not used by fMP4
+      if (size === 1) break
+      // Box extends beyond available data — partial, wait for more
+      if (offset + size > this.fmp4Buffer.length) break
+
+      if (type === 'moof') {
+        // Check if the next box is mdat and if both fit
+        const nextOffset = offset + size
+        if (nextOffset + 8 <= this.fmp4Buffer.length) {
+          const mdatSize = (this.fmp4Buffer[nextOffset] << 24) |
+                           (this.fmp4Buffer[nextOffset + 1] << 16) |
+                           (this.fmp4Buffer[nextOffset + 2] << 8) |
+                           this.fmp4Buffer[nextOffset + 3]
+          const mdatType = String.fromCharCode(
+            this.fmp4Buffer[nextOffset + 4],
+            this.fmp4Buffer[nextOffset + 5],
+            this.fmp4Buffer[nextOffset + 6],
+            this.fmp4Buffer[nextOffset + 7]
+          )
+          if (mdatType === 'mdat' && nextOffset + mdatSize <= this.fmp4Buffer.length) {
+            // moof+mdat pair complete — append both together
+            boxes.push({ offset, size: size + mdatSize })
+            offset = nextOffset + mdatSize
+            lastComplete = offset
+            continue
+          }
+        }
+        // moof without a complete mdat — wait for more data
+        break
+      }
+
+      // Other boxes (moov, styp, sidx, etc.) — append individually
+      boxes.push({ offset, size })
+      offset += size
+      lastComplete = offset
+    }
+
+    if (boxes.length === 0) return null
+
+    // Merge all complete boxes into a single ArrayBuffer for appendBuffer
+    const totalSize = boxes.reduce((sum, b) => sum + b.size, 0)
+    const result = new Uint8Array(totalSize)
+    let writeOffset = 0
+    for (const box of boxes) {
+      result.set(this.fmp4Buffer.subarray(box.offset, box.offset + box.size), writeOffset)
+      writeOffset += box.size
+    }
+
+    // Keep the remaining partial bytes in fmp4Buffer
+    if (lastComplete < this.fmp4Buffer.length) {
+      this.fmp4Buffer = this.fmp4Buffer.subarray(lastComplete)
+    } else {
+      this.fmp4Buffer = null
+    }
+
+    return result.buffer
   }
 
   flushBufferQueue() {
     if (this.bufferAppending || !this.sourceBuffer || this.sourceBuffer.updating) return
-    if (this.bufferQueue.length === 0) return
+    const data = this.extractCompleteBoxes()
+    if (!data) return
     this.bufferAppending = true
-    const chunk = this.bufferQueue.shift()
     try {
-      this.sourceBuffer.appendBuffer(chunk)
+      this.sourceBuffer.appendBuffer(data)
     } catch (e) {
       this.bufferAppending = false
       if (e.name === "QuotaExceededError") {
@@ -985,7 +1082,7 @@ export default class extends Controller {
         // current MSE pipeline is broken. Clear the queue and trigger
         // a full reconnect from the current playback position.
         console.warn("appendBuffer failed, recovering:", e.name)
-        this.bufferQueue = []
+        this.fmp4Buffer = null
         this.handleStreamStall()
       }
     }
@@ -1144,6 +1241,7 @@ export default class extends Controller {
     this.navigatingAway = true
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
+    this.fmp4Buffer = null
   }
 
   // Auto-advance to the next episode when the current one finishes.
@@ -1201,6 +1299,7 @@ export default class extends Controller {
     try {
       if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
       this.bufferQueue = []
+      this.fmp4Buffer = null
       if (this.mediaSource) {
         if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
         this.mediaSource = null
