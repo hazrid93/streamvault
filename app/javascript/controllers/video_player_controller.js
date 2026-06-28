@@ -629,6 +629,14 @@ export default class extends Controller {
   // fires and the watchdog never triggers.
 
   onVideoWaiting() {
+    console.log("[STALL DEBUG] onVideoWaiting", {
+      paused: this.videoTarget.paused,
+      isStalled: this.isStalled,
+      hasBufferedAhead: this.hasBufferedAhead(),
+      bufferedRanges: this.bufferedRangesDebug(),
+      currentTime: this.videoTarget.currentTime,
+      readyState: this.videoTarget.readyState
+    })
     // In HLS mode, iOS Safari manages its own buffering and the MSE
     // stall watchdog can't reconnect (no MediaSource on iPhone).  But
     // we still show the buffering overlay so the user sees feedback
@@ -1239,6 +1247,14 @@ export default class extends Controller {
   }
 
   onVideoReady() {
+    console.log("[STALL DEBUG] onVideoReady (playing)", {
+      paused: this.videoTarget.paused,
+      isSeeking: this.isSeeking,
+      isStalled: this.isStalled,
+      hasBufferedAhead2: this.hasBufferedAhead(2),
+      bufferedRanges: this.bufferedRangesDebug(),
+      currentTime: this.videoTarget.currentTime
+    })
     // Only act when the video is actually playing.  If the video is
     // paused (deliberate rebuffer gate in maybeStartPlayback), don't
     // interfere — the "Buffering..." overlay should stay visible.
