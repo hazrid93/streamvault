@@ -15,7 +15,9 @@
     <link rel="icon" href="/icon.png" type="image/png">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/icon.png">
-    <link rel="preload" href="https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=1920&q=80" as="image">
+    <% if !user_signed_in? %>
+      <link rel="preload" href="https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=1920&q=80" as="image">
+    <% end %>
 
     <%# Tailwind compiled CSS + custom styles %>
     <%= stylesheet_link_tag "tailwind", "data-turbo-track": "reload" %>
