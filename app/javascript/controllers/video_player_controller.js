@@ -103,6 +103,7 @@ export default class extends Controller {
     this.progressWatchdogArmed = false
     this.streamRecoveryActive = false
     this.playbackStarted = false
+    this.isStalled = false
     // True when the user deliberately paused (button/spacebar). The
     // rebuffer gate in maybeStartPlayback must never auto-resume a
     // user pause — only a rebuffer pause (buffer ran dry).
@@ -256,8 +257,8 @@ export default class extends Controller {
     // Abort current fetch and clear queue
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
-    this.streamRecoveryActive = false
     this.playbackStarted = false
+    this.isStalled = false
     this.userPaused = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
@@ -665,6 +666,7 @@ export default class extends Controller {
         return
       }
       this.stopProgressWatchdog()
+      this.isStalled = true
       this.showBufferingOverlay()
       // Set a rebuffer deadline: if the gate threshold isn't reached
       // within REBUFFER_MAX_WAIT_MS, resume with whatever we have.
@@ -682,15 +684,16 @@ export default class extends Controller {
     }, 200)
   }
 
-  // Returns true if there's buffered data ahead of the current position.
-  hasBufferedAhead() {
+  // Returns true if there's at least `minSeconds` (default 0.5s) of
+  // buffered data ahead of the current position.
+  hasBufferedAhead(minSeconds = 0.5) {
     const video = this.videoTarget
     if (!video) return false
     const ranges = video.buffered
     if (!ranges || ranges.length === 0) return false
     const pos = video.currentTime
     for (let i = 0; i < ranges.length; i++) {
-      if (ranges.start(i) <= pos && ranges.end(i) > pos + 0.5) {
+      if (ranges.start(i) <= pos && ranges.end(i) > pos + minSeconds) {
         return true
       }
     }
@@ -1052,13 +1055,21 @@ export default class extends Controller {
     // "Buffering" forever on a very slow source — after the deadline,
     // resume with whatever we have.
     // Never auto-resume a deliberate user pause (button/spacebar): the
-    // userPaused flag distinguishes "buffer ran dry" from "user paused".
-    // Also skip while a subtitle load holds playback (isSeeking) — the
-    // hold's own finishSubtitlePlaybackHold resumes when ready.
-    if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
+    // Rebuffering: the buffer ran dry and the video stalled.
+    // In Chrome, the video element does NOT set paused=true when the
+    // MSE buffer runs dry — it stays "playing" but frozen (currentTime
+    // stops advancing).  So we can't rely on paused to detect a rebuffer
+    // stall.  Instead, use the isStalled flag set by onVideoWaiting.
+    // Resume only when enough buffer has accumulated (REBUFFER_AHEAD_SECONDS).
+    // A rebuffer deadline ensures we don't sit on "Buffering" forever
+    // on a very slow source.
+    // Never auto-resume a deliberate user pause (userPaused) or while a
+    // subtitle load holds playback (isSeeking).
+    if (this.isStalled && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
       const deadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
       if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || deadlineReached) {
         this.rebufferDeadline = null
+        this.isStalled = false
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
       }
@@ -1094,6 +1105,7 @@ export default class extends Controller {
       // Clear them so the video stays paused until the user resumes.
       this.clearStallWatchdog()
       this.stopProgressWatchdog()
+      this.isStalled = false
       this.rebufferDeadline = null
     }
   }
@@ -1233,12 +1245,18 @@ export default class extends Controller {
     // overlay should stay visible until we resume playback.
     if (this.videoTarget.paused) return
 
+    // Don't hide the overlay if the buffer is critically low.  Chrome
+    // fires "playing" on a tiny trickle of data, then immediately
+    // stalls again — if we hide the overlay here, the user sees a
+    // rapid freeze-resume-freeze cycle with no spinner.  Keep the
+    // overlay visible until there's at least 2s of buffer ahead.
+    if (!this.hasBufferedAhead(2)) return
+
     // Cancel a pending buffering-overlay debounce — the video resumed
-    // before the 500ms delay elapsed, so no overlay should be shown.
-    if (this.bufferingOverlayTimer) {
-      clearTimeout(this.bufferingOverlayTimer)
-      this.bufferingOverlayTimer = null
-    }
+    // before the 200ms delay elapsed, so no overlay should be shown.
+    clearTimeout(this.bufferingOverlayTimer)
+    this.bufferingOverlayTimer = null
+    this.isStalled = false
     this.clearStallWatchdog()
     // Playback is actually playing — any stall recovery succeeded
     // (or this is a fresh start).  Reset the attempt counter so a
