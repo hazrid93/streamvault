@@ -1248,6 +1248,22 @@ export default class extends Controller {
     // before playback begins, and "playing" means playback has begun.
     this.hideStartupOverlay()
 
+    // After a user seek, hide the seeking overlay as soon as playback
+    // resumes — the seeking overlay is not a buffering indicator, and
+    // the rebuffer gate handles buffer depth from here.  Only gate
+    // the buffering/stall-recovery overlay hide on buffer depth.
+    if (this.isSeeking) {
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = null
+      this.isStalled = false
+      this.clearStallWatchdog()
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.startProgressWatchdog()
+      this.hideSeekingOverlay()
+      return
+    }
+
     // Don't hide the buffering overlay if the buffer is critically low.
     // Chrome fires "playing" on a tiny trickle of data, then immediately
     // stalls again — if we hide the overlay here, the user sees a rapid
