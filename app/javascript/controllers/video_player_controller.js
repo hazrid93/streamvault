@@ -11,14 +11,14 @@ const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
-const BUFFER_AHEAD_SECONDS = 10
-const BUFFER_AHEAD_MAX_WAIT_MS = 10000
-// After a stall, rebuild a small buffer before resuming so the next
-// upstream throughput dip is absorbed instead of immediately re-stalling.
-// 2s is enough to avoid an instant re-stall without making the user
-// wait too long on "Buffering".  The stall watchdog catches a truly
-// dead source — the gate just avoids a micro-stall cycle.
-const REBUFFER_AHEAD_SECONDS = 2
+const BUFFER_AHEAD_SECONDS = 30
+const BUFFER_AHEAD_MAX_WAIT_MS = 15000
+// After a stall, rebuild a meaningful buffer before resuming so ffmpeg
+// can catch up.  When the transcode rate is below 1× (HEVC source, slow
+// server), resuming with a tiny buffer causes a rapid stall-resume-stall
+// cycle = periodic black screen.  5s gives ffmpeg enough runway to
+// produce a meaningful burst before playback resumes.
+const REBUFFER_AHEAD_SECONDS = 5
 // Stall watchdog timeout for rebuffer stalls (playback already started).
 // Must be longer than the time to accumulate REBUFFER_AHEAD_SECONDS at a
 // reasonable source speed, so trickling data doesn't trigger a reconnect
@@ -26,15 +26,15 @@ const REBUFFER_AHEAD_SECONDS = 2
 // for slow-but-alive sources, short enough that a truly dead fetch
 // (server closed the response) doesn't leave the user staring at
 // "Buffering" for too long.
-const REBUFFER_STALL_TIMEOUT_MS = 15000
+const REBUFFER_STALL_TIMEOUT_MS = 30000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
 // before resuming with whatever buffer has accumulated.  On a slow
 // or trickling source, data arrives in small bursts that never reach
 // the gate threshold — without a deadline, the video would sit on
 // "Buffering" forever while the stall watchdog keeps getting reset by
-// each trickle.  5s keeps the "Buffering" pause short; the stall
-// watchdog handles a genuinely dead source.
-const REBUFFER_MAX_WAIT_MS = 5000
+// each trickle.  10s gives ffmpeg time to build 5s of buffer on a
+// sub-1× source; the stall watchdog handles a genuinely dead source.
+const REBUFFER_MAX_WAIT_MS = 10000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -1042,19 +1042,22 @@ export default class extends Controller {
       return
     }
 
-    // Rebuffering: the video paused because the buffer ran dry.  We
-    // previously gated resumption on REBUFFER_AHEAD_SECONDS here, but
-    // that created a periodic stall cycle: pause → buffer 2s → resume →
-    // play 2s → stall → repeat.  Instead, resume as soon as ANY data is
-    // available (bufferedAhead > 0).  The browser's native waiting/playing
-    // cycle handles micro-stalls gracefully — a brief freeze is less
-    // disruptive than a full pause-resume cycle with a spinner.
+    // Rebuffering: the video paused because the buffer ran dry.
+    // Resume only when enough buffer has accumulated to sustain playback
+    // for a while (REBUFFER_AHEAD_SECONDS).  Resuming with a tiny buffer
+    // (bufferedAhead > 0) causes a rapid stall-resume-stall cycle when
+    // ffmpeg transcodes below 1× — the video plays for a fraction of a
+    // second, stalls again, and the user sees periodic black screen.
+    // A rebuffer deadline (REBUFFER_MAX_WAIT_MS) ensures we don't sit on
+    // "Buffering" forever on a very slow source — after the deadline,
+    // resume with whatever we have.
     // Never auto-resume a deliberate user pause (button/spacebar): the
     // userPaused flag distinguishes "buffer ran dry" from "user paused".
     // Also skip while a subtitle load holds playback (isSeeking) — the
     // hold's own finishSubtitlePlaybackHold resumes when ready.
     if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
-      if (bufferedAhead > 0) {
+      const deadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
+      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || deadlineReached) {
         this.rebufferDeadline = null
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
