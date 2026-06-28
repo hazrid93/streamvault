@@ -7,7 +7,7 @@ class TranscodeSubtitlesController < ApplicationController
 
   def show
     input_url = params[:url].to_s
-    unless valid_stream_url?(input_url)
+    unless valid_stream_url?(input_url) && verify_stream_url!
       head :bad_request
       return
     end

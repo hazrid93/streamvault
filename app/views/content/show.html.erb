@@ -1,7 +1,9 @@
-<%# Back link based on referrer %>
+<%# Back link — link to a known internal route instead of the raw
+   Referer header, which is attacker-controlled and would otherwise
+   render an off-site (open-redirect / phishing) link. %>
 <% if request.referer&.include?("/search") %>
   <div class="px-6 pt-4">
-    <%= link_to "← Back to search results", request.referer, class: "text-sm text-sv-accent hover:underline" %>
+    <%= link_to "← Back to search results", search_index_path, class: "text-sm text-sv-accent hover:underline" %>
   </div>
 <% elsif request.referer&.include?("/library") %>
   <div class="px-6 pt-4">

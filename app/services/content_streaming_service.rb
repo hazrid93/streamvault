@@ -40,14 +40,14 @@ class ContentStreamingService
     result = resolve_stream(selected_stream)
 
     if result
-      Rails.logger.info("[ContentStreamingService] User-selected stream resolved: #{result[:streaming_url]} (filename: #{result[:filename]})")
+      Rails.logger.info("[ContentStreamingService] User-selected stream resolved for imdb_id=#{imdb_id} filename=#{result[:filename]}")
     else
-      Rails.logger.warn("[ContentStreamingService] User-selected stream failed to resolve, falling back: #{resolve_url}")
+      Rails.logger.warn("[ContentStreamingService] User-selected stream failed to resolve, falling back for imdb_id=#{imdb_id}")
       result = resolve_fallback_streams(resolve_url, imdb_id, type, season: season, episode: episode)
       if result
-        Rails.logger.info("[ContentStreamingService] Fallback stream resolved: #{result[:streaming_url]} (filename: #{result[:filename]})")
+        Rails.logger.info("[ContentStreamingService] Fallback stream resolved for imdb_id=#{imdb_id} filename=#{result[:filename]}")
       else
-        Rails.logger.warn("[ContentStreamingService] No valid stream found via fallback")
+        Rails.logger.warn("[ContentStreamingService] No valid stream found via fallback for imdb_id=#{imdb_id}")
       end
     end
 

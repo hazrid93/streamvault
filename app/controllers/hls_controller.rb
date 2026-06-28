@@ -18,7 +18,7 @@ class HlsController < ApplicationController
   # Returns: { session_id: "...", playlist_url: "/hls/<id>/playlist.m3u8" }
   def start
     input_url = params[:url].to_s
-    unless valid_stream_url?(input_url)
+    unless valid_stream_url?(input_url) && verify_stream_url!
       render json: { error: "Invalid stream URL" }, status: :bad_request
       return
     end

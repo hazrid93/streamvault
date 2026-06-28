@@ -3,10 +3,10 @@
 class ProgressTrackingService
   # Save watch progress for content
   def self.save_progress(user, imdb_id, progress_seconds, duration_seconds, type:, season: nil, episode: nil, poster_url: nil, title: nil)
-    return ServiceResult.failure("Invalid progress data") if progress_seconds.blank? || duration_seconds.blank?
+    progress_seconds = progress_seconds.to_i
+    duration_seconds = duration_seconds.to_i
+    return ServiceResult.failure("Invalid progress data") unless progress_seconds.positive?
 
-    progress_seconds = [ progress_seconds.to_i, 0 ].max
-    duration_seconds = [ duration_seconds.to_i, 0 ].max
     progress_pct =
       if duration_seconds.positive?
         ((progress_seconds.to_f / duration_seconds) * 100).round.clamp(0, 100)

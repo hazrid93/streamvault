@@ -41,6 +41,11 @@ export default class extends Controller {
     this.openEpisode = index
 
     // Fetch streams
+    // SECURITY INVARIANT: the response injected below comes from the
+    // content#episode_streams ERB partial, which must use ERB
+    // auto-escaping (<%= %>) for all stream metadata.  Never introduce
+    // raw/html_safe on stream[:title]/[:name]/[:filename] in that
+    // partial — this innerHTML sink would turn it into an XSS vector.
     drawerContent.innerHTML = `
       <div class="flex items-center gap-2 text-sv-text-muted text-sm">
         <div class="w-4 h-4 border-2 border-sv-accent border-t-transparent rounded-full animate-spin"></div>

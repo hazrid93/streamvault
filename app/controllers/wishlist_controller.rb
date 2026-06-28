@@ -44,16 +44,19 @@ class WishlistController < ApplicationController
   end
 
   def move_to_library
-    library_entry = current_user.library_entries.create!(
-      content_type: @entry.content_type,
-      imdb_id: @entry.imdb_id,
-      title: @entry.title,
-      poster_url: @entry.poster_url,
-      year: @entry.year
-    )
-
-    @entry.destroy
-    redirect_to library_index_path, notice: "#{library_entry.title} moved to library."
+    ActiveRecord::Base.transaction do
+      # find_or_create_by! handles the case where the movie is already
+      # in the library (duplicate submit) without raising — create!
+      # alone would 500 on the uniqueness validation.
+      library_entry = current_user.library_entries.find_or_create_by!(imdb_id: @entry.imdb_id) do |entry|
+        entry.content_type = @entry.content_type
+        entry.title = @entry.title
+        entry.poster_url = @entry.poster_url
+        entry.year = @entry.year
+      end
+      @entry.destroy
+      redirect_to library_index_path, notice: "#{library_entry.title} moved to library."
+    end
   end
 
   private

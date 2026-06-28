@@ -12,7 +12,7 @@ class TranscodeDurationController < ApplicationController
   # GET /transcode/duration?url=... — probe file duration via ffprobe
   def show
     input_url = params[:url]
-    unless valid_stream_url?(input_url)
+    unless valid_stream_url?(input_url) && verify_stream_url!
       render json: { duration: 0 }, status: :bad_request
       return
     end

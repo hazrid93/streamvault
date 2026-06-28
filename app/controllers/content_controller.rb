@@ -88,7 +88,24 @@ class ContentController < ApplicationController
   private
 
   # Fetch streams from all configured providers in parallel, merging results.
+  # Cached for a short TTL (STREAM_CACHE_TTL) keyed by content + language
+  # priority — stream listings are the same for all users with the same
+  # language preferences (the RD key only affects resolve, not listing).
+  # Failures are not cached so a transient provider outage doesn't stick.
+  STREAM_CACHE_TTL = 60.seconds
+
   def fetch_provider_streams(imdb_id, type, season: nil, episode: nil, title: nil)
+    language_key = current_user.stream_language_priority.join(",")
+    cache_key = "streams/#{imdb_id}/#{type}/#{season}/#{episode}/#{language_key}"
+    cached = Rails.cache.read(cache_key)
+    return cached if cached
+
+    result = fetch_provider_streams_uncached(imdb_id, type, season: season, episode: episode, title: title)
+    Rails.cache.write(cache_key, result, expires_in: STREAM_CACHE_TTL) if result.success?
+    result
+  end
+
+  def fetch_provider_streams_uncached(imdb_id, type, season: nil, episode: nil, title: nil)
     providers = StreamProvider.providers(rd_api_key: current_user&.realdebrid_api_key)
     all_streams = []
 

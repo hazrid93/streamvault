@@ -103,6 +103,7 @@ class TorrentioService
   end
 
   METADATA_CACHE_TTL = 1.hour
+  CATALOG_CACHE_TTL = 1.hour
 
   def metadata(imdb_id, type)
     return ServiceResult.failure("IMDB ID is required") if imdb_id.blank?
@@ -152,10 +153,16 @@ class TorrentioService
     path = "catalog/#{cinemeta_type}/#{catalog_id}.json"
     path += "?genre=#{CGI.escape(genre)}" if genre.present?
 
+    cache_key = "torrentio/catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{limit}"
+    cached = Rails.cache.read(cache_key)
+    return ServiceResult.success(cached) if cached
+
     response = @cinemeta.get(path)
     if response.success? && response.body.is_a?(Hash)
       metas = (response.body["metas"] || []).first(limit)
-      ServiceResult.success(metas.map { |m| normalize_cinemeta(m, type.to_s) })
+      result = metas.map { |m| normalize_cinemeta(m, type.to_s) }
+      Rails.cache.write(cache_key, result, expires_in: CATALOG_CACHE_TTL)
+      ServiceResult.success(result)
     else
       ServiceResult.success([])
     end

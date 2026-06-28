@@ -40,9 +40,11 @@ module StreamVault
     config.generators.system_tests = nil
 
     # Active Record Encryption
-    # Fallback to dummy values when the env vars are missing (e.g. during
-    # docker build assets:precompile without RAILS_MASTER_KEY).  In production
-    # these must be set via credentials or env vars.
+    # Falls back to nil when the env vars are missing (e.g. during
+    # docker build assets:precompile without RAILS_MASTER_KEY).  nil is
+    # fail-closed: Rails raises "Missing Active Record encryption
+    # credential" at the first encrypt/decrypt, so production MUST set
+    # these via credentials or env vars — dummy values are not used.
     config.active_record.encryption.primary_key = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY", nil)
     config.active_record.encryption.deterministic_key = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY", nil)
     config.active_record.encryption.key_derivation_salt = ENV.fetch("ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT", nil)

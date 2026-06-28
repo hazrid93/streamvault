@@ -5,6 +5,13 @@ RSpec.describe "Transcode", type: :request do
 
   before do
     sign_in user
+    # Stub DNS so download.real-debrid.com (which doesn't resolve in
+    # offline test envs) passes the SSRF guard's public-address check.
+    # RealDebrid's CDN host is allowlisted in StreamUrlValidation.
+    allow(Addrinfo).to receive(:getaddrinfo).and_call_original
+    allow(Addrinfo).to receive(:getaddrinfo)
+      .with("download.real-debrid.com", nil, :UNSPEC, :STREAM)
+      .and_return([ Addrinfo.ip("199.115.115.1") ])
   end
 
   describe "GET /transcode" do
@@ -24,12 +31,20 @@ RSpec.describe "Transcode", type: :request do
       expect(response).to have_http_status(:bad_request)
     end
 
+    it "rejects non-allowlisted public media URLs before invoking ffmpeg" do
+      expect(TranscodeService).not_to receive(:transcode_to_fmp4)
+
+      get transcode_stream_path, params: { url: "https://example.com/video.mkv" }
+
+      expect(response).to have_http_status(:bad_request)
+    end
+
     it "returns bad gateway when ffmpeg fails before producing data" do
       allow(TranscodeService).to receive(:transcode_to_fmp4).and_raise(
         TranscodeService::TranscodeError, "FFmpeg exited without producing output. stderr: error"
       )
 
-      get transcode_stream_path, params: { url: "https://example.com/video.mkv" }
+      get transcode_stream_path, params: { url: "https://download.real-debrid.com/d/file123/video.mkv" }
 
       expect(response).to have_http_status(:bad_gateway)
       expect(response.content_type).to include("text/plain")
@@ -43,7 +58,7 @@ RSpec.describe "Transcode", type: :request do
       end
       allow(Rails.logger).to receive(:error)
 
-      get transcode_stream_path, params: { url: "https://example.com/video.mkv" }
+      get transcode_stream_path, params: { url: "https://download.real-debrid.com/d/file123/video.mkv" }
 
       expect(Rails.logger).to have_received(:error).with(/\[Transcode\].*stream stalled/)
       expect(response).to have_http_status(:ok)

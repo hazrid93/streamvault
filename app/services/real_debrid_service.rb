@@ -160,19 +160,23 @@ class RealDebridService
 
   def with_retry
     retries = 0
+
     loop do
-      response = yield
+      response =
+        begin
+          yield
+        rescue Faraday::TimeoutError, Faraday::ConnectionFailed
+          retries += 1
+          raise if retries > MAX_RETRIES
+
+          sleep(RETRY_DELAY * retries)
+          next
+        end
+
       return response if response.status != 429 || retries >= MAX_RETRIES
 
       retries += 1
       sleep(RETRY_DELAY * retries)
     end
-  rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
-    retries = (retries || 0) + 1
-    if retries <= MAX_RETRIES
-      sleep(RETRY_DELAY * retries)
-      retry
-    end
-    raise
   end
 end

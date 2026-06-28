@@ -126,12 +126,16 @@ class HlsSession
     record = HlsSessionRecord.find_by(session_id: id)
     return unless record
 
+    # Prefer the in-memory PID (same worker that spawned ffmpeg — the
+    # only place that can reliably target the process group).  Fall
+    # back to the persisted record.pid so the recurring cleanup job
+    # (running in the SolidQueue worker, whose @pids is empty) can
+    # still kill orphaned ffmpeg processes from other workers.
     pid = @mutex.synchronize { @pids.delete(id) }
     @mutex.synchronize { @errors.delete(id) }
+    pid ||= record.pid
     if pid
-      # Only the worker that spawned ffmpeg can kill it.
-      killer = HlsSessionKiller.new(pid)
-      killer.kill
+      HlsSessionKiller.new(pid).kill
     end
 
     FileUtils.rm_rf(record.segment_dir)
