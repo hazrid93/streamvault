@@ -888,26 +888,53 @@ export default class extends Controller {
   // (60s of no data) handles reconnection from the current position.
   // If the video reaches the end naturally, onVideoEnded handles it.
   handlePrematureStreamEnd() {
-    // Only trigger recovery if we're near the end (no more content
-    // to play) AND the fetch ended — that's a genuine end-of-stream.
+    // Genuine end-of-stream: the fetch ended and we're near the
+    // known duration.  Let the video finish naturally.
     if (this.knownDuration > 0) {
       const currentPos = this.currentPlaybackPosition()
       if (currentPos >= this.knownDuration - 5) return
     }
 
-    // If playback never started (or there's no buffered data), there
-    // is no buffer to play through — waiting would hang forever.
-    // Recover immediately instead.
+    // No buffer to play through — recover immediately.
     if (!this.playbackStarted || !this.sourceBuffer || this.sourceBuffer.buffered.length === 0) {
       console.warn("Stream fetch ended early with no buffer — recovering.")
       this.handleStreamStall()
       return
     }
 
-    // Not near the end — the fetch ended but we may have buffered data.
-    // Don't reconnect; let the video play through the buffer.  The
-    // stall watchdog will reconnect if the buffer truly runs dry.
-    console.warn("Stream fetch ended early — continuing from buffer.")
+    // The fetch ended but we have buffered data.  Check how much
+    // buffer is ahead of the current playback position.  If the
+    // remaining buffer is small (< 30s), reconnect immediately —
+    // waiting for the stall watchdog (30s) means the user stares at
+    // "Buffering" for 30s after the buffer runs dry, when we could
+    // have started the reconnect now while the video is still playing.
+    // If the buffer is large, let the video play through it and let
+    // the stall watchdog handle reconnection when it runs dry.
+    const bufferedAhead = this.bufferedAheadOfCurrent()
+    if (bufferedAhead < 30) {
+      console.warn(`Stream fetch ended early with ${bufferedAhead.toFixed(1)}s buffer — reconnecting.`)
+      this.handleStreamStall()
+      return
+    }
+    console.warn(`Stream fetch ended early with ${bufferedAhead.toFixed(1)}s buffer — continuing from buffer.`)
+  }
+
+  // How many seconds of buffer are ahead of the current playback position.
+  // Finds the buffered range that contains currentTime (or the next range
+  // after it) and returns the gap from currentTime to the end of that range.
+  // Returns 0 if there's no buffer ahead (currentTime is past all ranges).
+  bufferedAheadOfCurrent() {
+    if (!this.sourceBuffer || this.sourceBuffer.buffered.length === 0) return 0
+    const ct = this.videoTarget.currentTime
+    const ranges = this.sourceBuffer.buffered
+    for (let i = 0; i < ranges.length; i++) {
+      if (ct >= ranges.start(i) && ct < ranges.end(i)) {
+        return ranges.end(i) - ct
+      }
+      // currentTime is before this range (gap ahead) — no contiguous buffer
+      if (ct < ranges.start(i)) return 0
+    }
+    return 0
   }
 
   // Abort the current fetch, tear down the MSE pipeline, and restart
@@ -2155,15 +2182,6 @@ export default class extends Controller {
     }
 
     this.isSeeking = true
-    console.warn("[SEEK DEBUG] restartPlaybackAt called", {
-      targetSeconds,
-      currentTime: this.videoTarget.currentTime,
-      paused: this.videoTarget.paused,
-      bufferedRanges: this.bufferedRangesDebug(),
-      streamRecoveryAttempts: this.streamRecoveryAttempts,
-      streamRecoveryActive: this.streamRecoveryActive,
-      stack: new Error().stack?.split("\n").slice(1, 4).map(s => s.trim()).join(" | ")
-    })
     this.showSeekingOverlay()
     // A deliberate restart (user seek or auto-advance) resets the
     // stall-recovery counter — this is not an automatic recovery.
@@ -2263,7 +2281,6 @@ export default class extends Controller {
   // ── Seeking overlay ───────────────────────────────────────────────
 
   showSeekingOverlay(message = "Seeking...") {
-    console.warn("[SEEK DEBUG] showSeekingOverlay called", { message, isSeeking: this.isSeeking })
     if (this.hasSeekingOverlayMessageTarget) this.seekingOverlayMessageTarget.textContent = message
     if (this.isSeeking) {
       // Seeking/error overlays ARE interactive (e.g. onVideoError
@@ -2285,11 +2302,6 @@ export default class extends Controller {
   // Show the overlay with a "Buffering..." message — used when the
   // video element runs out of data mid-playback (not a user seek).
   showBufferingOverlay() {
-    console.warn("[SEEK DEBUG] showBufferingOverlay called", {
-      paused: this.videoTarget.paused,
-      bufferedRanges: this.bufferedRangesDebug(),
-      currentTime: this.videoTarget.currentTime
-    })
     if (this.hasSeekingOverlayMessageTarget) this.seekingOverlayMessageTarget.textContent = "Buffering..."
     // pointer-events-none so the user can still seek/click while the
     // buffering spinner is visible — the overlay is visual feedback,
