@@ -13,30 +13,28 @@ const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const BUFFER_AHEAD_SECONDS = 10
 const BUFFER_AHEAD_MAX_WAIT_MS = 10000
-// After a stall, rebuild a deeper buffer before resuming so the next
+// After a stall, rebuild a small buffer before resuming so the next
 // upstream throughput dip is absorbed instead of immediately re-stalling.
-// Kept small (4s) — the goal is just enough to avoid an instant re-stall,
-// not to build a huge buffer.  Large values cause the rebuffer gate to
-// wait too long on slow sources, and the stall watchdog fires before the
-// gate reaches the threshold, triggering unnecessary reconnects that
-// discard the buffer built so far ("Seeking..." cycle).
-const REBUFFER_AHEAD_SECONDS = 4
+// 2s is enough to avoid an instant re-stall without making the user
+// wait too long on "Buffering".  The stall watchdog catches a truly
+// dead source — the gate just avoids a micro-stall cycle.
+const REBUFFER_AHEAD_SECONDS = 2
 // Stall watchdog timeout for rebuffer stalls (playback already started).
 // Must be longer than the time to accumulate REBUFFER_AHEAD_SECONDS at a
 // reasonable source speed, so trickling data doesn't trigger a reconnect
-// before the rebuffer gate has a chance to resume.  30s is a good
-// balance: long enough for slow-but-alive sources, short enough that a
-// truly dead fetch (server closed the response) doesn't leave the user
-// staring at "Buffering" for a full minute.
-const REBUFFER_STALL_TIMEOUT_MS = 30000
+// before the rebuffer gate has a chance to resume.  15s is long enough
+// for slow-but-alive sources, short enough that a truly dead fetch
+// (server closed the response) doesn't leave the user staring at
+// "Buffering" for too long.
+const REBUFFER_STALL_TIMEOUT_MS = 15000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
 // before resuming with whatever buffer has accumulated.  On a slow
 // or trickling source, data arrives in small bursts that never reach
 // the gate threshold — without a deadline, the video would sit on
 // "Buffering" forever while the stall watchdog keeps getting reset by
-// each trickle.  15s is long enough for a reasonable source to build
-// 4s of buffer, short enough to not leave the user staring at a spinner.
-const REBUFFER_MAX_WAIT_MS = 15000
+// each trickle.  5s keeps the "Buffering" pause short; the stall
+// watchdog handles a genuinely dead source.
+const REBUFFER_MAX_WAIT_MS = 5000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -636,14 +634,14 @@ export default class extends Controller {
     // arm the progress watchdog so a dead ffmpeg (playlist stopped
     // growing) is detected and recovered instead of hanging forever.
     if (this.isHls()) {
-      // Debounce like the MSE path — sub-500ms waits are visual noise.
+      // Debounce like the MSE path — sub-200ms waits are visual noise.
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = setTimeout(() => {
         this.bufferingOverlayTimer = null
         if (!this.videoTarget.paused && this.hasBufferedAhead()) return
         this.showBufferingOverlay()
         this.startProgressWatchdog()
-      }, 500)
+      }, 200)
       return
     }
     // Browsers fire "waiting" even when buffered data remains ahead —
@@ -653,13 +651,15 @@ export default class extends Controller {
     if (this.hasBufferedAhead()) {
       return
     }
-    // Debounce: wait 500ms before showing the overlay.  Many stalls
-    // resolve in under 500ms (ffmpeg burst arrived, MSE appended).
-    // Showing a spinner for a sub-500ms gap is visual noise.
+    // Debounce: wait 200ms before showing the overlay.  Many stalls
+    // resolve in under 200ms (ffmpeg burst arrived, MSE appended).
+    // Showing a spinner for a sub-200ms gap is visual noise, but
+    // 200ms is short enough that the user rarely sees a bare black
+    // frame (the previous 500ms left a visible black gap).
     clearTimeout(this.bufferingOverlayTimer)
     this.bufferingOverlayTimer = setTimeout(() => {
       this.bufferingOverlayTimer = null
-      // Re-check: the video may have resumed during the 500ms delay.
+      // Re-check: the video may have resumed during the 200ms delay.
       // If currentTime advanced or buffer is now available, the stall
       // resolved — don't show the overlay or start the watchdog.
       if (!this.videoTarget.paused && this.hasBufferedAhead()) {
@@ -680,7 +680,7 @@ export default class extends Controller {
       // connection; a rebuffer stall means the fetch may have ended
       // and no data is arriving, so reconnect sooner.
       this.startStallWatchdog(this.playbackStarted ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
-    }, 500)
+    }, 200)
   }
 
   // Returns true if there's buffered data ahead of the current position.
