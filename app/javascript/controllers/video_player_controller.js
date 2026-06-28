@@ -629,50 +629,34 @@ export default class extends Controller {
   // fires and the watchdog never triggers.
 
   onVideoWaiting() {
-    console.log("[STALL DEBUG] onVideoWaiting", {
-      paused: this.videoTarget.paused,
-      isStalled: this.isStalled,
-      hasBufferedAhead: this.hasBufferedAhead(),
-      bufferedRanges: this.bufferedRangesDebug(),
-      currentTime: this.videoTarget.currentTime,
-      readyState: this.videoTarget.readyState
-    })
-    // In HLS mode, iOS Safari manages its own buffering and the MSE
-    // stall watchdog can't reconnect (no MediaSource on iPhone).  But
-    // we still show the buffering overlay so the user sees feedback
-    // instead of a bare black screen during a buffer underrun, and
-    // arm the progress watchdog so a dead ffmpeg (playlist stopped
-    // growing) is detected and recovered instead of hanging forever.
+    // In HLS mode (iOS), the MSE stall watchdog can't reconnect (no
+    // MediaSource on iPhone).  Show the buffering overlay for user
+    // feedback and arm the progress watchdog so a dead ffmpeg is
+    // detected instead of hanging forever.
     if (this.isHls()) {
-      // Debounce like the MSE path — sub-200ms waits are visual noise.
       clearTimeout(this.bufferingOverlayTimer)
+      const waitPos = this.videoTarget.currentTime
       this.bufferingOverlayTimer = setTimeout(() => {
         this.bufferingOverlayTimer = null
-        if (!this.videoTarget.paused && this.hasBufferedAhead()) return
+        // Re-check: if currentTime advanced, the stall resolved.
+        if (this.videoTarget.currentTime > waitPos + 0.1) return
         this.showBufferingOverlay()
         this.startProgressWatchdog()
       }, 200)
       return
     }
-    // Browsers fire "waiting" when they anticipate an underrun — even
-    // if 0.5s of buffer remains, playback will stall within that window.
-    // Skipping the overlay here leaves a bare black frame when the
-    // stall actually hits 0.5s later.  The 200ms debounce below filters
-    // genuinely transient waits; don't pre-filter on hasBufferedAhead.
-    // Debounce: wait 200ms before showing the overlay.  Many stalls
-    // resolve in under 200ms (ffmpeg burst arrived, MSE appended).
-    // Showing a spinner for a sub-200ms gap is visual noise, but
-    // 200ms is short enough that the user rarely sees a bare black
-    // frame (the previous 500ms left a visible black gap).
+    // MSE path: Chrome does NOT set paused=true when the MSE buffer runs
+    // dry — the video stays "playing" but currentTime stops advancing.
+    // Debounce 200ms to filter genuinely transient waits (ffmpeg burst
+    // arrived, MSE appended).  Re-check by testing whether currentTime
+    // actually advanced during the 200ms, NOT whether paused===false —
+    // paused stays false during an MSE underrun.
     clearTimeout(this.bufferingOverlayTimer)
+    const waitPos = this.videoTarget.currentTime
     this.bufferingOverlayTimer = setTimeout(() => {
       this.bufferingOverlayTimer = null
-      // Re-check: the video may have resumed during the 200ms delay.
-      // If currentTime advanced or buffer is now available, the stall
-      // resolved — don't show the overlay or start the watchdog.
-      if (!this.videoTarget.paused && this.hasBufferedAhead()) {
-        return
-      }
+      // If currentTime advanced, the stall resolved — don't show overlay.
+      if (this.videoTarget.currentTime > waitPos + 0.1) return
       this.stopProgressWatchdog()
       this.isStalled = true
       this.showBufferingOverlay()
@@ -1016,7 +1000,7 @@ export default class extends Controller {
     // the rebuffer gate may never reach REBUFFER_AHEAD_SECONDS on a
     // slow source, and the shorter timeout triggers recovery sooner.
     // If the video is playing, use the default 60s.
-    const stalled = this.videoTarget.paused && !this.userPaused && this.playbackStarted
+    const stalled = this.isStalled && !this.userPaused && this.playbackStarted
     this.startStallWatchdog(stalled ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
@@ -1247,14 +1231,6 @@ export default class extends Controller {
   }
 
   onVideoReady() {
-    console.log("[STALL DEBUG] onVideoReady (playing)", {
-      paused: this.videoTarget.paused,
-      isSeeking: this.isSeeking,
-      isStalled: this.isStalled,
-      hasBufferedAhead2: this.hasBufferedAhead(2),
-      bufferedRanges: this.bufferedRangesDebug(),
-      currentTime: this.videoTarget.currentTime
-    })
     // Only act when the video is actually playing.  If the video is
     // paused (deliberate rebuffer gate in maybeStartPlayback), don't
     // interfere — the "Buffering..." overlay should stay visible.
