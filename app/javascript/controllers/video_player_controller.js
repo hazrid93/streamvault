@@ -134,7 +134,9 @@ export default class extends Controller {
     this.videoTarget.addEventListener("volumechange", this.volumeChangeHandler)
     this.videoTarget.addEventListener("waiting", this.videoWaitingHandler)
     this.videoTarget.addEventListener("playing", this.videoReadyHandler)
-    this.videoTarget.addEventListener("canplay", this.videoReadyHandler)
+    // canplay is intentionally NOT listened to — it fires when the browser
+    // has just one frame, which hides the buffering overlay prematurely
+    // during a stall.  Only "playing" (actual playback resuming) hides it.
     this.videoEndedHandler = () => this.onVideoEnded()
     this.videoTarget.addEventListener("ended", this.videoEndedHandler)
     this.videoErrorHandler = (e) => this.onVideoError(e)
@@ -188,7 +190,6 @@ export default class extends Controller {
     this.videoTarget.removeEventListener("volumechange", this.volumeChangeHandler)
     this.videoTarget.removeEventListener("waiting", this.videoWaitingHandler)
     this.videoTarget.removeEventListener("playing", this.videoReadyHandler)
-    this.videoTarget.removeEventListener("canplay", this.videoReadyHandler)
     this.videoTarget.removeEventListener("ended", this.videoEndedHandler)
     this.videoTarget.removeEventListener("error", this.videoErrorHandler)
     window.removeEventListener("beforeunload", this.beforeUnloadHandler)
@@ -644,13 +645,11 @@ export default class extends Controller {
       }, 200)
       return
     }
-    // Browsers fire "waiting" even when buffered data remains ahead —
-    // the media element preempts a potential underrun.  Only show the
-    // overlay if the buffer is actually empty at the current position.
-    // This prevents the "Seeking"/"Buffering" flash on transient waits.
-    if (this.hasBufferedAhead()) {
-      return
-    }
+    // Browsers fire "waiting" when they anticipate an underrun — even
+    // if 0.5s of buffer remains, playback will stall within that window.
+    // Skipping the overlay here leaves a bare black frame when the
+    // stall actually hits 0.5s later.  The 200ms debounce below filters
+    // genuinely transient waits; don't pre-filter on hasBufferedAhead.
     // Debounce: wait 200ms before showing the overlay.  Many stalls
     // resolve in under 200ms (ffmpeg burst arrived, MSE appended).
     // Showing a spinner for a sub-200ms gap is visual noise, but
