@@ -21,7 +21,7 @@ require "fileutils"
 class TranscodeService
   FFMPEG_PATH = "ffmpeg"
   FFPROBE_PATH = "ffprobe"
-  FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets"
+  FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
   # HLS segment duration in seconds — balances latency against overhead.
@@ -647,7 +647,11 @@ class TranscodeService
       [
         "-f", "mp4",
         "-movflags", FMP4_FLAGS,
-        "-frag_duration", "100000",  # 0.1s for fast first fragment
+        # No -frag_duration: with +frag_keyframe, ffmpeg fragments at
+        # keyframes only, ensuring every fragment starts with a random
+        # access point as Chrome's MSE chunk demuxer requires.  Setting
+        # frag_duration forces fragments at fixed time intervals that
+        # don't align with keyframes → CHUNK_DEMUXER_ERROR_APPEND_FAILED.
         "-fflags", "+genpts",
         "pipe:1"
       ]
