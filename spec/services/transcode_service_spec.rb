@@ -320,7 +320,7 @@ RSpec.describe TranscodeService do
       )
 
       expect(argument_pairs(command)).to include([ "-f", "hls" ])
-      expect(argument_pairs(command)).to include([ "-hls_time", "2" ])
+      expect(argument_pairs(command)).to include([ "-hls_time", "4" ])
       expect(argument_pairs(command)).to include([ "-hls_playlist_type", "event" ])
       expect(argument_pairs(command)).to include([ "-hls_segment_type", "mpegts" ])
       expect(argument_pairs(command)).to include([ "-hls_flags", "temp_file" ])

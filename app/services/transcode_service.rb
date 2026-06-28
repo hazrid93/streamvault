@@ -25,7 +25,11 @@ class TranscodeService
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
   # HLS segment duration in seconds — balances latency against overhead.
-  HLS_SEGMENT_DURATION = 2
+  # 4s (up from 2s) gives iOS Safari a deeper natural buffer per
+  # segment, reducing the periodic black-screen underruns that happen
+  # when the transcode throughput dips between segment writes.  Fewer
+  # segment requests also means less playlist re-fetching overhead.
+  HLS_SEGMENT_DURATION = 4
   # HLS flags: temp_file writes segments via a .tmp~ sidecar and renames
   # them only once complete, so clients never read a partial segment.
   HLS_FLAGS = "temp_file".freeze

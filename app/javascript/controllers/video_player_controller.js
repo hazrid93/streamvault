@@ -29,6 +29,14 @@ const REBUFFER_AHEAD_SECONDS = 4
 // truly dead fetch (server closed the response) doesn't leave the user
 // staring at "Buffering" for a full minute.
 const REBUFFER_STALL_TIMEOUT_MS = 30000
+// Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
+// before resuming with whatever buffer has accumulated.  On a slow
+// or trickling source, data arrives in small bursts that never reach
+// the gate threshold — without a deadline, the video would sit on
+// "Buffering" forever while the stall watchdog keeps getting reset by
+// each trickle.  15s is long enough for a reasonable source to build
+// 4s of buffer, short enough to not leave the user staring at a spinner.
+const REBUFFER_MAX_WAIT_MS = 15000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -105,6 +113,7 @@ export default class extends Controller {
     // suppresses the duplicate save in the beforeunload handler.
     this.navigatingAway = false
     this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     this.mseSupported = window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"')
     this.hlsSessionId = null
 
@@ -168,6 +177,7 @@ export default class extends Controller {
     this.stopProgressWatchdog()
     this.playbackStarted = false
     this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     this.cancelSeekDrag()
     this.element.removeEventListener("mousemove", this.mouseMoveHandler)
     document.removeEventListener("keydown", this.keydownHandler)
@@ -251,6 +261,7 @@ export default class extends Controller {
     this.playbackStarted = false
     this.userPaused = false
     this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     // Clear any stall watchdog from the previous connection so a
     // pending timer can't fire into the new MSE pipeline.
     this.clearStallWatchdog()
@@ -400,29 +411,42 @@ export default class extends Controller {
     }
   }
 
-  // Poll the HLS playlist URL until it's ready (200), ffmpeg fails
-  // (424), or a timeout is reached.  Returns true if the playlist is
-  // ready, false otherwise.  Uses HEAD requests to avoid downloading
-  // the playlist body on every poll — iOS Safari will fetch it
-  // properly when the video src is set.
+  // Poll the HLS playlist URL until enough segments are ready, ffmpeg
+  // fails (424), or a timeout is reached.  Waiting for at least 2
+  // segments (instead of 1) gives iOS Safari a buffer head start: by
+  // the time it fetches and decodes the first segment, ffmpeg has
+  // already produced the second and is working on the third.  This
+  // reduces the periodic black-screen underruns that happen when
+  // playback starts with a single segment buffer and the transcode
+  // throughput dips.  Falls back to 1 segment if the timeout is nearly
+  // reached, so a slow source doesn't fail entirely.
   async waitForPlaylist(playlistUrl) {
     const maxAttempts = 150  // 150 × 200ms = 30s max wait
     const pollInterval = 200
+    const minSegments = 2
+    // After this many attempts, accept 1 segment rather than timing out.
+    const fallbackAttempts = 100  // 20s
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const res = await fetch(playlistUrl, { method: "HEAD" })
-        if (res.status === 200) return true
+        // GET (not HEAD) so we can count segments in the playlist body.
+        // The playlist is small (a few KB), so fetching it is cheap.
+        const res = await fetch(playlistUrl)
         if (res.status === 424) {
-          // ffmpeg failed — extract error message if available
           try {
             const body = await res.json()
             console.warn('HLS: ffmpeg failed:', body.error)
           } catch {}
           return false
         }
+        if (res.status === 200) {
+          const text = await res.text()
+          const segmentCount = (text.match(/#EXTINF/g) || []).length
+          const minNeeded = i >= fallbackAttempts ? 1 : minSegments
+          if (segmentCount >= minNeeded) return true
+        }
         // 202 (Accepted) — playlist not ready yet, keep polling
       } catch {
- // network error — keep polling
+        // network error — keep polling
       }
       await new Promise(resolve => setTimeout(resolve, pollInterval))
     }
@@ -605,11 +629,23 @@ export default class extends Controller {
   // fires and the watchdog never triggers.
 
   onVideoWaiting() {
-    // In HLS mode, iOS Safari manages its own buffering.  The MSE
-    // stall watchdog would try to reconnect via setupMseSource — which
-    // crashes on iPhone Safari (no MediaSource).  Let the native HLS
-    // player handle stalls.
-    if (this.isHls()) return
+    // In HLS mode, iOS Safari manages its own buffering and the MSE
+    // stall watchdog can't reconnect (no MediaSource on iPhone).  But
+    // we still show the buffering overlay so the user sees feedback
+    // instead of a bare black screen during a buffer underrun, and
+    // arm the progress watchdog so a dead ffmpeg (playlist stopped
+    // growing) is detected and recovered instead of hanging forever.
+    if (this.isHls()) {
+      // Debounce like the MSE path — sub-500ms waits are visual noise.
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = setTimeout(() => {
+        this.bufferingOverlayTimer = null
+        if (!this.videoTarget.paused && this.hasBufferedAhead()) return
+        this.showBufferingOverlay()
+        this.startProgressWatchdog()
+      }, 500)
+      return
+    }
     // Browsers fire "waiting" even when buffered data remains ahead —
     // the media element preempts a potential underrun.  Only show the
     // overlay if the buffer is actually empty at the current position.
@@ -620,7 +656,7 @@ export default class extends Controller {
     // Debounce: wait 500ms before showing the overlay.  Many stalls
     // resolve in under 500ms (ffmpeg burst arrived, MSE appended).
     // Showing a spinner for a sub-500ms gap is visual noise.
-    if (this.bufferingOverlayTimer) clearTimeout(this.bufferingOverlayTimer)
+    clearTimeout(this.bufferingOverlayTimer)
     this.bufferingOverlayTimer = setTimeout(() => {
       this.bufferingOverlayTimer = null
       // Re-check: the video may have resumed during the 500ms delay.
@@ -631,6 +667,14 @@ export default class extends Controller {
       }
       this.stopProgressWatchdog()
       this.showBufferingOverlay()
+      // Set a rebuffer deadline: if the gate threshold isn't reached
+      // within REBUFFER_MAX_WAIT_MS, resume with whatever we have.
+      // Without this, a trickling source keeps resetting the stall
+      // watchdog on each tiny burst and the video hangs on "Buffering"
+      // forever because the rebuffer gate is never reached.
+      if (!this.rebufferDeadline) {
+        this.rebufferDeadline = Date.now() + REBUFFER_MAX_WAIT_MS
+      }
       // After a stall with playback already started, use a shorter
       // stall watchdog timeout — the 60s default is for initial
       // connection; a rebuffer stall means the fetch may have ended
@@ -705,7 +749,6 @@ export default class extends Controller {
   // trip it.
 
   startProgressWatchdog() {
-    if (this.isHls()) return  // iOS HLS manages its own playback
     if (this.progressWatchdogArmed) return
     this.lastProgressPosition = this.videoTarget.currentTime
     this.lastProgressTime = Date.now()
@@ -724,6 +767,10 @@ export default class extends Controller {
   checkProgressStall() {
     if (!this.progressWatchdogArmed) return
     if (this.streamRecoveryActive || this.isSeeking) return
+    // A deliberate user pause is not a stall — the watchdog is
+    // disarmed in togglePlay, but guard anyway in case it was armed
+    // by onVideoReady before the pause landed.
+    if (this.userPaused) return
     // Only meaningful while the video is supposedly playing.
     if (this.videoTarget.paused || this.videoTarget.ended) return
     // Don't count a stall before playback has actually begun.
@@ -747,7 +794,11 @@ export default class extends Controller {
     if (elapsed >= PROGRESS_STALL_TIMEOUT_MS) {
       console.warn(`Silent freeze detected — currentTime stuck at ${pos} for ${Math.round(elapsed / 1000)}s`)
       this.progressWatchdogArmed = false
-      this.handleStreamStall()
+      if (this.isHls()) {
+        this.handleHlsStall()
+      } else {
+        this.handleStreamStall()
+      }
     }
   }
 
@@ -770,6 +821,16 @@ export default class extends Controller {
   // current fetch and reconnects from the current playback position,
   // up to STREAM_MAX_RECOVERY_ATTEMPTS times.
   handleStreamStall() {
+    // Never trigger recovery while the user has deliberately paused.
+    // The stall watchdog and progress watchdog can fire long after a
+    // user pause (60s/30s), and reconnectFromCurrentPosition resets
+    // userPaused=false via setupMseSource — which would auto-resume
+    // playback the user explicitly paused.
+    if (this.userPaused) {
+      this.clearStallWatchdog()
+      this.stopProgressWatchdog()
+      return
+    }
     if (this.isHls()) return  // iOS HLS handles its own recovery
     if (this.streamRecoveryActive) return
     if (this.streamRecoveryAttempts >= STREAM_MAX_RECOVERY_ATTEMPTS) {
@@ -782,6 +843,39 @@ export default class extends Controller {
     this.streamRecoveryActive = true
     console.warn(`Stream stalled — recovering (attempt ${this.streamRecoveryAttempts}/${STREAM_MAX_RECOVERY_ATTEMPTS})`)
     this.reconnectFromCurrentPosition()
+  }
+
+  // HLS stall recovery (iOS).  When the progress watchdog detects
+  // that currentTime has frozen for PROGRESS_STALL_TIMEOUT_MS while
+  // the video is supposedly playing, the ffmpeg HLS process has
+  // likely died or the upstream source stalled.  Restart the HLS
+  // transcode from the current playback position — the same path a
+  // user seek takes — so playback resumes instead of hanging on a
+  // frozen frame or "Buffering" forever.
+  handleHlsStall() {
+    if (this.userPaused) return
+    if (this.isSeeking) return
+    if (this.streamRecoveryAttempts >= STREAM_MAX_RECOVERY_ATTEMPTS) {
+      console.warn("HLS recovery limit reached — giving up.")
+      this.showSeekingOverlay("Stream stalled — tap to retry")
+      const overlay = this.seekingOverlayTarget
+      const onRetry = () => {
+        overlay.removeEventListener("click", onRetry)
+        this.hideSeekingOverlay()
+        this.streamRecoveryAttempts = 0
+        this.handleHlsStall()
+      }
+      overlay.addEventListener("click", onRetry)
+      return
+    }
+
+    this.streamRecoveryAttempts += 1
+    console.warn(`HLS stall detected — restarting session (attempt ${this.streamRecoveryAttempts}/${STREAM_MAX_RECOVERY_ATTEMPTS})`)
+    const targetSeconds = Math.floor(this.currentPlaybackPosition())
+    this.isSeeking = true
+    this.showSeekingOverlay("Reconnecting...")
+    this.clearSubtitleCues()
+    this.restartHlsSession(targetSeconds)
   }
 
   // Called when the server closes the stream response early (done=true)
@@ -958,8 +1052,15 @@ export default class extends Controller {
     // userPaused flag distinguishes "buffer ran dry" from "user paused".
     // Also skip while a subtitle load holds playback (isSeeking) — the
     // hold's own finishSubtitlePlaybackHold resumes when ready.
+    //
+    // A rebuffer deadline (set in onVideoWaiting) ensures we don't sit
+    // on "Buffering" forever on a trickling source: if the threshold
+    // isn't reached within REBUFFER_MAX_WAIT_MS, resume with whatever
+    // buffer has accumulated rather than leaving the user stuck.
     if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
-      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS) {
+      const deadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
+      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || deadlineReached) {
+        this.rebufferDeadline = null
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
       }
@@ -990,9 +1091,14 @@ export default class extends Controller {
     } else {
       this.userPaused = true
       this.videoTarget.pause()
+      // A deliberate pause must not be auto-resumed by the stall or
+      // progress watchdogs firing later, nor by the rebuffer deadline.
+      // Clear them so the video stays paused until the user resumes.
+      this.clearStallWatchdog()
+      this.stopProgressWatchdog()
+      this.rebufferDeadline = null
     }
   }
-
   onVideoClick(event) {
     event.preventDefault()
     this.togglePlay()
@@ -1136,6 +1242,12 @@ export default class extends Controller {
       this.bufferingOverlayTimer = null
     }
     this.clearStallWatchdog()
+    // Playback is actually playing — any stall recovery succeeded
+    // (or this is a fresh start).  Reset the attempt counter so a
+    // future stall gets a fresh quota instead of being permanently
+    // blocked by prior failures.
+    this.streamRecoveryAttempts = 0
+    this.streamRecoveryActive = false
     this.startProgressWatchdog()
     this.hideSeekingOverlay()
     this.hideStartupOverlay()
@@ -1565,6 +1677,10 @@ export default class extends Controller {
 
     this.subtitlePlaybackHoldToken = null
     this.hideSeekingOverlay()
+    // Only resume if the stall was caused by the subtitle hold, not by
+    // the user pausing in the meantime.  Without this check, a subtitle
+    // load completing while the user has paused would auto-resume.
+    if (this.userPaused) return
     const playPromise = this.videoTarget.play()
     if (playPromise?.catch) playPromise.catch(() => {})
   }
