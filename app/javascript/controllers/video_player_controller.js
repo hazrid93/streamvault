@@ -1239,34 +1239,30 @@ export default class extends Controller {
   }
 
   onVideoReady() {
-    // Only hide overlays and cancel the watchdog when the video is
-    // actually playing.  If the video is paused (deliberate rebuffer
-    // gate in maybeStartPlayback), don't interfere — the "Buffering..."
-    // overlay should stay visible until we resume playback.
+    // Only act when the video is actually playing.  If the video is
+    // paused (deliberate rebuffer gate in maybeStartPlayback), don't
+    // interfere — the "Buffering..." overlay should stay visible.
     if (this.videoTarget.paused) return
 
-    // Don't hide the overlay if the buffer is critically low.  Chrome
-    // fires "playing" on a tiny trickle of data, then immediately
-    // stalls again — if we hide the overlay here, the user sees a
-    // rapid freeze-resume-freeze cycle with no spinner.  Keep the
+    // Always hide the startup overlay on first play — it's only shown
+    // before playback begins, and "playing" means playback has begun.
+    this.hideStartupOverlay()
+
+    // Don't hide the buffering overlay if the buffer is critically low.
+    // Chrome fires "playing" on a tiny trickle of data, then immediately
+    // stalls again — if we hide the overlay here, the user sees a rapid
+    // freeze-resume-freeze cycle with no spinner.  Keep the buffering
     // overlay visible until there's at least 2s of buffer ahead.
     if (!this.hasBufferedAhead(2)) return
 
-    // Cancel a pending buffering-overlay debounce — the video resumed
-    // before the 200ms delay elapsed, so no overlay should be shown.
     clearTimeout(this.bufferingOverlayTimer)
     this.bufferingOverlayTimer = null
     this.isStalled = false
     this.clearStallWatchdog()
-    // Playback is actually playing — any stall recovery succeeded
-    // (or this is a fresh start).  Reset the attempt counter so a
-    // future stall gets a fresh quota instead of being permanently
-    // blocked by prior failures.
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
     this.startProgressWatchdog()
     this.hideSeekingOverlay()
-    this.hideStartupOverlay()
   }
 
   syncStartupOverlay() {
