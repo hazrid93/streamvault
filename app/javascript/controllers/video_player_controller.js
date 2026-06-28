@@ -1042,23 +1042,19 @@ export default class extends Controller {
       return
     }
 
-    // Rebuffering: the video is paused (waiting/stalled) after having
-    // started.  Don't resume until the buffer has refilled to the
-    // (larger) REBUFFER_AHEAD_SECONDS threshold — a deeper buffer after a
-    // stall absorbs the next upstream throughput dip instead of
-    // immediately re-stalling, reducing repeated recovery cycles.
+    // Rebuffering: the video paused because the buffer ran dry.  We
+    // previously gated resumption on REBUFFER_AHEAD_SECONDS here, but
+    // that created a periodic stall cycle: pause → buffer 2s → resume →
+    // play 2s → stall → repeat.  Instead, resume as soon as ANY data is
+    // available (bufferedAhead > 0).  The browser's native waiting/playing
+    // cycle handles micro-stalls gracefully — a brief freeze is less
+    // disruptive than a full pause-resume cycle with a spinner.
     // Never auto-resume a deliberate user pause (button/spacebar): the
     // userPaused flag distinguishes "buffer ran dry" from "user paused".
     // Also skip while a subtitle load holds playback (isSeeking) — the
     // hold's own finishSubtitlePlaybackHold resumes when ready.
-    //
-    // A rebuffer deadline (set in onVideoWaiting) ensures we don't sit
-    // on "Buffering" forever on a trickling source: if the threshold
-    // isn't reached within REBUFFER_MAX_WAIT_MS, resume with whatever
-    // buffer has accumulated rather than leaving the user stuck.
     if (this.videoTarget.paused && !this.videoTarget.ended && !this.userPaused && !this.isSeeking) {
-      const deadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
-      if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || deadlineReached) {
+      if (bufferedAhead > 0) {
         this.rebufferDeadline = null
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
