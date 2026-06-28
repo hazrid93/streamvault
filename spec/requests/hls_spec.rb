@@ -125,7 +125,14 @@ RSpec.describe "HLS streaming", type: :request do
       expect(response).to have_http_status(:ok)
     end
 
-    it "returns 404 for non-existent segment" do
+    it "returns 503 for not-yet-produced segment on a live stream" do
+      get "/hls/#{session_id}/99.ts"
+      expect(response).to have_http_status(:service_unavailable)
+      expect(response.headers["Retry-After"]).to eq("1")
+    end
+
+    it "returns 404 for non-existent segment when ffmpeg has finished" do
+      File.write(File.join(segment_dir, "playlist.m3u8"), "#EXTM3U\n#EXT-X-ENDLIST\n")
       get "/hls/#{session_id}/99.ts"
       expect(response).to have_http_status(:not_found)
     end

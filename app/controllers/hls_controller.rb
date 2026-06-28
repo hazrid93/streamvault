@@ -81,6 +81,16 @@ class HlsController < ApplicationController
   end
 
   # GET /hls/:id/:segment (e.g. 0.ts, 1.ts)
+  #
+  # iOS Safari's native HLS player requests segments by index as it
+  # plays through the playlist.  When ffmpeg is transcoding slower
+  # than 1×, Safari may request a segment that hasn't been written to
+  # disk yet.  Returning 404 causes Safari to treat it as a fatal
+  # error — playback stops and the screen goes black.  Instead, we
+  # block for up to SEGMENT_WAIT_SECONDS for the segment to appear,
+  # so Safari's request simply waits until ffmpeg produces it.
+  SEGMENT_WAIT_SECONDS = Rails.env.test? ? 1 : 10
+
   def segment
     session = HlsSession.find(params[:id])
     unless session
@@ -92,8 +102,29 @@ class HlsController < ApplicationController
     path = session.segment_path(segment_index)
 
     unless File.exist?(path)
-      head :not_found
-      return
+      # Check if ffmpeg has already exited (playlist has #EXT-X-ENDLIST)
+      # — if so, the segment truly doesn't exist and 404 is correct.
+      if ffmpeg_finished?(session)
+        head :not_found
+        return
+      end
+
+      # Wait for the segment to appear.  Poll the filesystem so we
+      # don't hold a DB connection or thread for long.  Return 503
+      # if it doesn't appear within the timeout — Safari will retry.
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SEGMENT_WAIT_SECONDS
+      while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+        sleep 0.3
+        break if File.exist?(path)
+        # If ffmpeg died while waiting, stop waiting.
+        break if ffmpeg_finished?(session)
+      end
+
+      unless File.exist?(path)
+        response.headers["Retry-After"] = "1"
+        head :service_unavailable
+        return
+      end
     end
 
     response.headers["Cache-Control"] = "no-cache"
@@ -104,5 +135,15 @@ class HlsController < ApplicationController
   def stop
     HlsSession.stop(params[:id])
     head :ok
+  end
+
+  private
+
+  def ffmpeg_finished?(session)
+    playlist = session.playlist_path
+    return false unless File.exist?(playlist)
+    File.read(playlist).include?("#EXT-X-ENDLIST")
+  rescue StandardError
+    false
   end
 end
