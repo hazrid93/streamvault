@@ -102,8 +102,17 @@ class TorrentioService
     ServiceResult.failure("An unexpected error occurred")
   end
 
+  METADATA_CACHE_TTL = 1.hour
+
   def metadata(imdb_id, type)
     return ServiceResult.failure("IMDB ID is required") if imdb_id.blank?
+
+    # Metadata changes rarely — cache it to avoid a 1-10s cinemeta
+    # round-trip on every resume. The cache is shared across all
+    # users via solid_cache_store (database-backed).
+    cache_key = "torrentio/meta/#{type}/#{imdb_id}"
+    cached = Rails.cache.read(cache_key)
+    return ServiceResult.success(cached) if cached
 
     cinemeta_type = type.to_s == "show" ? "series" : type.to_s
     response = @cinemeta.get("meta/#{cinemeta_type}/#{imdb_id}.json")
@@ -111,6 +120,7 @@ class TorrentioService
     if response.success? && response.body.is_a?(Hash) && response.body["meta"]
       result = normalize_cinemeta_meta(response.body["meta"], type)
       result.merge!(fetch_omdb_ratings(imdb_id))
+      Rails.cache.write(cache_key, result, expires_in: METADATA_CACHE_TTL)
       ServiceResult.success(result)
     else
       ServiceResult.failure("Metadata not found")

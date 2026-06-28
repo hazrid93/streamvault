@@ -111,6 +111,11 @@ class StreamingController < ApplicationController
     resume_at = target[:resume_at]
 
     service = ContentStreamingService.new(current_user)
+    # Fetch stream resolution and metadata concurrently — they hit
+    # different services (RealDebrid resolve vs Cinemeta) and are
+    # independent. Running them in parallel cuts the "Loading..."
+    # time from stream_resolved + metadata_fetched to max(the two).
+    metadata_thread = Thread.new { fetch_show_metadata(imdb_id, type) }
     result = service.start_stream(
       imdb_id,
       type,
@@ -119,7 +124,7 @@ class StreamingController < ApplicationController
     )
 
     if result.success?
-      metadata = fetch_show_metadata(imdb_id, type)
+      metadata = metadata_thread.value
       redirect_to streaming_path(
         "play",
         streaming_url: result.data[:streaming_url],
@@ -131,7 +136,7 @@ class StreamingController < ApplicationController
         title: metadata[:title],
         poster_url: metadata[:poster_url],
         resume_at: resume_at,
-        duration: 0
+        duration: metadata[:runtime_seconds].to_i
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -210,10 +215,10 @@ class StreamingController < ApplicationController
 
   def fetch_show_metadata(imdb_id, type)
     meta_result = TorrentioService.new(rd_api_key: current_user.realdebrid_api_key).metadata(imdb_id, type)
-    return { title: nil, poster_url: nil } if meta_result.failure?
-    { title: meta_result.data[:title], poster_url: meta_result.data[:poster_url] }
+    return { title: nil, poster_url: nil, runtime_seconds: 0 } if meta_result.failure?
+    { title: meta_result.data[:title], poster_url: meta_result.data[:poster_url], runtime_seconds: meta_result.data[:runtime_seconds].to_i }
   rescue StandardError
-    { title: nil, poster_url: nil }
+    { title: nil, poster_url: nil, runtime_seconds: 0 }
   end
 
   def find_duration_seconds(progress_entry, imdb_id, type, season, episode)

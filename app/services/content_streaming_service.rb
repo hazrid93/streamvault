@@ -156,11 +156,22 @@ class ContentStreamingService
         next if already_done
 
         resolved = resolve_stream(s)
-        mutex.synchronize { winner ||= resolved } if resolved
+        if resolved
+          mutex.synchronize { winner ||= resolved }
+        end
       end
     end
 
-    threads.each(&:join)
+    # Join threads one at a time, stopping as soon as we have a winner.
+    # Previously this joined ALL threads — a single slow/stale resolve
+    # URL (15s timeout) held the entire batch hostage even after a
+    # winner was found, making "Loading..." take 10-15s instead of <1s.
+    threads.each do |thread|
+      mutex.synchronize { break if winner }
+      thread.join
+    end
+    threads.each { |t| t.kill unless t == Thread.current }
+
     winner
   end
 
