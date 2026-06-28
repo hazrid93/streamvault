@@ -12,9 +12,10 @@ Rails.application.configure do
     # (images.unsplash.com), and data: URIs for icons.
     policy.img_src     :self, :https, :data
     policy.object_src  :none
-    # No inline <script> tags are used — importmap + Stimulus modules
-    # all load from :self.  Keep script-src strict so any future XSS
-    # cannot execute inline code or load scripts from other hosts.
+    # importmap-rails emits an inline <script type="module">import "application"</script>
+    # bootstrap and an inline importmap JSON — both carry the per-request
+    # nonce (see content_security_policy_nonce_generator below).  Stimulus
+    # controllers themselves load from :self via the importmap.
     policy.script_src  :self
     # Tailwind + per-element inline style="" attributes require
     # unsafe-inline for styles until the inline styles are extracted.
@@ -28,13 +29,17 @@ Rails.application.configure do
     # policy.report_uri "/csp-violation-report-endpoint"
   end
 
-  # Generate session nonces for permitted importmap, inline scripts, and inline styles.
-  # config.content_security_policy_nonce_generator = ->(request) { request.session.id.to_s }
-  # config.content_security_policy_nonce_directives = %w[script-src style-src]
+  # Generate a per-request nonce so importmap-rails' inline module
+  # bootstrap (`import "application"`) is permitted under a strict
+  # script-src.  Without this, script-src 'self' blocks the inline
+  # <script type="module"> that bootstraps Stimulus, breaking every
+  # JS-driven interaction (episode picker, toggles, player, etc.).
+  config.content_security_policy_nonce_generator = ->(request) { request.session.id.to_s }
+  config.content_security_policy_nonce_directives = %w[script-src]
 
   # Automatically add `nonce` to `javascript_tag`, `javascript_include_tag`, and `stylesheet_link_tag`
   # if the corresponding directives are specified in `content_security_policy_nonce_directives`.
-  # config.content_security_policy_nonce_auto = true
+  config.content_security_policy_nonce_auto = true
 
   # Report violations without enforcing the policy.
   # config.content_security_policy_report_only = true
