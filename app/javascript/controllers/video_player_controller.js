@@ -163,6 +163,33 @@ export default class extends Controller {
 
     // Track progress every 5s
     this.startProgressTracking()
+    // DIAGNOSTIC: poll every 500ms and log state changes to detect
+    // what happens during a black screen. Remove after debugging.
+    this._diagPrev = null
+    this._diagTimer = setInterval(() => {
+      const v = this.videoTarget
+      const sb = this.sourceBuffer
+      const bufferedEnd = (sb && sb.buffered.length > 0) ? sb.buffered.end(sb.buffered.length - 1) : -1
+      const overlayHidden = this.seekingOverlayTarget.classList.contains("hidden")
+      const state = {
+        t: v.currentTime?.toFixed(2),
+        p: v.paused,
+        rs: v.readyState,
+        nw: v.networkState,
+        be: bufferedEnd?.toFixed(2),
+        oh: overlayHidden,
+        is: this.isStalled,
+        seek: this.isSeeking,
+        sa: this.streamRecoveryActive
+      }
+      const key = JSON.stringify(state)
+      if (key !== this._diagPrev) {
+        console.log("[DIAG]", JSON.stringify(state))
+        this._diagPrev = key
+      }
+    }, 500)
+    // Clear the diagnostic timer on unload
+    window.addEventListener("beforeunload", () => clearInterval(this._diagTimer), { once: true })
   }
 
   disconnect() {
@@ -176,6 +203,7 @@ export default class extends Controller {
     this.clearStallWatchdog()
     if (this.bufferingOverlayTimer) clearTimeout(this.bufferingOverlayTimer)
     this.stopProgressWatchdog()
+    if (this._diagTimer) clearInterval(this._diagTimer)
     this.playbackStarted = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
