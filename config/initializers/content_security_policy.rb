@@ -29,16 +29,24 @@ Rails.application.configure do
     # policy.report_uri "/csp-violation-report-endpoint"
   end
 
-  # Generate a per-request nonce so importmap-rails' inline module
-  # bootstrap (`import "application"`) is permitted under a strict
-  # script-src.  Without this, script-src 'self' blocks the inline
-  # <script type="module"> that bootstraps Stimulus, breaking every
-  # JS-driven interaction (episode picker, toggles, player, etc.).
-  config.content_security_policy_nonce_generator = ->(request) { request.session.id.to_s }
-  config.content_security_policy_nonce_directives = %w[script-src]
+  # Generate a per-request nonce so importmap-rails' inline
+  # <script type="importmap"> and <script type="module"> bootstrap
+  # are permitted under a strict script-src.  Using SecureRandom
+  # instead of request.session.id because the session is lazily
+  # loaded — session.id is nil on GET requests that never write to
+  # the session (e.g. the sign-in page), producing an empty nonce
+  # that the browser ignores.  With no nonce in the CSP header and
+  # no nonce attribute on the inline script tags, script-src 'self'
+  # blocks the importmap bootstrap entirely, breaking every Stimulus
+  # controller (video player, episode picker, toggles, etc.) — which
+  # is why progress saves silently stopped and Continue Watching
+  # emptied after the CSP was enabled.
+  config.content_security_policy_nonce_generator = ->(_request) { SecureRandom.base58(32) }
+  config.content_security_policy_nonce_directives = %w[script-src style-src]
 
-  # Automatically add `nonce` to `javascript_tag`, `javascript_include_tag`, and `stylesheet_link_tag`
-  # if the corresponding directives are specified in `content_security_policy_nonce_directives`.
+  # Automatically add `nonce` to `javascript_tag`, `javascript_include_tag`,
+  # and `stylesheet_link_tag` if the corresponding directives are specified
+  # in `content_security_policy_nonce_directives`.
   config.content_security_policy_nonce_auto = true
 
   # Report violations without enforcing the policy.
