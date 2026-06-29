@@ -1129,6 +1129,7 @@ export default class extends Controller {
     this.startStallWatchdog(stalled ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
+    this.maybeHideBufferingOverlay()
     this.flushBufferQueue()
   }
 
@@ -1191,6 +1192,32 @@ export default class extends Controller {
         if (p?.catch) p.catch(() => {})
       }
     }
+  }
+
+  // Safety net for the hasBufferedAhead(2) gate in onVideoReady.
+  // When a rebuffer resume lands with < 2s of buffer, onVideoReady
+  // returns without hiding the buffering overlay — by design, to avoid
+  // a freeze-resume-freeze flicker.  But if the video then plays fine
+  // (data arrives fast enough to sustain playback without another
+  // stall), "playing" never fires again and the stall watchdog keeps
+  // getting reset by each onBufferUpdateEnd, so nothing re-checks
+  // whether the buffer has recovered — the "Buffering…" overlay stays
+  // forever.  This runs on every appendBuffer completion and hides the
+  // overlay once the video is actually playing with >= 2s of buffer.
+  maybeHideBufferingOverlay() {
+    if (this.isSeeking) return
+    if (this.subtitlePlaybackHoldToken !== null) return
+    if (!this.playbackStarted || this.isStalled || this.userPaused) return
+    if (this.videoTarget.paused || this.videoTarget.ended) return
+    if (!this.hasBufferedAhead(2)) return
+    if (this.seekingOverlayTarget.classList.contains("hidden")) return
+    clearTimeout(this.bufferingOverlayTimer)
+    this.bufferingOverlayTimer = null
+    this.clearStallWatchdog()
+    this.streamRecoveryAttempts = 0
+    this.streamRecoveryActive = false
+    this.startProgressWatchdog()
+    this.hideSeekingOverlay()
   }
 
   evictOldBuffer() {
