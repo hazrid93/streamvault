@@ -557,7 +557,8 @@ export default class extends Controller {
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
       await fetch(`/hls/${sessionId}/stop`, {
         method: 'POST',
-        headers: { 'X-CSRF-Token': csrfToken }
+        headers: { 'X-CSRF-Token': csrfToken },
+        keepalive: true
       })
     } catch {
       // Best-effort — don't block teardown
@@ -1255,13 +1256,17 @@ export default class extends Controller {
   // Tear down playback before navigating away.  The ONLY thing that
   // must happen synchronously is aborting the fetch so the backend
   // kills ffmpeg (TranscodeService ensure block on ClientDisconnected).
-  // The video element teardown (pause, revokeObjectURL, src="", load)
-  // is skipped: it forces a synchronous media-engine pipeline flush
+  // The video element teardown (revokeObjectURL, src="", load) is
+  // skipped: load() forces a synchronous media-engine pipeline flush
   // that blocks the main thread for a noticeable moment — especially
   // with a deep MSE buffer and hardware decoding — and the page is
-  // being destroyed anyway.  The beforeunload handler is skipped to
-  // avoid a duplicate save (navigateBack already saved).
+  // being destroyed anyway.  pause() alone is cheap (no flush) and is
+  // called first so the user sees the stream stop the instant they
+  // click back, instead of the video playing on while the new page
+  // loads.  The beforeunload handler is skipped to avoid a duplicate
+  // save (navigateBack already saved).
   stopPlaybackForNavigation() {
+    if (this.hasVideoTarget) { try { this.videoTarget.pause() } catch {} }
     this.stopHlsSession()
     this.stopProgressTracking()
     this.saveProgressSync()
