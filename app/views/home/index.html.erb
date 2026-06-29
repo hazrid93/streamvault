@@ -51,7 +51,7 @@
                   <div class="card-progress-bar" style="width: <%= item[:progress_percentage] %>%"></div>
                 </div>
               <% end %>
-              <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div class="absolute top-2 right-2 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 transition-opacity">
                 <%= button_to watch_history_path(item[:history_id]), method: :delete, class: "w-6 h-6 bg-black/60 rounded-full flex items-center justify-center text-white hover:bg-red-600", title: "Remove from Continue Watching" do %>
                   <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 <% end %>

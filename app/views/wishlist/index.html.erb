@@ -43,7 +43,7 @@
               <p class="text-xs text-sv-text-muted mt-0.5"><%= entry.year %></p>
             </div>
           <% end %>
-          <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+          <div class="absolute top-2 right-2 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
             <%= button_to move_to_library_wishlist_path(entry), class: "w-7 h-7 bg-black/60 rounded-full flex items-center justify-center text-white hover:bg-sv-accent" do %>
               <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
             <% end %>
