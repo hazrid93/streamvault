@@ -42,7 +42,15 @@ Rails.application.configure do
   # is why progress saves silently stopped and Continue Watching
   # emptied after the CSP was enabled.
   config.content_security_policy_nonce_generator = ->(_request) { SecureRandom.base58(32) }
-  config.content_security_policy_nonce_directives = %w[script-src style-src]
+  # NOTE: style-src is deliberately NOT nonce-gated.  Per CSP spec, the
+  # presence of a nonce source causes browsers to ignore 'unsafe-inline',
+  # which would block every inline style="" attribute (poster widths,
+  # grid-template-columns, progress-bar widths, dynamic colours, safe-area
+  # positioning) — Rails' nonce_auto cannot stamp nonces onto arbitrary
+  # HTML style="" attributes, only onto <style>/<link> tags.  Keep
+  # style-src on 'self' 'unsafe-inline' until inline styles are extracted
+  # into CSS classes, at which point 'unsafe-inline' can be dropped too.
+  config.content_security_policy_nonce_directives = %w[script-src]
 
   # Automatically add `nonce` to `javascript_tag`, `javascript_include_tag`,
   # and `stylesheet_link_tag` if the corresponding directives are specified
