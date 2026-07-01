@@ -106,7 +106,11 @@ class CometService
       "debridService" => "realdebrid",
       "debridApiKey" => @rd_api_key
     }
-    Base64.urlsafe_encode64(JSON.generate(config), padding: false)
+    # NOTE: Comet requires standard (padded) base64.  Using `padding: false`
+    # produces unpadded base64, which Comet's config parser fails to decode —
+    # it silently treats the request as having no debrid config and returns a
+    # single placeholder stream instead of real results.
+    Base64.urlsafe_encode64(JSON.generate(config))
   end
 
   # Parse Comet stream objects into the same normalized hash shape that
