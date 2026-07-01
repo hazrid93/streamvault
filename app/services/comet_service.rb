@@ -244,7 +244,7 @@ class CometService
     if stream["seeders"]
       stream["seeders"]
     else
-      text = [stream["title"], description].compact.join(" ")
+      text = [ stream["title"], description ].compact.join(" ")
       if text =~ /👤\s*(\d+)/
         $1.to_i
       else
