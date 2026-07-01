@@ -178,7 +178,7 @@ class ContentStreamingService
   def verify_resolve_url(resolve_url)
     return nil unless allowed_resolve_url?(resolve_url)
 
-    response = with_resolve_retries { resolve_faraday.get(resolve_url) }
+    response = with_resolve_retries { resolve_faraday_for(resolve_url).get(resolve_url) }
     return nil unless response
 
     if [ 301, 302, 303, 307, 308 ].include?(response.status)
@@ -233,6 +233,30 @@ class ContentStreamingService
     URI.parse(url.to_s).is_a?(URI::HTTP)
   rescue URI::InvalidURIError
     false
+  end
+
+  # Pick the right Faraday client for a resolve URL.  Comet resolve URLs
+  # (playback endpoints on the private Comet host) must NOT go through
+  # TORRENTIO_PROXY — that proxy is for Torrentio only and blocks traffic
+  # to the Comet host.
+  def resolve_faraday_for(resolve_url)
+    if comet_url?(resolve_url)
+      resolve_faraday_direct
+    else
+      resolve_faraday
+    end
+  end
+
+  def comet_url?(resolve_url)
+    CometService.comet_url.present? && resolve_url.to_s.start_with?(CometService.comet_url)
+  end
+
+  def resolve_faraday_direct
+    @resolve_faraday_direct ||= Faraday.new do |f|
+      f.adapter Faraday.default_adapter
+      f.options.timeout = 15
+      f.options.open_timeout = 5
+    end
   end
 
   def resolve_faraday
