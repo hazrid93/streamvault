@@ -55,15 +55,38 @@ module StreamUrlValidation
     false
   end
 
-  # Validate that +value+ is an http(s) URL whose host does not resolve
-  # to a private or loopback address.  The resolved addresses are
-  # cached on the controller instance so #verify_stream_url! can
-  # re-resolve immediately before the URL is handed to ffmpeg and
-  # reject a DNS-rebinding flip (TOCTOU between validation and use).
+  # Hosts that belong to a user-configured provider (COMET_URL / TORRENTIO_API_BASE_URL).
+  # These are explicitly trusted by the operator — they're not subject to DNS-rebinding
+  # attacks (addresses are fixed, either a Tailscale IP or a known hostname) and may
+  # legitimately resolve to private/CGNAT addresses (e.g. Tailscale 100.x.x.x).
+  def provider_host?(host)
+    normalized = host.to_s.downcase
+    return false if normalized.blank?
+
+    StreamProvider.resolve_base_urls.filter_map { |url| URI.parse(url).host }.any? do |allowed|
+      normalized == allowed.downcase || normalized.end_with?(".#{allowed.downcase}")
+    end
+  rescue URI::InvalidURIError
+    false
+  end
+
+  # Validate that +value+ is an http(s) URL whose host is either a user-configured
+  # provider (comet/torrentio) or resolves to public addresses only.  Provider hosts
+  # bypass the DNS-resolution check because they are explicitly configured by the
+  # operator (e.g. COMET_URL on a Tailscale IP) — the DNS-rebinding TOCTOU attack
+  # does not apply to fixed IPs or user-chosen hostnames.
   def valid_stream_url?(value)
     uri = URI.parse(value.to_s)
     return false unless uri.is_a?(URI::HTTP) && uri.host.present?
     return false unless allowed_stream_host?(uri.host)
+
+    # Provider-hosted URLs (Comet on Tailscale) bypass the public-address check.
+    # Only RealDebrid CDN URLs need DNS resolution to verify they're not private.
+    if provider_host?(uri.host)
+      @_validated_stream_url = value.to_s
+      @_validated_stream_addresses = nil
+      return true
+    end
 
     addresses = resolve_public_addresses(uri.host)
     return false if addresses.empty?
@@ -82,10 +105,15 @@ module StreamUrlValidation
   # CDN hosts legitimately rotate their address sets, so we check that
   # no current address is private rather than requiring set equality.
   # Call this immediately before spawning the transcode subprocess.
+  # Provider-configured hosts bypass this check (user-chosen, not attacker-controlled).
   def verify_stream_url!
     return false unless @_validated_stream_url
 
     uri = URI.parse(@_validated_stream_url)
+    # Provider hosts bypass re-resolution — they're user-configured fixed
+    # addresses that can't be DNS-rebinding attacked.
+    return true if provider_host?(uri.host)
+
     current = resolve_public_addresses(uri.host)
     !current.empty?
   rescue URI::InvalidURIError

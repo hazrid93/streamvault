@@ -14,27 +14,27 @@ const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const BUFFER_AHEAD_SECONDS = 30
 const BUFFER_AHEAD_MAX_WAIT_MS = 15000
 // After a stall, rebuild a meaningful buffer before resuming so ffmpeg
-// can catch up.  When the transcode rate is below 1× (HEVC source, slow
-// server), resuming with a tiny buffer causes a rapid stall-resume-stall
-// cycle = periodic black screen.  5s gives ffmpeg enough runway to
-// produce a meaningful burst before playback resumes.
-const REBUFFER_AHEAD_SECONDS = 5
+// can catch up and transient upstream dips don't cause immediate
+// re-stall. 30s (up from 5s) absorbs variable-rate sources (RealDebrid
+// links from torrent swarms, HEVC transcode below 1×) so the next dip
+// doesn't trigger another stall-recovery cycle. The original 5s was
+// lowered to fix a userPaused auto-resume bug that has since been
+// fixed — the user pause bug was the cause, not the 30s threshold.
+const REBUFFER_AHEAD_SECONDS = 30
 // Stall watchdog timeout for rebuffer stalls (playback already started).
-// Must be longer than the time to accumulate REBUFFER_AHEAD_SECONDS at a
-// reasonable source speed, so trickling data doesn't trigger a reconnect
-// before the rebuffer gate has a chance to resume.  15s is long enough
-// for slow-but-alive sources, short enough that a truly dead fetch
-// (server closed the response) doesn't leave the user staring at
-// "Buffering" for too long.
-const REBUFFER_STALL_TIMEOUT_MS = 30000
+// Must be longer than REBUFFER_MAX_WAIT_MS so the deadline (which resumes
+// with partial buffer) fires before the watchdog (which reconnects).
+// 45s gives ffmpeg time to accumulate 30s of buffer even on a slow
+// source; if no data arrives for 45s the fetch is truly dead.
+const REBUFFER_STALL_TIMEOUT_MS = 45000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
 // before resuming with whatever buffer has accumulated.  On a slow
 // or trickling source, data arrives in small bursts that never reach
 // the gate threshold — without a deadline, the video would sit on
 // "Buffering" forever while the stall watchdog keeps getting reset by
-// each trickle.  10s gives ffmpeg time to build 5s of buffer on a
-// sub-1× source; the stall watchdog handles a genuinely dead source.
-const REBUFFER_MAX_WAIT_MS = 10000
+// each trickle.  30s gives ffmpeg time to build 30s of buffer even on
+// a 1× source; the stall watchdog handles a genuinely dead source.
+const REBUFFER_MAX_WAIT_MS = 30000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -50,7 +50,7 @@ export default class extends Controller {
   }
   static get values() {
     return {
-      streamingUrl: String, directUrl: String, filename: String, imdbId: String, type: String,
+      streamingUrl: String, directUrl: String, directStreamUrl: String, filename: String, imdbId: String, type: String,
       season: String, episode: String, resumeAt: String, startSeconds: Number,
       title: String, duration: Number, posterUrl: String,
       defaultLanguage: String, preferredLanguages: String,
@@ -88,6 +88,9 @@ export default class extends Controller {
     this.subtitlePrefetches = new Map()
     this.subtitlePrefetchResults = new Map()
     this.subtitlePlaybackHoldToken = null
+    this.tracksData = null
+    this.mediaTracksLoaded = false
+    this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
     this.suppressNextSeekClick = false
@@ -144,7 +147,8 @@ export default class extends Controller {
     this.videoTarget.addEventListener("error", this.videoErrorHandler)
 
     // Resume: transcode streams already start at the resume position
-    // via ffmpeg -ss, so no client-side seek needed.
+    // via ffmpeg -ss, so no client-side seek needed.  Direct play uses
+    // the native <video> element which seeks via Range requests.
 
     // Duration: probe in the background via AJAX — never block video
     // playback. The video starts immediately; the seek bar populates
@@ -154,7 +158,6 @@ export default class extends Controller {
     this.onTimeUpdate()
     this.syncStartupOverlay()
     this.probeDuration()
-    this.loadMediaTracks()
 
     // Save progress on page unload — but skip if navigateBack already
     // saved (navigatingAway flag prevents a duplicate save).
@@ -198,6 +201,7 @@ export default class extends Controller {
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
     this.fmp4Buffer = null
+    this.fmp4BufferSize = 0
     this.pendingSeekSeconds = null
     // Skip video element teardown when navigating away — the page is
     // being destroyed and pauseAndDetachVideo's videoTarget.load()
@@ -244,14 +248,24 @@ export default class extends Controller {
       return null
     }
   }
-  ensureVideoSource() {
+  async ensureVideoSource() {
     if (!this.streamingUrlValue) return
     if (this.isIOS()) {
       this.startHlsPlayback()
-    } else if (this.mseSupported) {
-      this.setupMseSource(this.streamingUrlValue)
-    } else if (!this.videoTarget.getAttribute("src")) {
+      return
+    }
+    if (!this.mseSupported) {
       this.videoTarget.src = this.streamingUrlValue
+      return
+    }
+    // Wait for media tracks to determine direct play eligibility.
+    // The probe is cached server-side, so repeated calls after the first
+    // fetch (e.g. reconnects) resolve instantly from the in-memory cache.
+    await this.loadMediaTracks()
+    if (this.directPlayEligible()) {
+      this.startDirectPlay()
+    } else {
+      this.setupMseSource(this.streamingUrlValue)
     }
   }
   setupMseSource(streamUrl) {
@@ -259,9 +273,11 @@ export default class extends Controller {
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
     this.fmp4Buffer = null
+    this.fmp4BufferSize = 0
     this.playbackStarted = false
     this.isStalled = false
     this.userPaused = false
+    this.directPlayActive = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
     // Clear any stall watchdog from the previous connection so a
@@ -309,6 +325,60 @@ export default class extends Controller {
   // own buffering and recovery.
   isHls() {
     return !!this.hlsSessionId
+  }
+
+  // True when using direct play (native <video> src, no MSE, no ffmpeg).
+  // The browser downloads the proxied RD URL at network speed, seeks via
+  // Range requests, and handles its own buffering.
+  isDirectPlay() {
+    return !!this.directPlayActive
+  }
+
+  // Can the current stream be played directly by the browser?  Requires:
+  //   1. A direct stream proxy URL is available
+  //   2. The tracks probe confirmed direct_playable (H.264/AAC MP4, no B-frames)
+  //   3. No subtitle burn is active (browser renders text subs natively)
+  //   4. No audio track switch is active (default audio only — alternate
+  //      tracks require ffmpeg to extract)
+  //   5. Not in a stall recovery cycle (recovery always uses MSE/transcode)
+  directPlayEligible() {
+    if (!this.directStreamUrlValue) return false
+    if (this.streamRecoveryAttempts > 0) return false
+    if (this.burnedSubtitleSelected()) return false
+    if (this.selectedAudioStream) return false
+    return this.tracksData?.direct_playable === true
+  }
+
+  // Start direct play: set <video> src to the proxied RD URL so the
+  // browser downloads at network speed.  No ffmpeg, no MSE, no box
+  // parser — the browser handles everything natively.
+  startDirectPlay() {
+    this.playbackStarted = true
+    this.directPlayActive = true
+    this.isSeeking = false
+    this.subtitlePlaybackHoldToken = null
+    this.streamRecoveryAttempts = 0
+    this.streamRecoveryActive = false
+
+    if (this.mediaSource) {
+      if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
+      this.mediaSource = null
+      this.sourceBuffer = null
+    }
+    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
+
+    this.videoTarget.src = this.directStreamUrlValue
+    this.videoTarget.load()
+
+    if (this.startSecondsValue > 0) {
+      this.videoTarget.addEventListener("loadedmetadata", () => {
+        this.videoTarget.currentTime = this.startSecondsValue
+      }, { once: true })
+    }
+
+    const p = this.videoTarget.play()
+    if (p?.catch) p.catch(() => {})
+    this.startProgressWatchdog()
   }
 
   // iOS-only fallback: start a server-side HLS transcode and hand the
@@ -791,6 +861,7 @@ export default class extends Controller {
     if (elapsed >= PROGRESS_STALL_TIMEOUT_MS) {
       console.warn(`Silent freeze detected — currentTime stuck at ${pos} for ${Math.round(elapsed / 1000)}s`)
       this.progressWatchdogArmed = false
+      this.reportStall("silent_freeze")
       if (this.isHls()) {
         this.handleHlsStall()
       } else {
@@ -839,6 +910,7 @@ export default class extends Controller {
     this.streamRecoveryAttempts += 1
     this.streamRecoveryActive = true
     console.warn(`Stream stalled — recovering (attempt ${this.streamRecoveryAttempts}/${STREAM_MAX_RECOVERY_ATTEMPTS})`)
+    this.reportStall("stall")
     this.reconnectFromCurrentPosition()
   }
 
@@ -914,6 +986,7 @@ export default class extends Controller {
     const bufferedAhead = this.bufferedAheadOfCurrent()
     if (bufferedAhead < 30) {
       console.warn(`Stream fetch ended early with ${bufferedAhead.toFixed(1)}s buffer — reconnecting.`)
+      this.reportStall("premature_end")
       this.handleStreamStall()
       return
     }
@@ -936,6 +1009,26 @@ export default class extends Controller {
       if (ct < ranges.start(i)) return 0
     }
     return 0
+  }
+
+  // Report a stall event to the server for telemetry/diagnostics.
+  // Fire-and-forget — never blocks or recovers on failure.
+  reportStall(eventType) {
+    const pos = this.currentPlaybackPosition()
+    const bufAhead = this.bufferedAheadOfCurrent()
+    const mode = this.isDirectPlay() ? "direct" : this.isHls() ? "hls" : "transcode"
+    const body = JSON.stringify({
+      event: eventType,
+      position: Math.floor(pos),
+      buffer_ahead: Math.round(bufAhead * 10) / 10,
+      mode: mode,
+      recovery_count: this.streamRecoveryAttempts
+    })
+    fetch("/streaming/stall_telemetry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": document.querySelector("[name='csrf-token']")?.content },
+      keepalive: true
+    }).catch(() => {})
   }
 
   // Abort the current fetch, tear down the MSE pipeline, and restart
@@ -1000,11 +1093,16 @@ export default class extends Controller {
   // and only feeds complete top-level boxes (or moof+mdat pairs) to
   // appendBuffer, holding back partial boxes until more data arrives.
   queueBufferChunk(chunk) {
-    // Append to the accumulation buffer
-    const newBuf = new Uint8Array((this.fmp4Buffer?.length || 0) + chunk.byteLength)
-    if (this.fmp4Buffer) newBuf.set(this.fmp4Buffer, 0)
-    newBuf.set(new Uint8Array(chunk), this.fmp4Buffer?.length || 0)
-    this.fmp4Buffer = newBuf
+    const chunkArr = new Uint8Array(chunk)
+    const newSize = (this.fmp4BufferSize || 0) + chunkArr.byteLength
+    if (!this.fmp4Buffer || this.fmp4Buffer.length < newSize) {
+      const allocSize = Math.max(newSize, (this.fmp4Buffer?.length || 4096) * 2)
+      const newBuf = new Uint8Array(allocSize)
+      if (this.fmp4Buffer) newBuf.set(this.fmp4Buffer.subarray(0, this.fmp4BufferSize || 0), 0)
+      this.fmp4Buffer = newBuf
+    }
+    this.fmp4Buffer.set(chunkArr, this.fmp4BufferSize || 0)
+    this.fmp4BufferSize = newSize
     this.flushBufferQueue()
   }
 
@@ -1015,13 +1113,12 @@ export default class extends Controller {
   // individually.  Returns the bytes to append and leaves partial boxes
   // in fmp4Buffer.
   extractCompleteBoxes() {
-    if (!this.fmp4Buffer || this.fmp4Buffer.length < 8) return null
+    if (!this.fmp4Buffer || this.fmp4BufferSize < 8) return null
     const boxes = []
     let offset = 0
     let lastComplete = 0
 
-    while (offset + 8 <= this.fmp4Buffer.length) {
-      // Read box size (4 bytes big-endian)
+    while (offset + 8 <= this.fmp4BufferSize) {
       const size = (this.fmp4Buffer[offset] << 24) |
                    (this.fmp4Buffer[offset + 1] << 16) |
                    (this.fmp4Buffer[offset + 2] << 8) |
@@ -1033,17 +1130,13 @@ export default class extends Controller {
         this.fmp4Buffer[offset + 7]
       )
 
-      // size 0 means "box extends to end of file" — not valid in streaming
       if (size === 0) break
-      // size 1 means 64-bit extended size (next 8 bytes) — not used by fMP4
       if (size === 1) break
-      // Box extends beyond available data — partial, wait for more
-      if (offset + size > this.fmp4Buffer.length) break
+      if (offset + size > this.fmp4BufferSize) break
 
       if (type === 'moof') {
-        // Check if the next box is mdat and if both fit
         const nextOffset = offset + size
-        if (nextOffset + 8 <= this.fmp4Buffer.length) {
+        if (nextOffset + 8 <= this.fmp4BufferSize) {
           const mdatSize = (this.fmp4Buffer[nextOffset] << 24) |
                            (this.fmp4Buffer[nextOffset + 1] << 16) |
                            (this.fmp4Buffer[nextOffset + 2] << 8) |
@@ -1054,19 +1147,16 @@ export default class extends Controller {
             this.fmp4Buffer[nextOffset + 6],
             this.fmp4Buffer[nextOffset + 7]
           )
-          if (mdatType === 'mdat' && nextOffset + mdatSize <= this.fmp4Buffer.length) {
-            // moof+mdat pair complete — append both together
+          if (mdatType === 'mdat' && nextOffset + mdatSize <= this.fmp4BufferSize) {
             boxes.push({ offset, size: size + mdatSize })
             offset = nextOffset + mdatSize
             lastComplete = offset
             continue
           }
         }
-        // moof without a complete mdat — wait for more data
         break
       }
 
-      // Other boxes (moov, styp, sidx, etc.) — append individually
       boxes.push({ offset, size })
       offset += size
       lastComplete = offset
@@ -1074,7 +1164,6 @@ export default class extends Controller {
 
     if (boxes.length === 0) return null
 
-    // Merge all complete boxes into a single ArrayBuffer for appendBuffer
     const totalSize = boxes.reduce((sum, b) => sum + b.size, 0)
     const result = new Uint8Array(totalSize)
     let writeOffset = 0
@@ -1083,10 +1172,11 @@ export default class extends Controller {
       writeOffset += box.size
     }
 
-    // Keep the remaining partial bytes in fmp4Buffer
-    if (lastComplete < this.fmp4Buffer.length) {
-      this.fmp4Buffer = this.fmp4Buffer.subarray(lastComplete)
+    if (lastComplete < this.fmp4BufferSize) {
+      this.fmp4Buffer.copyWithin(0, lastComplete, this.fmp4BufferSize)
+      this.fmp4BufferSize -= lastComplete
     } else {
+      this.fmp4BufferSize = 0
       this.fmp4Buffer = null
     }
 
@@ -1110,7 +1200,7 @@ export default class extends Controller {
         // current MSE pipeline is broken. Clear the queue and trigger
         // a full reconnect from the current playback position.
         console.warn("appendBuffer failed, recovering:", e.name)
-        this.fmp4Buffer = null
+        this.fmp4Buffer = null; this.fmp4BufferSize = 0
         this.handleStreamStall()
       }
     }
@@ -1148,8 +1238,7 @@ export default class extends Controller {
   maybeStartPlayback() {
     if (!this.sourceBuffer || this.sourceBuffer.buffered.length === 0) return
 
-    const bufferedEnd = this.sourceBuffer.buffered.end(this.sourceBuffer.buffered.length - 1)
-    const bufferedAhead = bufferedEnd - this.videoTarget.currentTime
+    const bufferedAhead = this.bufferedAheadOfCurrent()
 
     // Initial start: wait for the buffer-ahead threshold (or deadline).
     if (!this.playbackStarted) {
@@ -1300,7 +1389,7 @@ export default class extends Controller {
     this.navigatingAway = true
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
-    this.fmp4Buffer = null
+    this.fmp4Buffer = null; this.fmp4BufferSize = 0
   }
 
   // Auto-advance to the next episode when the current one finishes.
@@ -1333,15 +1422,11 @@ export default class extends Controller {
     })
 
     if (this.isHls()) {
-      // In HLS mode, a media error usually means the playlist or
-      // segments can't be loaded/decoded.  Show an error message
-      // instead of leaving the user on a black screen.
       this.showSeekingOverlay("Stream error — tap to retry")
       const overlay = this.seekingOverlayTarget
       const onRetry = () => {
         overlay.removeEventListener("click", onRetry)
         this.hideSeekingOverlay()
-        // Reload the playlist
         if (this.hlsSessionId) {
           video.load()
           video.play().catch(() => {})
@@ -1350,6 +1435,16 @@ export default class extends Controller {
         }
       }
       overlay.addEventListener("click", onRetry)
+      return
+    }
+
+    if (this.isDirectPlay()) {
+      console.warn("Direct play failed — falling back to MSE/transcode.")
+      this.directPlayActive = false
+      this.streamingUrlValue = this.element.dataset.videoPlayerStreamingUrlValue
+      const targetSeconds = Math.floor(this.currentPlaybackPosition())
+      this.startSecondsValue = targetSeconds
+      this.setupMseSource(this.streamingUrlValue)
     }
   }
 
@@ -1358,7 +1453,7 @@ export default class extends Controller {
     try {
       if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
       this.bufferQueue = []
-      this.fmp4Buffer = null
+      this.fmp4Buffer = null; this.fmp4BufferSize = 0
       if (this.mediaSource) {
         if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
         this.mediaSource = null
@@ -1485,6 +1580,7 @@ export default class extends Controller {
   // ── Audio / subtitles ─────────────────────────────────────────────
 
   async loadMediaTracks() {
+    if (this.mediaTracksLoaded) return
     if (!this.hasTracksUrlValue) return
 
     const rawUrl = this.extractRawUrl()
@@ -1498,6 +1594,8 @@ export default class extends Controller {
       if (!response.ok) return
 
       const data = await response.json()
+      this.tracksData = data
+      this.mediaTracksLoaded = true
       this.audioTracks = Array.isArray(data.audio) ? data.audio : []
       this.subtitleTracks = Array.isArray(data.subtitles) ? data.subtitles : []
       this.selectedAudioStream ||= this.preferredAudioTrack()?.index?.toString() || null
@@ -2196,13 +2294,6 @@ export default class extends Controller {
   }
 
   restartPlaybackAt(targetSeconds) {
-    // In HLS mode (iOS), seeking requires restarting the ffmpeg HLS
-    // transcode with a new start_seconds.  The HLS timeline always
-    // starts at 0 (ffmpeg -ss shifts the source), so setting
-    // video.currentTime to an absolute position doesn't work — the
-    // content at that position may not have been transcoded yet.
-    // Instead: stop the current session, start a new one from the
-    // target position, and set video.src to the new playlist.
     if (this.isHls()) {
       this.isSeeking = true
       this.showSeekingOverlay("Seeking...")
@@ -2213,10 +2304,20 @@ export default class extends Controller {
       return
     }
 
+    // Direct play: browser handles seeking via Range requests.
+    // Reset the progress watchdog so the freeze detector doesn't
+    // fire during the seek (currentTime briefly stalls).
+    if (this.isDirectPlay()) {
+      this.startSecondsValue = targetSeconds
+      this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+      this.videoTarget.currentTime = targetSeconds
+      this.clearSubtitleCues()
+      this.resetProgressBaseline()
+      return
+    }
+
     this.isSeeking = true
     this.showSeekingOverlay()
-    // A deliberate restart (user seek or auto-advance) resets the
-    // stall-recovery counter — this is not an automatic recovery.
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
     this.startSecondsValue = targetSeconds

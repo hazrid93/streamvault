@@ -61,6 +61,10 @@ class TranscodeService
     "-crf", "23",
     "-profile:v", "high",
     "-pix_fmt", "yuv420p",
+    # Use all available CPU cores for encoding — critical on production
+    # servers without hardware acceleration.  Without this, libx264
+    # defaults to 1 thread and leaves most cores idle.
+    "-threads", "auto",
     # No B-frames: MSE's fMP4 chunk demuxer requires each fragment to start
     # with a random access point (I-frame).  With B-frames, +frag_keyframe
     # fragments at keyframes in display order but the first packet by DTS
@@ -98,8 +102,9 @@ class TranscodeService
   # Cache probe results to avoid repeated ffprobe round-trips for the same URL.
   # Key: input_url, Value: { duration:, video_stream:, expires_at: }
   @probe_cache = {}
-  PROBE_CACHE_TTL = 300 # 5 minutes
-  PROBE_CACHE_MAX_SIZE = 100
+  PROBE_CACHE_TTL = 600 # 10 minutes — repeated seeks to the same URL
+  # (common during a viewing session) should hit cache, not re-probe.
+  PROBE_CACHE_MAX_SIZE = 500 # 500 entries across all users/content
 
   class TranscodeError < StandardError; end
 
@@ -271,7 +276,7 @@ class TranscodeService
       total_bytes = 0
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # readpartial returns whatever data is available (up to 32 KB)
+      # readpartial returns whatever data is available (up to 128 KB)
       # without waiting for the full amount, then blocks for more.
       # When ffmpeg closes stdout (exit), it raises EOFError.
       #
@@ -291,7 +296,7 @@ class TranscodeService
             end
           end
 
-          chunk = rd.readpartial(32_768)
+          chunk = rd.readpartial(131_072)
           yield chunk
           total_bytes += chunk.bytesize
           produced_output = true
@@ -612,6 +617,13 @@ class TranscodeService
     end
 
     cmd = [ FFMPEG_PATH, "-loglevel", "error" ]
+    # Hardware acceleration for decode.  On macOS with VideoToolbox,
+    # -hwaccel videotoolbox offloads HEVC/H.264 decode to the GPU,
+    # which is critical for 4K HEVC streams — software HEVC decode
+    # is the single biggest bottleneck even on fast CPUs.  The decoded
+    # frames are in system memory (default output format), so the
+    # software scale/format filter below can process them normally.
+    cmd += hwaccel_args if video_args != [ "-c:v", "copy" ]
     # Moderate probe limits -- enough for MKV and MPEG-TS (M2TS).
     # M2TS needs more data than MKV because PAT/PMT tables are
     # interleaved every ~100ms in 188-byte packets. 32K was too
@@ -666,12 +678,20 @@ class TranscodeService
   end
   private_class_method :build_ffmpeg_command
 
-  # Return the best available H.264 encoder args.  On macOS with
-  # VideoToolbox, use hardware encoding (h264_videotoolbox) which is
-  # ~2x faster than software libx264, keeping the transcode ahead of
-  # real-time even for 4K HEVC sources.  Fall back to libx264
-  # ultrafast on platforms without VideoToolbox.
+  # Return the best available H.264 encoder args.  Order of precedence:
+  #   1. FFMPEG_ENCODER env var (for Docker/cloud with a hardware encoder)
+  #   2. VideoToolbox auto-detection (macOS)
+  #   3. libx264 ultrafast with -threads auto (software, works everywhere)
+  #
+  # For a production Linux server with Intel QuickSync (VAAPI):
+  #   FFMPEG_ENCODER="h264_vaapi -b:v 5000k -global_quality 23"
+  #
+  # For NVIDIA GPU (NVENC):
+  #   FFMPEG_ENCODER="h264_nvenc -preset p7 -b:v 5000k -rc vbr"
   def self.transcode_args
+    env = ENV["FFMPEG_ENCODER"].to_s.strip
+    return Shellwords.split(env) if env.present?
+
     return VIDEOTOOLBOX_TRANSCODE_ARGS if videotoolbox_available?
 
     VIDEO_TRANSCODE_ARGS
@@ -685,6 +705,26 @@ class TranscodeService
     @videotoolbox_available = result.status&.success? && result.stdout.include?("h264_videotoolbox")
   end
   private_class_method :videotoolbox_available?
+
+  # Return hardware acceleration flags for decode.  Order of precedence:
+  #   1. FFMPEG_HWACCEL env var (for Docker/cloud deployments with a GPU)
+  #   2. VideoToolbox auto-detection (macOS)
+  #   3. Empty (software decode — works everywhere)
+  #
+  # For a production Linux server with an Intel GPU (QuickSync):
+  #   FFMPEG_HWACCEL="-hwaccel vaapi -vaapi_device /dev/dri/renderD128 -hwaccel_output_format vaapi"
+  #
+  # For NVIDIA GPU (CUDA/NVENC):
+  #   FFMPEG_HWACCEL="-hwaccel cuda -hwaccel_output_format cuda"
+  def self.hwaccel_args
+    env = ENV["FFMPEG_HWACCEL"].to_s.strip
+    return Shellwords.split(env) if env.present?
+
+    return [ "-hwaccel", "videotoolbox" ] if videotoolbox_available?
+
+    []
+  end
+  private_class_method :hwaccel_args
 
   def self.selected_burn_subtitle_track(input_url, headers:, subtitle_stream:)
     explicit_stream_index = normalized_stream_index(subtitle_stream)
@@ -1005,7 +1045,7 @@ class TranscodeService
   rescue StandardError
     {}
   end
-  private_class_method :probe_video_stream
+  public_class_method :probe_video_stream
 
   def self.extract_video_stream(output)
     data = JSON.parse(output)
@@ -1044,7 +1084,7 @@ class TranscodeService
     # these fragments with CHUNK_DEMUXER_ERROR_APPEND_FAILED.  Forcing a
     # re-encode (without B-frames) avoids the decode error.
   end
-  private_class_method :browser_safe_video?
+  public_class_method :browser_safe_video?
 
   def self.positive_integer(value)
     integer = Integer(value, exception: false)
@@ -1136,26 +1176,35 @@ class TranscodeService
   private_class_method :valid_probe_duration?
 
   # ── Probe cache ───────────────────────────────────────────────────
+  # Thread-safe in-memory cache shared within a Puma worker.
+  # Multiple workers each maintain their own cache (acceptable tradeoff
+  # vs. the latency of a Redis round-trip on every probe).
+
+  @probe_cache_mutex = Mutex.new
 
   def self.cache_get(url)
-    entry = @probe_cache[url]
-    return nil unless entry
-    if Time.now > entry[:expires_at]
-      @probe_cache.delete(url)
-      return nil
+    @probe_cache_mutex.synchronize do
+      entry = @probe_cache[url]
+      return nil unless entry
+      if Time.now > entry[:expires_at]
+        @probe_cache.delete(url)
+        return nil
+      end
+      entry
     end
-    entry
   end
   private_class_method :cache_get
 
   def self.cache_store(url, **fields)
-    while @probe_cache.size >= PROBE_CACHE_MAX_SIZE
-      oldest_key = @probe_cache.min_by { |_, entry| entry[:expires_at] }&.first
-      break unless oldest_key
-      @probe_cache.delete(oldest_key)
+    @probe_cache_mutex.synchronize do
+      while @probe_cache.size >= PROBE_CACHE_MAX_SIZE
+        oldest_key = @probe_cache.min_by { |_, entry| entry[:expires_at] }&.first
+        break unless oldest_key
+        @probe_cache.delete(oldest_key)
+      end
+      existing = @probe_cache[url] || { expires_at: Time.now + PROBE_CACHE_TTL }
+      @probe_cache[url] = existing.merge(fields).merge(expires_at: Time.now + PROBE_CACHE_TTL)
     end
-    existing = @probe_cache[url] || { expires_at: Time.now + PROBE_CACHE_TTL }
-    @probe_cache[url] = existing.merge(fields).merge(expires_at: Time.now + PROBE_CACHE_TTL)
   end
   private_class_method :cache_store
 

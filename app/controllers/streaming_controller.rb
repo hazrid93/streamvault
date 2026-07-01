@@ -81,10 +81,14 @@ class StreamingController < ApplicationController
     # ffmpeg seeks to the right position (-ss) — the stream starts at
     # the resume point and the browser never needs to seek (which
     # would cancel and re-request).
-    # Preserve the original RealDebrid URL for the iOS HLS path before
-    # overwriting @streaming_url with the transcode proxy URL below.
+    # Preserve the original RealDebrid URL for the iOS HLS path and direct
+    # play before overwriting @streaming_url with the transcode proxy URL.
     @direct_url = @streaming_url
     if @streaming_url.present?
+      # Build the direct stream proxy URL so the browser downloads at
+      # network speed — no ffmpeg involved for compatible content.
+      @direct_stream_url = direct_stream_path(url: @direct_url)
+
       transcode_params = { url: @streaming_url }
       transcode_params[:start_seconds] = @resume_at if @resume_at.present? && @resume_at.to_f > 0
       transcode_params[:audio_stream] = params[:audio_stream] if params[:audio_stream].present?
@@ -159,6 +163,22 @@ class StreamingController < ApplicationController
     else
       render json: { error: result.error_message }, status: :unprocessable_entity
     end
+  end
+
+  # POST /streaming/stall_telemetry — log client-side stall events for
+  # diagnostics.  No DB write — only structured logs that can be grepped.
+  def stall_telemetry
+    event = params[:event].to_s
+    position = params[:position].to_f
+    buffer_ahead = params[:buffer_ahead].to_f
+    mode = params[:mode].to_s
+    recovery_count = params[:recovery_count].to_i
+
+    Rails.logger.info("[StallTelemetry] event=#{event} position=#{position}s " \
+                      "buffer_ahead=#{buffer_ahead}s mode=#{mode} " \
+                      "recovery_count=#{recovery_count} user=#{current_user.id}")
+
+    render json: { recorded: true }
   end
 
   private

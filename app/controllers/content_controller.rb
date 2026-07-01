@@ -137,7 +137,6 @@ class ContentController < ApplicationController
       all_streams.concat(result.data) if result&.success?
     end
 
-    all_streams.sort_by { |s| [ s[:quality_rank] || 999, s[:seeders] || 0 ] }
     all_streams.empty? ? ServiceResult.failure("No streams available") : ServiceResult.success(all_streams)
   end
 end
