@@ -106,30 +106,61 @@ class CometService
       "debridService" => "realdebrid",
       "debridApiKey" => @rd_api_key
     }
-    Base64.urlsafe_encode64(JSON.generate(config), padding: false)
+    # NOTE: Comet requires standard (padded) base64.  Using `padding: false`
+    # produces unpadded base64, which Comet's config parser fails to decode —
+    # it silently treats the request as having no debrid config and returns a
+    # single placeholder stream instead of real results.
+    Base64.urlsafe_encode64(JSON.generate(config))
   end
 
   # Parse Comet stream objects into the same normalized hash shape that
   # TorrentioService produces, so ContentStreamingService can consume
   # streams from either provider interchangeably.
+  # Comet's Stremio stream objects carry the real metadata in `description`
+  # and `behaviorHints`, NOT in top-level `title`/`infoHash`/`sources` (those
+  # are Torrentio's shape).  Comet returns:
+  #   name        => "[RD⚡] Comet 2160p"  (identical across same-resolution
+  #                                        streams — useless as a label)
+  #   description => "📄 <release>.mkv\n🎞 ...\n⭐ ...\n💾 50.4 GB 🔎 DMM"
+  #   behaviorHints.filename  => the actual release name
+  #   behaviorHints.videoSize  => file size in bytes
+  #   behaviorHints.bingeGroup => "comet|realdebrid|<sha1_info_hash>"
   def parse_streams(raw_streams)
     raw_streams.map do |s|
-      title_text = s["title"].to_s
-      filename = s.dig("behaviorHints", "filename").to_s
-      size_bytes = parse_size_bytes(title_text)
+      description = s["description"].to_s
+      behavior_hints = s["behaviorHints"] || {}
+      filename = behavior_hints["filename"].to_s
+
+      # The info hash is embedded in the bingeGroup: "comet|realdebrid|<hash>"
+      binge_group = behavior_hints["bingeGroup"].to_s
+      info_hash = binge_group.split("|").last.presence || s["infoHash"]
+
+      # Use the real release name as the title so each stream is identifiable
+      # in the UI (Comet's `name` is just "[RD⚡] Comet 2160p" for every 4K
+      # stream, which renders as identical "duplicates").
+      title_text = filename.presence || s["name"].to_s
+
+      # Prefer the raw byte size from behaviorHints; fall back to parsing the
+      # "💾 N.N GB" line out of the description.
+      size_bytes = behavior_hints["videoSize"] || parse_size_bytes(description)
+
+      # Comet's `name` marks cached streams with ⚡ and download-on-demand
+      # streams with ⬇️; ⚡ streams should sort first (rd_plus).
+      cached = s["name"].to_s.include?("⚡")
+
       {
-        title: s["title"],
-        info_hash: s["infoHash"],
+        title: title_text,
+        info_hash: info_hash,
         file_idx: s["fileIdx"],
         name: s["name"],
-        quality: extract_quality(s["title"] || s["name"]),
-        seeders: extract_seeders(s),
+        quality: extract_quality(s["name"] || title_text),
+        seeders: extract_seeders(s, description),
         size: size_bytes ? format_size(size_bytes) : "Unknown",
         raw_size: size_bytes || 0,
-        rd_plus: s["sources"].is_a?(Array) && s["sources"].any?,
+        rd_plus: cached,
         filename: filename,
         resolve_url: s["url"].to_s,
-        languages: extract_languages(title_text)
+        languages: extract_languages(description)
       }
     end
   end
@@ -209,13 +240,16 @@ class CometService
     end
   end
 
-  def extract_seeders(stream)
+  def extract_seeders(stream, description = nil)
     if stream["seeders"]
       stream["seeders"]
-    elsif stream["title"] && stream["title"] =~ /👤\s*(\d+)/
-      $1.to_i
     else
-      0
+      text = [ stream["title"], description ].compact.join(" ")
+      if text =~ /👤\s*(\d+)/
+        $1.to_i
+      else
+        0
+      end
     end
   end
 
