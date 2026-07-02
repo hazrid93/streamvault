@@ -102,6 +102,8 @@ export default class extends Controller {
     this.bufferingOverlayTimer = null
     this.lastProgressTime = 0
     this.lastProgressPosition = 0
+    this.lastBufferEnd = 0
+    this.lastBufferDataTime = 0
     this.progressWatchdogArmed = false
     this.streamRecoveryActive = false
     this.playbackStarted = false
@@ -262,10 +264,13 @@ export default class extends Controller {
     // fetch (e.g. reconnects) resolve instantly from the in-memory cache.
     await this.loadMediaTracks()
     if (this.directPlayEligible()) {
+      console.log("[Player] Path: direct play (native <video>, no ffmpeg)")
       this.startDirectPlay()
     } else if (this.remuxDirectEligible()) {
+      console.log("[Player] Path: remux direct play (-c:v copy, no re-encode)")
       this.startRemuxDirectPlay()
     } else {
+      console.log("[Player] Path: MSE/transcode (hardware decode + encode)")
       this.setupMseSource(this.streamingUrlValue)
     }
   }
@@ -942,6 +947,8 @@ export default class extends Controller {
     if (this.progressWatchdogArmed) return
     this.lastProgressPosition = this.videoTarget.currentTime
     this.lastProgressTime = Date.now()
+    this.lastBufferEnd = this.currentBufferEnd()
+    this.lastBufferDataTime = Date.now()
     this.progressWatchdogArmed = true
     this.tickProgressWatchdog()
   }
@@ -974,13 +981,40 @@ export default class extends Controller {
     if (pos > this.lastProgressPosition + 0.1) {
       this.lastProgressPosition = pos
       this.lastProgressTime = now
-      return
     }
 
+    // ── Download stall detection (direct/remux play) ──────────────
+    // For direct play, the browser manages its own download.  When the
+    // server (ffmpeg/RealDebrid) dies or the browser throttles the
+    // download, the buffer stops growing but currentTime keeps advancing
+    // (playing from buffer).  The existing freeze detection below only
+    // fires when currentTime stops — by then the buffer has already run
+    // out and the user sees "Buffering...".  Instead, detect when the
+    // download has stalled (buffer not growing) and pre-emptively
+    // reconnect BEFORE the buffer runs out.
+    if (this.isDirectPlay()) {
+      const bufEnd = this.currentBufferEnd()
+      if (bufEnd > this.lastBufferEnd + 0.5) {
+        // Buffer is growing — download is alive
+        this.lastBufferEnd = bufEnd
+        this.lastBufferDataTime = now
+      } else {
+        // Buffer not growing — download may have stalled
+        const dataStalledMs = now - this.lastBufferDataTime
+        const bufferAhead = this.bufferedAheadOfCurrent()
+        if (dataStalledMs > 30000 && bufferAhead < 60 && bufferAhead > 0) {
+          console.warn(`Download stalled for ${Math.round(dataStalledMs / 1000)}s, buffer ahead: ${bufferAhead.toFixed(1)}s — pre-emptive reconnect`)
+          this.progressWatchdogArmed = false
+          this.reportStall("download_stall")
+          this.handleStreamStall()
+          return
+        }
+      }
+    }
+
+    // ── Freeze detection (all paths) ──────────────────────────────
     // currentTime has not advanced since the last tick.  If this has
     // persisted longer than the threshold, treat it as a silent stall.
-    // The watchdog is only armed once the video is actually playing
-    // (onVideoReady), so the initial buffer-fill window is excluded.
     if (elapsed >= PROGRESS_STALL_TIMEOUT_MS) {
       console.warn(`Silent freeze detected — currentTime stuck at ${pos} for ${Math.round(elapsed / 1000)}s`)
       this.progressWatchdogArmed = false
@@ -993,10 +1027,26 @@ export default class extends Controller {
     }
   }
 
+  // Get the end of the buffered range containing currentTime (or the
+  // last buffered range).  Used to track whether the download is alive.
+  currentBufferEnd() {
+    const video = this.videoTarget
+    if (!video.buffered.length) return 0
+    const ct = video.currentTime
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (ct >= video.buffered.start(i) && ct <= video.buffered.end(i)) {
+        return video.buffered.end(i)
+      }
+    }
+    return video.buffered.end(video.buffered.length - 1)
+  }
+
   resetProgressBaseline() {
     if (!this.progressWatchdogArmed) return
     this.lastProgressPosition = this.videoTarget.currentTime
     this.lastProgressTime = Date.now()
+    this.lastBufferEnd = this.currentBufferEnd()
+    this.lastBufferDataTime = Date.now()
   }
 
   stopProgressWatchdog() {
