@@ -28,11 +28,13 @@ class TranscodeTracksController < ApplicationController
     )
 
     subtitles = TranscodeService.selectable_subtitle_tracks(tracks[:subtitles] + external_subtitles)
+    video_stream = probe_video_stream(input_url)
     render json: tracks.merge(
       subtitles: subtitles,
-      direct_playable: direct_playable?(input_url, tracks),
+      video_codec: video_stream[:codec_name].to_s.downcase,
+      direct_playable: direct_playable?(input_url, tracks, video_stream),
       direct_stream_url: direct_stream_url(input_url),
-      remux_direct_playable: remux_direct_playable?(input_url, tracks),
+      remux_direct_playable: remux_direct_playable?(video_stream),
       remux_direct_url: remux_direct_url(input_url)
     )
   end
@@ -45,11 +47,15 @@ class TranscodeTracksController < ApplicationController
     { "Authorization" => "Bearer #{current_user.realdebrid_api_key}" }
   end
 
-  def direct_playable?(input_url, tracks)
+  def probe_video_stream(input_url)
+    TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+  end
+
+  def direct_playable?(input_url, tracks, video_stream = nil)
     filename = params[:filename].to_s.downcase
     return false unless MP4_EXTENSIONS.any? { |ext| filename.end_with?(ext) }
 
-    video_stream = TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+    video_stream ||= probe_video_stream(input_url)
     return false unless TranscodeService.browser_safe_video?(video_stream)
 
     audio_codecs = tracks[:audio].filter_map { |t| t[:codec] }
@@ -69,8 +75,7 @@ class TranscodeTracksController < ApplicationController
   # VideoToolbox.  -c:v copy runs at near network speed — no re-encode.
   REMUX_COMPATIBLE_CODECS = %w[h264 hevc h265].freeze
 
-  def remux_direct_playable?(input_url, tracks)
-    video_stream = TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+  def remux_direct_playable?(video_stream)
     codec = video_stream[:codec_name].to_s.downcase
     REMUX_COMPATIBLE_CODECS.include?(codec)
   end

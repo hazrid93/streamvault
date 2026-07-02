@@ -364,13 +364,29 @@ export default class extends Controller {
   // natively (HEVC via VideoToolbox on macOS).  Works for any container
   // (MKV, m2ts, MP4) and any B-frame status — the native <video>
   // element handles B-frames correctly, unlike MSE's SourceBuffer.
-  // Same constraints as direct play: no subtitle burn, no audio switch,
-  // not in stall recovery.
+  // Unlike direct play, audio stream selection IS supported: ffmpeg
+  // selects and transcodes the specified audio track to AAC while
+  // copying the video stream verbatim.  Burned subtitles require
+  // video re-encode, so remux is skipped when a burn subtitle is active.
   remuxDirectEligible() {
     if (this.streamRecoveryAttempts > 0) return false
     if (this.burnedSubtitleSelected()) return false
-    if (this.selectedAudioStream) return false
-    return this.tracksData?.remux_direct_playable === true
+    if (!this.tracksData?.remux_direct_playable) return false
+    // Check browser can play the codec natively. HEVC requires
+    // VideoToolbox (macOS Chrome/Edge/Safari). Firefox and Linux
+    // Chrome don't support HEVC — skip remux for HEVC there.
+    const codec = this.tracksData?.video_codec
+    if (codec && codec !== "h264" && !this.browserCanPlayCodec(codec)) return false
+    return true
+  }
+
+  // Check if the browser can natively play a video codec via <video>.
+  browserCanPlayCodec(codec) {
+    const mime = codec === "hevc" || codec === "h265"
+      ? 'video/mp4; codecs="hvc1"'
+      : `video/mp4; codecs="${codec}"`
+    const result = this.videoTarget.canPlayType(mime)
+    return result === "probably" || result === "maybe"
   }
 
   // Start direct play: set <video> src to the proxied RD URL so the
@@ -411,7 +427,6 @@ export default class extends Controller {
   // stream and plays it natively — no MSE, no SourceBuffer, no B-frame
   // limitation.  Runs at near network speed — no video re-encode.
   startRemuxDirectPlay() {
-    this.playbackStarted = true
     this.directPlayActive = true
     this.remuxDirectPlay = true
     this.isSeeking = false
@@ -432,7 +447,11 @@ export default class extends Controller {
 
     const p = this.videoTarget.play()
     if (p?.catch) p.catch(() => {})
-    this.startProgressWatchdog()
+    // Don't set playbackStarted=true or start progress watchdog here —
+    // ffmpeg needs time to start up and produce the first data.  The
+    // stall watchdog (60s initial timeout via onVideoWaiting) gives
+    // ffmpeg plenty of time.  onVideoReady() sets playbackStarted=true
+    // and starts the progress watchdog when "playing" fires.
   }
 
   // Build the remux transcode URL with the current start_seconds and
@@ -1594,6 +1613,7 @@ export default class extends Controller {
     // causes the overlay to get stuck if the browser resumes with <2s
     // of buffer (no onBufferUpdateEnd safety net exists for direct play).
     if (this.isDirectPlay()) {
+      this.playbackStarted = true
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false
@@ -2483,6 +2503,25 @@ export default class extends Controller {
     this.updateSubtitleOverlay(currentPos)
     if (duration > 0) {
       this.updateSeekVisuals(currentPos / duration)
+    }
+
+    // Safety net: if the "Buffering..." overlay is stuck (isStalled=true)
+    // but currentTime is actively advancing (video is playing), the stall
+    // has resolved.  "playing" may not have fired (browsers don't always
+    // emit it when resuming from buffered ranges), and "progress" may not
+    // fire (browser playing from buffer, not downloading).  "timeupdate"
+    // fires whenever currentTime changes, making it the most reliable
+    // signal that playback is alive.  Clear the overlay if there's buffer
+    // ahead — no point showing "Buffering..." when the video is moving.
+    if (this.isStalled && !this.videoTarget.paused && !this.userPaused && !this.isSeeking && this.hasBufferedAhead(2)) {
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = null
+      this.isStalled = false
+      this.clearStallWatchdog()
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.startProgressWatchdog()
+      this.hideSeekingOverlay()
     }
   }
 
