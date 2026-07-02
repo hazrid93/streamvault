@@ -42,7 +42,8 @@ class TranscodeController < ApplicationController
         audio_stream: params[:audio_stream],
         subtitle_stream: params[:subtitle_stream],
         default_language: current_user.default_stream_language,
-        preferred_languages: current_user.preferred_stream_languages
+        preferred_languages: current_user.preferred_stream_languages,
+        remux: params[:remux] == "1"
       ) do |chunk|
         response.stream.write(chunk)
       end

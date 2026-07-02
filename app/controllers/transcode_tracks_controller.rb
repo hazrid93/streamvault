@@ -31,7 +31,9 @@ class TranscodeTracksController < ApplicationController
     render json: tracks.merge(
       subtitles: subtitles,
       direct_playable: direct_playable?(input_url, tracks),
-      direct_stream_url: direct_stream_url(input_url)
+      direct_stream_url: direct_stream_url(input_url),
+      remux_direct_playable: remux_direct_playable?(input_url, tracks),
+      remux_direct_url: remux_direct_url(input_url)
     )
   end
 
@@ -58,5 +60,22 @@ class TranscodeTracksController < ApplicationController
 
   def direct_stream_url(input_url)
     "/direct_stream?url=#{CGI.escape(input_url)}"
+  end
+
+  # Remux direct play is eligible when the video codec is H.264 or HEVC,
+  # regardless of container, B-frames, resolution, or pixel format.
+  # The native <video> element handles B-frames correctly (unlike MSE's
+  # SourceBuffer), and the browser plays HEVC natively on macOS via
+  # VideoToolbox.  -c:v copy runs at near network speed — no re-encode.
+  REMUX_COMPATIBLE_CODECS = %w[h264 hevc h265].freeze
+
+  def remux_direct_playable?(input_url, tracks)
+    video_stream = TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+    codec = video_stream[:codec_name].to_s.downcase
+    REMUX_COMPATIBLE_CODECS.include?(codec)
+  end
+
+  def remux_direct_url(input_url)
+    "/transcode?url=#{CGI.escape(input_url)}&remux=1"
   end
 end

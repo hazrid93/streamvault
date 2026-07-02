@@ -133,7 +133,7 @@ class TranscodeService
   # (bad URL, auth failure, expired link).  When the caller stops reading
   # (client disconnect → exception propagates through the yield), the
   # ensure block kills ffmpeg.
-  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], &block)
+  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], remux: false, &block)
     cmd = build_ffmpeg_command(
       input_url,
       headers: headers,
@@ -141,7 +141,8 @@ class TranscodeService
       audio_stream: audio_stream,
       subtitle_stream: subtitle_stream,
       default_language: default_language,
-      preferred_languages: preferred_languages
+      preferred_languages: preferred_languages,
+      remux: remux
     )
 
     transcode_to_fmp4_internal(cmd, &block)
@@ -581,7 +582,7 @@ class TranscodeService
   end
   private_class_method :format_vtt_timestamp
 
-  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil)
+  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil, remux: false)
     header_str = ffmpeg_headers(headers)
     # Probe video stream and media tracks in parallel — these are
     # independent ffprobe calls that each take 1-3s on a cold cache.
@@ -603,8 +604,16 @@ class TranscodeService
       preferred_languages: preferred_languages
     )
     selected_burn_subtitle_track = selected_burn_subtitle_track(input_url, headers: headers, subtitle_stream: subtitle_stream)
+    # Remux mode: copy video stream verbatim (-c:v copy) with no decode,
+    # scale, or re-encode.  Runs at near network speed.  Only used when
+    # the frontend detects H.264 or HEVC video and requests remux=1.
+    # Subtitle burn requires re-encoding video, so remux is ignored if a
+    # burn subtitle track is selected — falls through to normal transcode.
+    effective_remux = remux && !selected_burn_subtitle_track
     video_args = if selected_burn_subtitle_track
       transcode_args
+    elsif effective_remux
+      [ "-c:v", "copy" ]
     elsif browser_safe_video?(video_stream)
       [ "-c:v", "copy" ]
     else

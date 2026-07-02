@@ -15,26 +15,25 @@ const BUFFER_AHEAD_SECONDS = 30
 const BUFFER_AHEAD_MAX_WAIT_MS = 15000
 // After a stall, rebuild a meaningful buffer before resuming so ffmpeg
 // can catch up and transient upstream dips don't cause immediate
-// re-stall. 30s (up from 5s) absorbs variable-rate sources (RealDebrid
-// links from torrent swarms, HEVC transcode below 1×) so the next dip
-// doesn't trigger another stall-recovery cycle. The original 5s was
-// lowered to fix a userPaused auto-resume bug that has since been
-// fixed — the user pause bug was the cause, not the 30s threshold.
-const REBUFFER_AHEAD_SECONDS = 30
+// re-stall. 10s absorbs variable-rate sources (RealDebrid links from
+// torrent swarms, HEVC transcode below 1×) without making the user wait
+// 30s. The original 30s was raised to fix a userPaused auto-resume bug
+// that has since been fixed — 10s is sufficient to absorb transcode dips
+// while keeping the wait tolerable.
+const REBUFFER_AHEAD_SECONDS = 10
 // Stall watchdog timeout for rebuffer stalls (playback already started).
 // Must be longer than REBUFFER_MAX_WAIT_MS so the deadline (which resumes
 // with partial buffer) fires before the watchdog (which reconnects).
-// 45s gives ffmpeg time to accumulate 30s of buffer even on a slow
-// source; if no data arrives for 45s the fetch is truly dead.
-const REBUFFER_STALL_TIMEOUT_MS = 45000
+// 20s gives ffmpeg time to accumulate buffer; if no data arrives for 20s
+// the fetch is truly dead.
+const REBUFFER_STALL_TIMEOUT_MS = 20000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
 // before resuming with whatever buffer has accumulated.  On a slow
 // or trickling source, data arrives in small bursts that never reach
 // the gate threshold — without a deadline, the video would sit on
-// "Buffering" forever while the stall watchdog keeps getting reset by
-// each trickle.  30s gives ffmpeg time to build 30s of buffer even on
-// a 1× source; the stall watchdog handles a genuinely dead source.
-const REBUFFER_MAX_WAIT_MS = 30000
+// "Buffering" forever.  12s gives ffmpeg time to build buffer even on
+// a slow source; the stall watchdog handles a genuinely dead source.
+const REBUFFER_MAX_WAIT_MS = 12000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 
 export default class extends Controller {
@@ -264,6 +263,8 @@ export default class extends Controller {
     await this.loadMediaTracks()
     if (this.directPlayEligible()) {
       this.startDirectPlay()
+    } else if (this.remuxDirectEligible()) {
+      this.startRemuxDirectPlay()
     } else {
       this.setupMseSource(this.streamingUrlValue)
     }
@@ -278,6 +279,7 @@ export default class extends Controller {
     this.isStalled = false
     this.userPaused = false
     this.directPlayActive = false
+    this.remuxDirectPlay = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
     // Clear any stall watchdog from the previous connection so a
@@ -334,6 +336,14 @@ export default class extends Controller {
     return !!this.directPlayActive
   }
 
+  // True when using remux direct play: native <video src> pointing at
+  // the transcode endpoint with remux=1 (-c:v copy, no video re-encode).
+  // The browser handles buffering natively — no MSE, no SourceBuffer.
+  // Seeking requires changing the src (non-seekable streaming response).
+  isRemuxDirectPlay() {
+    return !!this.remuxDirectPlay
+  }
+
   // Can the current stream be played directly by the browser?  Requires:
   //   1. A direct stream proxy URL is available
   //   2. The tracks probe confirmed direct_playable (H.264/AAC MP4, no B-frames)
@@ -347,6 +357,20 @@ export default class extends Controller {
     if (this.burnedSubtitleSelected()) return false
     if (this.selectedAudioStream) return false
     return this.tracksData?.direct_playable === true
+  }
+
+  // Can the current stream be remuxed (video copy, no re-encode)?
+  // Requires H.264 or HEVC video codec — the browser plays both
+  // natively (HEVC via VideoToolbox on macOS).  Works for any container
+  // (MKV, m2ts, MP4) and any B-frame status — the native <video>
+  // element handles B-frames correctly, unlike MSE's SourceBuffer.
+  // Same constraints as direct play: no subtitle burn, no audio switch,
+  // not in stall recovery.
+  remuxDirectEligible() {
+    if (this.streamRecoveryAttempts > 0) return false
+    if (this.burnedSubtitleSelected()) return false
+    if (this.selectedAudioStream) return false
+    return this.tracksData?.remux_direct_playable === true
   }
 
   // Start direct play: set <video> src to the proxied RD URL so the
@@ -381,10 +405,54 @@ export default class extends Controller {
     this.startProgressWatchdog()
   }
 
-  // iOS-only fallback: start a server-side HLS transcode and hand the
-  // playlist to Safari's native player.  iOS Safari can't play the
-  // chunked fMP4 stream the MSE pipeline produces, so ffmpeg segments
-  // to .ts and serves an .m3u8 playlist instead.
+  // Start remux direct play: set <video> src to the transcode endpoint
+  // with remux=1 so ffmpeg copies the video stream verbatim (-c:v copy)
+  // and only transcodes audio to AAC.  The browser downloads the fMP4
+  // stream and plays it natively — no MSE, no SourceBuffer, no B-frame
+  // limitation.  Runs at near network speed — no video re-encode.
+  startRemuxDirectPlay() {
+    this.playbackStarted = true
+    this.directPlayActive = true
+    this.remuxDirectPlay = true
+    this.isSeeking = false
+    this.subtitlePlaybackHoldToken = null
+    this.streamRecoveryAttempts = 0
+    this.streamRecoveryActive = false
+
+    if (this.mediaSource) {
+      if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
+      this.mediaSource = null
+      this.sourceBuffer = null
+    }
+    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
+
+    const remuxUrl = this.buildRemuxDirectUrl()
+    this.videoTarget.src = remuxUrl
+    this.videoTarget.load()
+
+    const p = this.videoTarget.play()
+    if (p?.catch) p.catch(() => {})
+    this.startProgressWatchdog()
+  }
+
+  // Build the remux transcode URL with the current start_seconds and
+  // audio/subtitle stream params.  The base URL comes from the tracks
+  // response (remux_direct_url) and already includes remux=1.
+  buildRemuxDirectUrl() {
+    const base = this.tracksData?.remux_direct_url
+    if (!base) return this.streamingUrlValue
+    const url = new URL(base, window.location.origin)
+    if (this.startSecondsValue > 0) {
+      url.searchParams.set("start_seconds", this.startSecondsValue)
+    }
+    if (this.selectedAudioStream) {
+      url.searchParams.set("audio_stream", this.selectedAudioStream)
+    }
+    if (this.burnedSubtitleSelected()) {
+      url.searchParams.set("subtitle_stream", this.selectedSubtitleStream)
+    }
+    return url.pathname + url.search
+  }
   async startHlsPlayback() {
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
@@ -1449,6 +1517,7 @@ export default class extends Controller {
     if (this.isDirectPlay()) {
       console.warn("Direct play failed — falling back to MSE/transcode.")
       this.directPlayActive = false
+      this.remuxDirectPlay = false
       this.streamingUrlValue = this.element.dataset.videoPlayerStreamingUrlValue
       const targetSeconds = Math.floor(this.currentPlaybackPosition())
       this.startSecondsValue = targetSeconds
@@ -1506,6 +1575,25 @@ export default class extends Controller {
     // the rebuffer gate handles buffer depth from here.  Only gate
     // the buffering/stall-recovery overlay hide on buffer depth.
     if (this.isSeeking) {
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = null
+      this.isStalled = false
+      this.clearStallWatchdog()
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.startProgressWatchdog()
+      this.hideSeekingOverlay()
+      return
+    }
+
+    // For direct play (including remux), the browser manages its own
+    // buffering.  If "playing" fires, the video is actually playing —
+    // always hide the overlay.  The 2s buffer gate below is for MSE,
+    // where Chrome can fire "playing" on a trickle then immediately
+    // re-stall.  Direct play doesn't have this problem, and the gate
+    // causes the overlay to get stuck if the browser resumes with <2s
+    // of buffer (no onBufferUpdateEnd safety net exists for direct play).
+    if (this.isDirectPlay()) {
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false
@@ -2312,6 +2400,25 @@ export default class extends Controller {
       return
     }
 
+    // Remux direct play: the streaming response is non-seekable, so
+    // seeking requires changing the src to a new URL with the updated
+    // start_seconds.  ffmpeg re-seeks and starts outputting fMP4 from
+    // the new position.  The browser downloads and plays it natively.
+    if (this.isRemuxDirectPlay()) {
+      this.isSeeking = true
+      this.showSeekingOverlay("Seeking...")
+      this.startSecondsValue = targetSeconds
+      this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+      const remuxUrl = this.buildRemuxDirectUrl()
+      this.videoTarget.src = remuxUrl
+      this.videoTarget.load()
+      const p = this.videoTarget.play()
+      if (p?.catch) p.catch(() => {})
+      this.clearSubtitleCues()
+      this.resetProgressBaseline()
+      return
+    }
+
     // Direct play: browser handles seeking via Range requests.
     // Reset the progress watchdog so the freeze detector doesn't
     // fire during the seek (currentTime briefly stalls).
@@ -2383,10 +2490,43 @@ export default class extends Controller {
     const video = this.videoTarget
     if (!video.buffered.length || this.knownDuration <= 0) return
 
-    const bufferedEnd = video.buffered.end(video.buffered.length - 1)
-    const totalWithOffset = bufferedEnd + this.startSecondsValue
-    const percent = (totalWithOffset / this.knownDuration) * 100
-    this.seekBufferedTarget.style.width = `${Math.min(100, percent)}%`
+    // Safety net for direct play: if the "Buffering..." overlay is stuck
+    // (isStalled=true from a previous "waiting" event) but the browser
+    // has since buffered ahead and is actively playing, clear the overlay.
+    // For direct play there's no onBufferUpdateEnd → maybeHideBufferingOverlay
+    // safety net (no SourceBuffer), so without this the overlay can stay
+    // stuck forever if onVideoReady's 2s gate returned early.
+    if (this.isDirectPlay() && this.isStalled && !this.videoTarget.paused && !this.userPaused && this.hasBufferedAhead(2)) {
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = null
+      this.isStalled = false
+      this.clearStallWatchdog()
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.startProgressWatchdog()
+      this.hideSeekingOverlay()
+    }
+
+    // Show the buffer bar from the playhead position to the end of the
+    // buffered range containing currentTime — not from 0 to the last
+    // buffered range's end.  This accurately reflects how much buffer is
+    // ahead of the current position, and shrinks as the video plays
+    // through the buffer without new data arriving.
+    const ct = video.currentTime + this.startSecondsValue
+    let bufferEndAbsolute = ct
+    for (let i = 0; i < video.buffered.length; i++) {
+      const rangeStart = video.buffered.start(i) + this.startSecondsValue
+      const rangeEnd = video.buffered.end(i) + this.startSecondsValue
+      if (ct >= rangeStart && ct <= rangeEnd) {
+        bufferEndAbsolute = rangeEnd
+        break
+      }
+    }
+
+    const playheadPercent = Math.min(100, (ct / this.knownDuration) * 100)
+    const bufferEndPercent = Math.min(100, (bufferEndAbsolute / this.knownDuration) * 100)
+    this.seekBufferedTarget.style.left = `${playheadPercent}%`
+    this.seekBufferedTarget.style.width = `${Math.max(0, bufferEndPercent - playheadPercent)}%`
   }
 
   updateSeekVisuals(fraction) {
