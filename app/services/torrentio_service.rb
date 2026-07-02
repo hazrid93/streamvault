@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 class TorrentioService
+  include StreamCompatibility
   TORRENTIO_URL = ENV.fetch("TORRENTIO_API_BASE_URL", "https://torrentio.strem.fun")
   CINEMETA_URL = "https://v3-cinemeta.strem.io"
   QUALITY_SORT = { "4K" => 0, "1080p" => 1, "720p" => 2, "480p" => 3, "Unknown" => 4 }.freeze
@@ -186,9 +187,9 @@ class TorrentioService
     end
   end
 
-  # Sort: user language preference first, then RD+, quality, and size.
-  # Audio/video compatibility is handled by FFmpeg transcode after a stream is
-  # resolved, but the source candidate itself must respect user preferences.
+  # Sort: user language preference first, then compatibility (prefer streams
+  # that play directly or via stream-copy over heavy-transcode ones), RD+,
+  # quality, and size.
   def sort_streams(streams, language_priority: [])
     streams_with_scores = streams.map do |stream|
       stream.merge(language_score: stream_language_score(stream, language_priority))
@@ -196,10 +197,11 @@ class TorrentioService
 
     streams_with_scores.sort_by do |s|
       language_score = s[:language_score]
+      compatibility_score = -(s[:compatibility_score] || 0)
       rd_score = s[:rd_plus] ? 0 : 1
       quality_score = QUALITY_SORT[s[:quality]] || 4
       size_bytes = s[:raw_size].is_a?(Numeric) ? s[:raw_size] : 0
-      [ language_score, rd_score, quality_score, -size_bytes ]
+      [ language_score, compatibility_score, rd_score, quality_score, -size_bytes ]
     end
   end
 
@@ -243,6 +245,9 @@ class TorrentioService
       title_text = s["title"].to_s
       filename = s.dig("behaviorHints", "filename").to_s
       size_bytes = parse_size_bytes(title_text)
+      video_codec = detect_video_codec(title_text)
+      audio_codec = detect_audio_codec(title_text)
+      container = detect_container(filename.presence || title_text)
       {
         title: s["title"],
         info_hash: s["infoHash"],
@@ -255,7 +260,11 @@ class TorrentioService
         rd_plus: s["sources"].is_a?(Array) && s["sources"].any?,
         filename: filename,
         resolve_url: rewrite_resolve_url(s["url"]),
-        languages: extract_languages(title_text)
+        languages: extract_languages(title_text),
+        video_codec: video_codec,
+        audio_codec: audio_codec,
+        container: container,
+        compatibility_score: compatibility_score(video_codec: video_codec, audio_codec: audio_codec, container: container)
       }
     end
   end

@@ -36,6 +36,7 @@ Rails.application.routes.draw do
   resources :streaming, only: [:create, :show] do
     collection do
       get :resume
+      post :stall_telemetry
     end
     member do
       patch :progress
@@ -57,6 +58,9 @@ Rails.application.routes.draw do
   # Settings
   get "settings", to: "settings#show", as: :settings
   patch "settings", to: "settings#update"
+
+  # Direct stream proxy (bypass ffmpeg for browser-compatible content)
+  get "direct_stream", to: "direct_stream#show", as: :direct_stream
 
   # Health check
   get "up" => "rails/health#show", as: :rails_health_check

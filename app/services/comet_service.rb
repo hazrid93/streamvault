@@ -22,6 +22,7 @@ require "json"
 # /{b64config}/playback/... endpoint, which 302-redirects to the
 # RealDebrid direct download URL — same follow-redirect flow as Torrentio.
 class CometService
+  include StreamCompatibility
   LANGUAGE_PATTERNS = TorrentioService::LANGUAGE_PATTERNS
   QUALITY_SORT = TorrentioService::QUALITY_SORT
 
@@ -131,22 +132,19 @@ class CometService
       behavior_hints = s["behaviorHints"] || {}
       filename = behavior_hints["filename"].to_s
 
-      # The info hash is embedded in the bingeGroup: "comet|realdebrid|<hash>"
       binge_group = behavior_hints["bingeGroup"].to_s
       info_hash = binge_group.split("|").last.presence || s["infoHash"]
 
-      # Use the real release name as the title so each stream is identifiable
-      # in the UI (Comet's `name` is just "[RD⚡] Comet 2160p" for every 4K
-      # stream, which renders as identical "duplicates").
       title_text = filename.presence || s["name"].to_s
-
-      # Prefer the raw byte size from behaviorHints; fall back to parsing the
-      # "💾 N.N GB" line out of the description.
       size_bytes = behavior_hints["videoSize"] || parse_size_bytes(description)
-
-      # Comet's `name` marks cached streams with ⚡ and download-on-demand
-      # streams with ⬇️; ⚡ streams should sort first (rd_plus).
       cached = s["name"].to_s.include?("⚡")
+
+      # Parse codec/container from the release name and filename.
+      # Comet's title_text is the actual release filename; description
+      # may also contain the container extension for codec hints.
+      video_codec = detect_video_codec(title_text)
+      audio_codec = detect_audio_codec(title_text)
+      container = detect_container(filename.presence || description)
 
       {
         title: title_text,
@@ -160,7 +158,11 @@ class CometService
         rd_plus: cached,
         filename: filename,
         resolve_url: s["url"].to_s,
-        languages: extract_languages(description)
+        languages: extract_languages(description),
+        video_codec: video_codec,
+        audio_codec: audio_codec,
+        container: container,
+        compatibility_score: compatibility_score(video_codec: video_codec, audio_codec: audio_codec, container: container)
       }
     end
   end
@@ -181,10 +183,11 @@ class CometService
 
     streams_with_scores.sort_by do |s|
       language_score = s[:language_score]
+      compatibility_score = -(s[:compatibility_score] || 0)
       rd_score = s[:rd_plus] ? 0 : 1
       quality_score = QUALITY_SORT[s[:quality]] || 4
       size_bytes = s[:raw_size].is_a?(Numeric) ? s[:raw_size] : 0
-      [ language_score, rd_score, quality_score, -size_bytes ]
+      [ language_score, compatibility_score, rd_score, quality_score, -size_bytes ]
     end
   end
 
