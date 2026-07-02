@@ -393,8 +393,8 @@ export default class extends Controller {
   // browser downloads at network speed.  No ffmpeg, no MSE, no box
   // parser — the browser handles everything natively.
   startDirectPlay() {
-    this.playbackStarted = true
     this.directPlayActive = true
+    this.remuxDirectPlay = false
     this.isSeeking = false
     this.subtitlePlaybackHoldToken = null
     this.streamRecoveryAttempts = 0
@@ -418,7 +418,8 @@ export default class extends Controller {
 
     const p = this.videoTarget.play()
     if (p?.catch) p.catch(() => {})
-    this.startProgressWatchdog()
+    // Don't set playbackStarted=true or start progress watchdog here —
+    // onVideoReady() sets them when "playing" fires.
   }
 
   // Start remux direct play: set <video> src to the transcode endpoint
@@ -805,6 +806,33 @@ export default class extends Controller {
       }, 200)
       return
     }
+
+    // Direct play (including remux): the browser manages its own
+    // buffering and recovery.  "waiting" fires for transient reasons
+    // (internal buffer management, codec reinit, network hiccup) that
+    // the browser resolves on its own within a second or two.  Use a
+    // 1500ms debounce — much longer than MSE's 200ms — to avoid showing
+    // "Buffering..." for transient waits that the browser handles
+    // silently.  If the video is still frozen after 1500ms with no
+    // buffer ahead, then it's a real stall.
+    if (this.isDirectPlay()) {
+      clearTimeout(this.bufferingOverlayTimer)
+      const waitPos = this.videoTarget.currentTime
+      this.bufferingOverlayTimer = setTimeout(() => {
+        this.bufferingOverlayTimer = null
+        if (this.videoTarget.currentTime > waitPos + 0.1) return
+        if (this.hasBufferedAhead(2)) return
+        this.isStalled = true
+        this.showBufferingOverlay()
+        // Don't start the stall watchdog for direct play — the browser
+        // handles its own recovery.  The progress watchdog (silent
+        // freeze detector) is sufficient to catch a genuinely dead
+        // stream without prematurely switching to MSE/transcode.
+        this.startProgressWatchdog()
+      }, 1500)
+      return
+    }
+
     // MSE path: Chrome does NOT set paused=true when the MSE buffer runs
     // dry — the video stays "playing" but currentTime stops advancing.
     // Debounce 200ms to filter genuinely transient waits (ffmpeg burst
@@ -1006,7 +1034,47 @@ export default class extends Controller {
     this.streamRecoveryActive = true
     console.warn(`Stream stalled — recovering (attempt ${this.streamRecoveryAttempts}/${STREAM_MAX_RECOVERY_ATTEMPTS})`)
     this.reportStall("stall")
+
+    // For direct play (including remux), restart the same path — don't
+    // switch to MSE/transcode.  The stall watchdog fires on genuine data
+    // starvation (ffmpeg died, CDN URL expired).  Switching to MSE would
+    // abandon the fast remux path and force a slow transcode from scratch.
+    // Instead, reload the same URL — ffmpeg re-seeks to the current
+    // position and starts producing data again.
+    if (this.isDirectPlay()) {
+      this.reconnectDirectPlay()
+      return
+    }
+
     this.reconnectFromCurrentPosition()
+  }
+
+  // Restart direct/remux playback from the current position.  Unlike
+  // reconnectFromCurrentPosition (which switches to MSE), this keeps
+  // the same direct/remux path — just reloads the URL with the current
+  // start_seconds so ffmpeg re-seeks and produces data from there.
+  reconnectDirectPlay() {
+    const targetSeconds = Math.floor(this.currentPlaybackPosition())
+    this.startSecondsValue = targetSeconds
+    this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+    this.streamRecoveryActive = false
+
+    if (this.isRemuxDirectPlay()) {
+      // Remux: rebuild the URL with new start_seconds and reload.
+      const remuxUrl = this.buildRemuxDirectUrl()
+      this.videoTarget.src = remuxUrl
+    } else {
+      // Direct play: reload the same URL.  The browser handles seeking
+      // via Range requests, so just reload and seek to the target.
+      this.videoTarget.src = this.directStreamUrlValue
+    }
+
+    this.videoTarget.load()
+    const p = this.videoTarget.play()
+    if (p?.catch) p.catch(() => {})
+    this.isStalled = false
+    this.clearStallWatchdog()
+    this.stopProgressWatchdog()
   }
 
   // HLS stall recovery (iOS).  When the progress watchdog detects
@@ -2505,6 +2573,14 @@ export default class extends Controller {
       this.updateSeekVisuals(currentPos / duration)
     }
 
+    // Update the buffer bar every time the playhead moves — not just
+    // when new data arrives (onProgress).  Without this, the grey buffer
+    // bar stays at its old position while the playhead advances through
+    // the buffer, making it look like there's lots of buffer ahead when
+    // there isn't.  This is the #1 cause of "buffering happens when the
+    // timeline shows lots of buffer ahead" — the timeline was lying.
+    this.updateBufferBar()
+
     // Safety net: if the "Buffering..." overlay is stuck (isStalled=true)
     // but currentTime is actively advancing (video is playing), the stall
     // has resolved.  "playing" may not have fired (browsers don't always
@@ -2525,10 +2601,31 @@ export default class extends Controller {
     }
   }
 
-  onProgress() {
+  // Update the grey buffer bar to show from the playhead to the end of
+  // the buffered range containing currentTime.  Called from both
+  // onTimeUpdate (every ~250ms) and onProgress (when new data arrives).
+  updateBufferBar() {
     const video = this.videoTarget
     if (!video.buffered.length || this.knownDuration <= 0) return
 
+    const ct = video.currentTime + this.startSecondsValue
+    let bufferEndAbsolute = ct
+    for (let i = 0; i < video.buffered.length; i++) {
+      const rangeStart = video.buffered.start(i) + this.startSecondsValue
+      const rangeEnd = video.buffered.end(i) + this.startSecondsValue
+      if (ct >= rangeStart && ct <= rangeEnd) {
+        bufferEndAbsolute = rangeEnd
+        break
+      }
+    }
+
+    const playheadPercent = Math.min(100, (ct / this.knownDuration) * 100)
+    const bufferEndPercent = Math.min(100, (bufferEndAbsolute / this.knownDuration) * 100)
+    this.seekBufferedTarget.style.left = `${playheadPercent}%`
+    this.seekBufferedTarget.style.width = `${Math.max(0, bufferEndPercent - playheadPercent)}%`
+  }
+
+  onProgress() {
     // Safety net for direct play: if the "Buffering..." overlay is stuck
     // (isStalled=true from a previous "waiting" event) but the browser
     // has since buffered ahead and is actively playing, clear the overlay.
@@ -2546,26 +2643,7 @@ export default class extends Controller {
       this.hideSeekingOverlay()
     }
 
-    // Show the buffer bar from the playhead position to the end of the
-    // buffered range containing currentTime — not from 0 to the last
-    // buffered range's end.  This accurately reflects how much buffer is
-    // ahead of the current position, and shrinks as the video plays
-    // through the buffer without new data arriving.
-    const ct = video.currentTime + this.startSecondsValue
-    let bufferEndAbsolute = ct
-    for (let i = 0; i < video.buffered.length; i++) {
-      const rangeStart = video.buffered.start(i) + this.startSecondsValue
-      const rangeEnd = video.buffered.end(i) + this.startSecondsValue
-      if (ct >= rangeStart && ct <= rangeEnd) {
-        bufferEndAbsolute = rangeEnd
-        break
-      }
-    }
-
-    const playheadPercent = Math.min(100, (ct / this.knownDuration) * 100)
-    const bufferEndPercent = Math.min(100, (bufferEndAbsolute / this.knownDuration) * 100)
-    this.seekBufferedTarget.style.left = `${playheadPercent}%`
-    this.seekBufferedTarget.style.width = `${Math.max(0, bufferEndPercent - playheadPercent)}%`
+    this.updateBufferBar()
   }
 
   updateSeekVisuals(fraction) {
