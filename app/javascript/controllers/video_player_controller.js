@@ -726,14 +726,22 @@ export default class extends Controller {
     // paused stays false during an MSE underrun.
     clearTimeout(this.bufferingOverlayTimer)
     const waitPos = this.videoTarget.currentTime
-    this.bufferingOverlayTimer = setTimeout(() => {
-      this.bufferingOverlayTimer = null
-      // If currentTime advanced, the stall resolved — don't show overlay.
-      if (this.videoTarget.currentTime > waitPos + 0.1) return
-      this.stopProgressWatchdog()
-      this.isStalled = true
-      this.showBufferingOverlay()
-      // Set a rebuffer deadline: if the gate threshold isn't reached
+      this.bufferingOverlayTimer = setTimeout(() => {
+        this.bufferingOverlayTimer = null
+        // If currentTime advanced, the stall resolved — don't show overlay.
+        if (this.videoTarget.currentTime > waitPos + 0.1) return
+        // If there's buffered data ahead, the "waiting" event is a
+        // transient decoder re-init (e.g. after sourceBuffer.remove()
+        // from evictOldBuffer flushes the decode pipeline), not a real
+        // data starvation.  The browser will resume on its own once the
+        // decoder catches up — don't show "Buffering..." for this.
+        // The progress watchdog is still armed (we return before
+        // stopProgressWatchdog below) and will catch a true stall.
+        if (this.hasBufferedAhead(2)) return
+        this.stopProgressWatchdog()
+        this.isStalled = true
+        this.showBufferingOverlay()
+        // Set a rebuffer deadline: if the gate threshold isn't reached
       // within REBUFFER_MAX_WAIT_MS, resume with whatever we have.
       // Without this, a trickling source keeps resetting the stall
       // watchdog on each tiny burst and the video hangs on "Buffering"
