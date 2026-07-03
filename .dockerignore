@@ -30,7 +30,7 @@
 /tmp/storage/*
 !/tmp/storage/.keep
 
-# Ignore local runtime data (e.g. postgres data dir mounted as a volume).
+# Ignore the PostgreSQL data bind-mount (managed by the db service).
 /data
 
 # Ignore assets.

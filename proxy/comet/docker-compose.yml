@@ -29,8 +29,9 @@ services:
     container_name: comet
     image: ghcr.io/g0ldyy/comet:latest
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    networks:
+      - default
+      - sv-shared
     environment:
       DATABASE_TYPE: ${DATABASE_TYPE:-postgresql}
       DATABASE_URL: ${DATABASE_URL:-postgresql://comet:comet@comet-postgres:5432/comet}
@@ -94,7 +95,7 @@ services:
     image: lscr.io/linuxserver/jackett:latest
     restart: unless-stopped
     ports:
-      - "9117:9117"
+      - "127.0.0.1:9117:9117"
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -106,3 +107,7 @@ volumes:
   comet_data:
   comet_postgres_data:
   jackett_config:
+
+networks:
+  sv-shared:
+    external: true

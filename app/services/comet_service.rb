@@ -43,7 +43,7 @@ class CometService
       f.response :json
       f.response :follow_redirects
       f.adapter Faraday.default_adapter
-      f.options.timeout = 30
+      f.options.timeout = 120
       f.options.open_timeout = 5
       f.proxy = self.class.comet_proxy if self.class.comet_proxy.present?
     end

@@ -30,6 +30,9 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - default
+      - sv-shared
 
   db:
     image: postgres:17
@@ -46,3 +49,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+networks:
+  sv-shared:
+    external: true
