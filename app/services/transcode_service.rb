@@ -2,6 +2,7 @@
 
 require "json"
 require "fileutils"
+require "tempfile"
 
 # Remuxes/transcodes streams via FFmpeg for browser playback.
 # Browser-safe H.264 video is copied when possible; risky/unsupported
@@ -37,12 +38,6 @@ class TranscodeService
   FIRST_SEGMENT_TIMEOUT_SECONDS = 30
   SHUTDOWN_GRACE_SECONDS = 1
   FIRST_DATA_TIMEOUT_SECONDS = 30
-  # Background reader buffer: 2000 chunks × 131KB ≈ 256MB.  Large enough
-  # to absorb browser backpressure pauses (~40s of 4K HEVC) so ffmpeg can
-  # keep reading from the upstream while the browser's internal media
-  # buffer is full.  Prevents the upstream connection from dying during
-  # backpressure, which was the root cause of "download stops mid-playback."
-  READER_BUFFER_MAX_CHUNKS = 2000
   # No mid-stream idle timeout: ffmpeg produces data in bursts, and
   # pausing between bursts is normal. The frontend watchdog detects
   # true playback stalls (video element buffer ran dry) — the backend
@@ -259,26 +254,20 @@ class TranscodeService
   end
 
   # Spawns a subprocess from the given command array, streams its stdout
-  # in 32 KB chunks to the block, and enforces first-data and idle
-  # timeouts.  Raises TranscodeError if the process stalls or exits
-  # without producing data.  Extracted from transcode_to_fmp4 so the
-  # timeout logic can be tested without a real ffmpeg binary.
+  # to the block, and enforces first-data timeout.  Raises TranscodeError
+  # if the process exits without producing data.
   #
-  # A background reader thread decouples ffmpeg's stdout reading from
-  # the HTTP response writing.  Without this, when the browser pauses
-  # reading (its internal media buffer is full), response.stream.write
-  # blocks, ffmpeg's stdout pipe fills up (64KB OS buffer), ffmpeg
-  # blocks on write, stops reading from the upstream, and the upstream
-  # connection (RealDebrid CDN/Cloudflare) dies from inactivity.  When
-  # the browser resumes, ffmpeg tries to read from the dead upstream,
-  # exits, and the response closes — the browser stops buffering and
-  # the user sees "Buffering..." when the remaining buffer drains.
+  # Uses a Tempfile on disk as an unlimited buffer between ffmpeg's stdout
+  # and the HTTP response.  A reader thread reads from ffmpeg and writes
+  # to the file; the main thread reads from the file and yields to the
+  # block (response.stream.write).
   #
-  # The reader thread reads from ffmpeg into a bounded queue (~256MB).
-  # When the browser pauses, ffmpeg keeps reading from the upstream
-  # into the queue.  Only when the queue fills (256MB ≈ 40s of 4K HEVC)
-  # does ffmpeg block — by then the browser will likely resume.  This
-  # keeps the upstream connection alive during browser backpressure.
+  # This prevents backpressure from killing the upstream connection.
+  # When the browser pauses reading (its internal media buffer is full),
+  # response.stream.write blocks, but the reader thread keeps reading
+  # from ffmpeg and writing to the file.  ffmpeg never blocks on stdout,
+  # so it keeps reading from the upstream — the connection stays alive.
+  # The file grows on disk (unlimited buffer) until the browser resumes.
   def self.transcode_to_fmp4_internal(cmd, &block)
     rd, wr = IO.pipe
     err_rd, err_wr = IO.pipe
@@ -286,32 +275,40 @@ class TranscodeService
     wr.close
     err_wr.close
 
-    # Drain stderr in background to prevent pipe-buffer deadlock and
-    # capture diagnostics for TranscodeError when ffmpeg fails.
     stderr_buf = +""
     stderr_thread = Thread.new do
       loop { stderr_buf << err_rd.readpartial(4096) }
     rescue EOFError, IOError, Errno::EBADF
     end
 
-    # Background reader thread: decouple ffmpeg's stdout reading from
-    # the HTTP response writing.  Reads ffmpeg output into a bounded
-    # queue so ffmpeg can keep reading from the upstream even when the
-    # browser pauses reading the HTTP response.  2000 chunks × 131KB ≈
-    # 256MB — enough to absorb 40s of 4K HEVC or 3+ minutes of 1080p.
-    chunk_queue = Queue.new
+    # Disk-based buffer: reader thread writes ffmpeg output to a Tempfile,
+    # main thread reads from it.  File position is managed explicitly
+    # (write_pos / read_pos) under a mutex so concurrent read/write don't
+    # corrupt each other's file position.
+    buffer = Tempfile.create("streamvault")
+    buffer.binmode
+    write_pos = 0
+    read_pos = 0
+    eof = false
+    mutex = Mutex.new
+    cv = ConditionVariable.new
+
     reader_thread = Thread.new do
       begin
         loop do
           chunk = rd.readpartial(131_072)
-          while chunk_queue.size >= READER_BUFFER_MAX_CHUNKS
-            sleep 0.05
+          mutex.synchronize do
+            buffer.pos = write_pos
+            buffer.write(chunk)
+            write_pos += chunk.bytesize
+            cv.signal
           end
-          chunk_queue.push(chunk)
         end
       rescue EOFError, IOError, Errno::EBADF
-        # ffmpeg closed stdout (finished or died) — signal EOF
-        chunk_queue.push(nil)
+        mutex.synchronize do
+          eof = true
+          cv.signal
+        end
       end
     end
 
@@ -320,41 +317,50 @@ class TranscodeService
       total_bytes = 0
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # Wait for the first chunk with a timeout.  Subsequent chunks
-      # have no timeout — ffmpeg transcodes in bursts, and pausing
-      # between bursts is normal.  A true playback stall is detected
-      # by the frontend watchdog, not by a backend idle timer.
-      first_chunk = nil
-      deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
-      while first_chunk.nil?
-        if chunk_queue.empty?
+      # Wait for first data with timeout
+      mutex.synchronize do
+        deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
+        while write_pos == 0 && !eof
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
           if remaining <= 0
             raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
           end
-          sleep [ remaining, 0.1 ].min
-        else
-          first_chunk = chunk_queue.pop(true) rescue nil
+          cv.wait(mutex, remaining)
         end
       end
 
-      if first_chunk.nil?
+      if eof && write_pos == 0
         raise TranscodeError, "FFmpeg exited without producing output. #{stderr_summary(stderr_buf)}"
       end
 
-      yield first_chunk
-      total_bytes += first_chunk.bytesize
-      produced_output = true
-
-      # Read remaining chunks from the queue.  nil signals EOF
-      # (ffmpeg closed stdout).  The yield (response.stream.write)
-      # may block when the browser pauses reading — that's fine,
-      # the reader thread keeps buffering ffmpeg's output.
+      # Read from the file and yield to the block.  When the reader
+      # catches up to the writer, wait for more data.  The yield
+      # (response.stream.write) may block when the browser pauses —
+      # that's fine, the reader thread keeps buffering to the file.
       loop do
-        chunk = chunk_queue.pop
-        break if chunk.nil?
+        chunk = nil
+        done = false
+        mutex.synchronize do
+          while read_pos >= write_pos && !eof
+            cv.wait(mutex)
+          end
+          if read_pos < write_pos
+            available = write_pos - read_pos
+            read_size = [ available, 131_072 ].min
+            buffer.pos = read_pos
+            chunk = buffer.read(read_size)
+            read_pos += read_size
+          elsif eof
+            done = true
+          end
+        end
+
+        break if done
+        next if chunk.nil? || chunk.empty?
+
         yield chunk
         total_bytes += chunk.bytesize
+        produced_output = true
       end
 
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
@@ -368,6 +374,8 @@ class TranscodeService
       stderr_thread.join(1)
       rd.close
       err_rd.close
+      buffer.close
+      File.delete(buffer.path) rescue nil
     end
   end
   private_class_method :transcode_to_fmp4_internal
