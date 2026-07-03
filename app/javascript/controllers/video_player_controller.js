@@ -104,6 +104,7 @@ export default class extends Controller {
     this.lastProgressPosition = 0
     this.lastBufferEnd = 0
     this.lastBufferDataTime = 0
+    this.lastProgressEventTime = 0
     this.progressWatchdogArmed = false
     this.streamRecoveryActive = false
     this.playbackStarted = false
@@ -949,6 +950,7 @@ export default class extends Controller {
     this.lastProgressTime = Date.now()
     this.lastBufferEnd = this.currentBufferEnd()
     this.lastBufferDataTime = Date.now()
+    this.lastProgressEventTime = Date.now()
     this.progressWatchdogArmed = true
     this.tickProgressWatchdog()
   }
@@ -985,34 +987,38 @@ export default class extends Controller {
 
     // ── Download stall detection (direct/remux play) ──────────────
     // For direct play, the browser manages its own download.  When the
-    // server (ffmpeg/RealDebrid) dies or the browser throttles the
-    // download, the buffer stops growing but currentTime keeps advancing
-    // (playing from buffer).  The existing freeze detection below only
-    // fires when currentTime stops — by then the buffer has already run
-    // out and the user sees "Buffering...".  Instead, detect when the
-    // download has stalled (buffer not growing) and pre-emptively
-    // reconnect BEFORE the buffer runs out.
+    // server (ffmpeg/RealDebrid) dies or the connection drops, the
+    // browser stops receiving data.  The 'progress' event stops firing,
+    // but currentTime keeps advancing (playing from buffer).  The freeze
+    // detection below only fires when currentTime stops — by then the
+    // buffer has already run out and the user sees "Buffering...".
+    //
+    // Use two signals to detect a download stall:
+    // 1. lastProgressEventTime: the 'progress' event fires when new
+    //    data arrives.  If it hasn't fired for 15s, the download has
+    //    stopped.  This is the most reliable signal — it doesn't depend
+    //    on buffered ranges being reported correctly.
+    // 2. Buffer growth: if the buffer end hasn't grown for 15s, the
+    //    download has stopped.  Fallback for browsers that don't fire
+    //    'progress' reliably.
     if (this.isDirectPlay()) {
+      const dlStalledMs = now - this.lastProgressEventTime
       const bufEnd = this.currentBufferEnd()
-      if (bufEnd > this.lastBufferEnd + 0.5) {
-        // Buffer is growing — download is alive
+      const bufGrowing = bufEnd > this.lastBufferEnd + 0.5
+      if (bufGrowing) {
         this.lastBufferEnd = bufEnd
         this.lastBufferDataTime = now
-      } else {
-        // Buffer not growing — download may have stalled.
-        // For direct/remux play, the download is continuous (no bursts
-        // like MSE), so 10s of no growth is a clear sign the download
-        // died.  Reconnect immediately — the more buffer we have, the
-        // more time the reconnect has to succeed before it runs out.
-        const dataStalledMs = now - this.lastBufferDataTime
+      }
+      const bufStalledMs = now - this.lastBufferDataTime
+      const stalled = dlStalledMs > 15000 || (bufStalledMs > 15000 && !bufGrowing)
+
+      if (stalled) {
         const bufferAhead = this.bufferedAheadOfCurrent()
-        if (dataStalledMs > 10000 && bufferAhead > 0) {
-          console.warn(`Download stalled for ${Math.round(dataStalledMs / 1000)}s, buffer ahead: ${bufferAhead.toFixed(1)}s — pre-emptive reconnect`)
-          this.progressWatchdogArmed = false
-          this.reportStall("download_stall")
-          this.handleStreamStall()
-          return
-        }
+        console.warn(`Download stalled — no progress event for ${Math.round(dlStalledMs / 1000)}s, buffer ahead: ${bufferAhead.toFixed(1)}s — reconnecting`)
+        this.progressWatchdogArmed = false
+        this.reportStall("download_stall")
+        this.handleStreamStall()
+        return
       }
     }
 
@@ -1051,6 +1057,7 @@ export default class extends Controller {
     this.lastProgressTime = Date.now()
     this.lastBufferEnd = this.currentBufferEnd()
     this.lastBufferDataTime = Date.now()
+    this.lastProgressEventTime = Date.now()
   }
 
   stopProgressWatchdog() {
@@ -1112,23 +1119,38 @@ export default class extends Controller {
     this.startSecondsValue = targetSeconds
     this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
     this.streamRecoveryActive = false
+    this.isStalled = false
+
+    // Hide the "Buffering..." overlay — we're reconnecting.  The
+    // startup overlay is already hidden (playback started earlier).
+    // Show a brief "Buffering..." to give user feedback during the
+    // reconnect, but with pointer-events-none so they can still seek.
+    this.showBufferingOverlay()
 
     if (this.isRemuxDirectPlay()) {
       // Remux: rebuild the URL with new start_seconds and reload.
       const remuxUrl = this.buildRemuxDirectUrl()
+      console.log(`[Player] Reconnecting remux direct play at ${targetSeconds}s`)
       this.videoTarget.src = remuxUrl
     } else {
       // Direct play: reload the same URL.  The browser handles seeking
       // via Range requests, so just reload and seek to the target.
+      console.log(`[Player] Reconnecting direct play at ${targetSeconds}s`)
       this.videoTarget.src = this.directStreamUrlValue
     }
 
     this.videoTarget.load()
     const p = this.videoTarget.play()
     if (p?.catch) p.catch(() => {})
-    this.isStalled = false
+
     this.clearStallWatchdog()
     this.stopProgressWatchdog()
+
+    // Don't start the progress watchdog here — onVideoReady() will
+    // start it when "playing" fires.  But DO arm a stall watchdog
+    // with the initial timeout (60s) in case "playing" never fires
+    // (ffmpeg takes a while to start, or the upstream is still dead).
+    this.startStallWatchdog(STREAM_STALL_TIMEOUT_MS)
   }
 
   // HLS stall recovery (iOS).  When the progress watchdog detects
@@ -2682,6 +2704,10 @@ export default class extends Controller {
   }
 
   onProgress() {
+    // Track when the browser last received data — used by the progress
+    // watchdog to detect download stalls for direct/remux play.
+    this.lastProgressEventTime = Date.now()
+
     // Safety net for direct play: if the "Buffering..." overlay is stuck
     // (isStalled=true from a previous "waiting" event) but the browser
     // has since buffered ahead and is actively playing, clear the overlay.
