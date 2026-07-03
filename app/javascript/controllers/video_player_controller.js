@@ -999,10 +999,14 @@ export default class extends Controller {
         this.lastBufferEnd = bufEnd
         this.lastBufferDataTime = now
       } else {
-        // Buffer not growing — download may have stalled
+        // Buffer not growing — download may have stalled.
+        // For direct/remux play, the download is continuous (no bursts
+        // like MSE), so 10s of no growth is a clear sign the download
+        // died.  Reconnect immediately — the more buffer we have, the
+        // more time the reconnect has to succeed before it runs out.
         const dataStalledMs = now - this.lastBufferDataTime
         const bufferAhead = this.bufferedAheadOfCurrent()
-        if (dataStalledMs > 30000 && bufferAhead < 60 && bufferAhead > 0) {
+        if (dataStalledMs > 10000 && bufferAhead > 0) {
           console.warn(`Download stalled for ${Math.round(dataStalledMs / 1000)}s, buffer ahead: ${bufferAhead.toFixed(1)}s — pre-emptive reconnect`)
           this.progressWatchdogArmed = false
           this.reportStall("download_stall")
@@ -1211,9 +1215,11 @@ export default class extends Controller {
   // after it) and returns the gap from currentTime to the end of that range.
   // Returns 0 if there's no buffer ahead (currentTime is past all ranges).
   bufferedAheadOfCurrent() {
-    if (!this.sourceBuffer || this.sourceBuffer.buffered.length === 0) return 0
+    // For MSE/transcode, use sourceBuffer.buffered.  For direct/remux
+    // play, use videoTarget.buffered (no sourceBuffer exists).
+    const ranges = this.sourceBuffer ? this.sourceBuffer.buffered : this.videoTarget.buffered
+    if (!ranges || ranges.length === 0) return 0
     const ct = this.videoTarget.currentTime
-    const ranges = this.sourceBuffer.buffered
     for (let i = 0; i < ranges.length; i++) {
       if (ct >= ranges.start(i) && ct < ranges.end(i)) {
         return ranges.end(i) - ct
