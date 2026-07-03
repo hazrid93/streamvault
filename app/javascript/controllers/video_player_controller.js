@@ -2857,6 +2857,7 @@ export default class extends Controller {
   // ── Progress tracking ─────────────────────────────────────────────
 
   startProgressTracking() {
+    this.progressAbortController = null
     this.progressInterval = setInterval(() => {
       if (this.videoTarget && !this.videoTarget.paused) this.saveProgress()
     }, 5000)
@@ -2867,6 +2868,10 @@ export default class extends Controller {
       clearInterval(this.progressInterval)
       this.progressInterval = null
     }
+    if (this.progressAbortController) {
+      this.progressAbortController.abort()
+      this.progressAbortController = null
+    }
   }
 
   async saveProgress() {
@@ -2875,6 +2880,14 @@ export default class extends Controller {
     const progressSeconds = Math.floor(video.currentTime + this.startSecondsValue)
     const durationSeconds = this.saveableDurationSeconds()
     if (progressSeconds <= 0) return
+
+    // Abort any previous in-flight progress request.  Without this,
+    // slow requests pile up and exhaust the browser's 6-connection
+    // per-origin limit, starving the video stream download.
+    if (this.progressAbortController) {
+      this.progressAbortController.abort()
+    }
+    this.progressAbortController = new AbortController()
 
     try {
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
@@ -2890,10 +2903,15 @@ export default class extends Controller {
           episode: this.episodeValue,
           title: this.titleValue || null,
           poster_url: this.posterUrlValue || null
-        })
+        }),
+        signal: this.progressAbortController.signal
       })
     } catch (e) {
-      console.warn("Progress save failed:", e)
+      if (e.name !== "AbortError") console.warn("Progress save failed:", e)
+    } finally {
+      if (this.progressAbortController?.signal.aborted) {
+        this.progressAbortController = null
+      }
     }
   }
 
