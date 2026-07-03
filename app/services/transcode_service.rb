@@ -317,16 +317,18 @@ class TranscodeService
       total_bytes = 0
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # Wait for first data with timeout
-      mutex.synchronize do
-        deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
-        while write_pos == 0 && !eof
-          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          if remaining <= 0
-            raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
-          end
-          cv.wait(mutex, remaining)
+      # Wait for first data with timeout.  Poll the write_pos instead of
+      # using cv.wait — avoids a race where cv.wait returns spuriously and
+      # the timeout fires before the reader thread has a chance to read.
+      deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
+      loop do
+        done = false
+        mutex.synchronize { done = (write_pos > 0 || eof) }
+        break if done
+        if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
         end
+        sleep 0.05
       end
 
       if eof && write_pos == 0
@@ -683,6 +685,20 @@ class TranscodeService
     end
 
     cmd = [ FFMPEG_PATH, "-loglevel", "error" ]
+    # -re: read input at native frame rate (1× speed).  Without this,
+    # ffmpeg reads as fast as possible and exits in minutes — the upstream
+    # connection closes, and no more data arrives.  With -re, ffmpeg
+    # paces output at 1× speed, keeping the upstream alive for the entire
+    # movie.  Essential for remux (-c:v copy) where ffmpeg can read a
+    # 2-hour movie in a few minutes on a fast CDN.
+    # Only needed for remux/copy paths — transcode is already bottlenecked
+    # by the encoder at ~1× speed.
+    cmd += [ "-re" ] if video_args == [ "-c:v", "copy" ]
+    # Reconnect on HTTP connection drops — RealDebrid CDN / Cloudflare
+    # may close the connection after a period.  Without reconnect,
+    # ffmpeg exits when the upstream dies.  With reconnect, ffmpeg
+    # retries up to -reconnect_delay_max seconds.
+    cmd += [ "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5" ]
     # Hardware acceleration for decode.  On macOS with VideoToolbox,
     # -hwaccel videotoolbox offloads HEVC/H.264 decode to the GPU,
     # which is critical for 4K HEVC streams — software HEVC decode
