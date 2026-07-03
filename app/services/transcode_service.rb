@@ -37,6 +37,12 @@ class TranscodeService
   FIRST_SEGMENT_TIMEOUT_SECONDS = 30
   SHUTDOWN_GRACE_SECONDS = 1
   FIRST_DATA_TIMEOUT_SECONDS = 30
+  # Background reader buffer: 2000 chunks × 131KB ≈ 256MB.  Large enough
+  # to absorb browser backpressure pauses (~40s of 4K HEVC) so ffmpeg can
+  # keep reading from the upstream while the browser's internal media
+  # buffer is full.  Prevents the upstream connection from dying during
+  # backpressure, which was the root cause of "download stops mid-playback."
+  READER_BUFFER_MAX_CHUNKS = 2000
   # No mid-stream idle timeout: ffmpeg produces data in bursts, and
   # pausing between bursts is normal. The frontend watchdog detects
   # true playback stalls (video element buffer ran dry) — the backend
@@ -257,6 +263,22 @@ class TranscodeService
   # timeouts.  Raises TranscodeError if the process stalls or exits
   # without producing data.  Extracted from transcode_to_fmp4 so the
   # timeout logic can be tested without a real ffmpeg binary.
+  #
+  # A background reader thread decouples ffmpeg's stdout reading from
+  # the HTTP response writing.  Without this, when the browser pauses
+  # reading (its internal media buffer is full), response.stream.write
+  # blocks, ffmpeg's stdout pipe fills up (64KB OS buffer), ffmpeg
+  # blocks on write, stops reading from the upstream, and the upstream
+  # connection (RealDebrid CDN/Cloudflare) dies from inactivity.  When
+  # the browser resumes, ffmpeg tries to read from the dead upstream,
+  # exits, and the response closes — the browser stops buffering and
+  # the user sees "Buffering..." when the remaining buffer drains.
+  #
+  # The reader thread reads from ffmpeg into a bounded queue (~256MB).
+  # When the browser pauses, ffmpeg keeps reading from the upstream
+  # into the queue.  Only when the queue fills (256MB ≈ 40s of 4K HEVC)
+  # does ffmpeg block — by then the browser will likely resume.  This
+  # keeps the upstream connection alive during browser backpressure.
   def self.transcode_to_fmp4_internal(cmd, &block)
     rd, wr = IO.pipe
     err_rd, err_wr = IO.pipe
@@ -272,48 +294,75 @@ class TranscodeService
     rescue EOFError, IOError, Errno::EBADF
     end
 
+    # Background reader thread: decouple ffmpeg's stdout reading from
+    # the HTTP response writing.  Reads ffmpeg output into a bounded
+    # queue so ffmpeg can keep reading from the upstream even when the
+    # browser pauses reading the HTTP response.  2000 chunks × 131KB ≈
+    # 256MB — enough to absorb 40s of 4K HEVC or 3+ minutes of 1080p.
+    chunk_queue = Queue.new
+    reader_thread = Thread.new do
+      begin
+        loop do
+          chunk = rd.readpartial(131_072)
+          while chunk_queue.size >= READER_BUFFER_MAX_CHUNKS
+            sleep 0.05
+          end
+          chunk_queue.push(chunk)
+        end
+      rescue EOFError, IOError, Errno::EBADF
+        # ffmpeg closed stdout (finished or died) — signal EOF
+        chunk_queue.push(nil)
+      end
+    end
+
     begin
       produced_output = false
       total_bytes = 0
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # readpartial returns whatever data is available (up to 128 KB)
-      # without waiting for the full amount, then blocks for more.
-      # When ffmpeg closes stdout (exit), it raises EOFError.
-      #
-      # Only the FIRST_DATA_TIMEOUT_SECONDS guard is applied — before
-      # ffmpeg produces any data.  Once data starts flowing, we read
-      # with no timeout: ffmpeg transcodes in bursts, and pausing
+      # Wait for the first chunk with a timeout.  Subsequent chunks
+      # have no timeout — ffmpeg transcodes in bursts, and pausing
       # between bursts is normal.  A true playback stall is detected
-      # by the frontend watchdog (video element buffer ran dry), not
-      # by a backend idle timer that cannot distinguish a pause from
-      # a stall.
-      begin
-        loop do
-          unless produced_output
-            readable = IO.select([ rd ], nil, nil, FIRST_DATA_TIMEOUT_SECONDS)
-            if readable.nil?
-              raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
-            end
+      # by the frontend watchdog, not by a backend idle timer.
+      first_chunk = nil
+      deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
+      while first_chunk.nil?
+        if chunk_queue.empty?
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          if remaining <= 0
+            raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
           end
+          sleep [ remaining, 0.1 ].min
+        else
+          first_chunk = chunk_queue.pop(true) rescue nil
+        end
+      end
 
-          chunk = rd.readpartial(131_072)
-          yield chunk
-          total_bytes += chunk.bytesize
-          produced_output = true
-        end
-      rescue EOFError
-        # ffmpeg closed stdout.  If it never produced any data, it failed
-        # to open or decode the input — surface the stderr diagnostic.
-        unless produced_output
-          raise TranscodeError, "FFmpeg exited without producing output. #{stderr_summary(stderr_buf)}"
-        end
+      if first_chunk.nil?
+        raise TranscodeError, "FFmpeg exited without producing output. #{stderr_summary(stderr_buf)}"
+      end
+
+      yield first_chunk
+      total_bytes += first_chunk.bytesize
+      produced_output = true
+
+      # Read remaining chunks from the queue.  nil signals EOF
+      # (ffmpeg closed stdout).  The yield (response.stream.write)
+      # may block when the browser pauses reading — that's fine,
+      # the reader thread keeps buffering ffmpeg's output.
+      loop do
+        chunk = chunk_queue.pop
+        break if chunk.nil?
+        yield chunk
+        total_bytes += chunk.bytesize
       end
 
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
       rate_kbps = elapsed.positive? ? (total_bytes * 8 / 1000.0 / elapsed).round : 0
       Rails.logger.info("[Transcode] ffmpeg finished: #{total_bytes} bytes in #{elapsed.round(1)}s (#{rate_kbps} kbps)") if defined?(Rails)
     ensure
+      reader_thread.kill
+      reader_thread.join(1)
       kill_process_group(pid)
       stderr_thread.kill
       stderr_thread.join(1)
