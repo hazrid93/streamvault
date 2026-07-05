@@ -374,8 +374,35 @@ RSpec.describe TranscodeService do
       )
 
       expect(argument_pairs(command)).to include([ "-map", "0:1" ])
-      expect(argument_pairs(command)).to include([ "-c:a", "aac" ])
+      # AAC source audio is copied verbatim (preserves timestamps, avoids
+      # A/V drift from re-encoding).  Non-AAC sources are re-encoded.
+      expect(argument_pairs(command)).to include([ "-c:a", "copy" ])
       expect(argument_pairs(command)).to include([ "-f", "hls" ])
+    end
+
+    it "re-encodes non-AAC audio sources to AAC with aresample sync" do
+      track_output = {
+        "streams" => [
+          { "index" => 1, "codec_type" => "audio", "codec_name" => "ac3", "channels" => 6, "tags" => { "language" => "eng" }, "disposition" => { "default" => 1 } }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        cmd.include?("-select_streams") ? capture_result(video_output) : capture_result(track_output)
+      end
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video-ac3.mkv",
+        headers: {},
+        start_seconds: 0,
+        audio_stream: "1",
+        segment_dir: "/tmp/hls/abc"
+      )
+
+      pairs = argument_pairs(command)
+      expect(pairs).to include([ "-c:a", "aac" ])
+      expect(pairs).to include([ "-b:a", "192k" ])
+      expect(pairs).to include([ "-af", "aresample=async=1" ])
+      expect(pairs).not_to include([ "-c:a", "copy" ])
     end
   end
 

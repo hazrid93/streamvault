@@ -655,13 +655,14 @@ class TranscodeService
     probe_thread.join
     media_tracks_thread.join
 
-    selected_audio_index = selected_audio_stream_index(
+    selected_audio = selected_audio_track(
       input_url,
       headers: headers,
       audio_stream: audio_stream,
       default_language: default_language,
       preferred_languages: preferred_languages
     )
+    selected_audio_index = selected_audio&.dig(:index)
     selected_burn_subtitle_track = selected_burn_subtitle_track(input_url, headers: headers, subtitle_stream: subtitle_stream)
     # Remux mode: copy video stream verbatim (-c:v copy) with no decode,
     # scale, or re-encode.  Runs at near network speed.  Only used when
@@ -699,6 +700,14 @@ class TranscodeService
     # ffmpeg exits when the upstream dies.  With reconnect, ffmpeg
     # retries up to -reconnect_delay_max seconds.
     cmd += [ "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5" ]
+    # Read timeout on the input socket: if no bytes arrive for this long,
+    # ffmpeg exits with an error instead of blocking forever on a stalled
+    # RealDebrid CDN connection.  -reconnect only fires on connection-level
+    # close, not on a stalled-but-open socket.  30s matches the frontend's
+    # FIRST_DATA_TIMEOUT_SECONDS and is long enough to absorb normal CDN
+    # latency spikes.  Applies to the HTTP/HTTPS input protocol only.
+    # Microseconds: 30_000_000 = 30s.
+    cmd += [ "-rw_timeout", "30000000" ]
     # Hardware acceleration for decode.  On macOS with VideoToolbox,
     # -hwaccel videotoolbox offloads HEVC/H.264 decode to the GPU,
     # which is critical for 4K HEVC streams — software HEVC decode
@@ -730,7 +739,26 @@ class TranscodeService
     end
     cmd += [ "-sn", "-dn" ]
     cmd += video_args
-    cmd += [ "-c:a", "aac", "-b:a", "192k", "-ac", "2" ]
+    # Audio output: copy browser-safe AAC sources verbatim to preserve
+    # original timestamps; re-encode everything else (AC3, DTS, FLAC, etc.)
+    # to AAC.  Re-encoding AAC→AAC with +genpts regenerates timestamps and
+    # distributes the source's natural audio/video duration mismatch as
+    # gradual drift — copying the original packets keeps the source's native
+    # timing intact.  The MSE SourceBuffer is configured for mp4a.40.2
+    # (AAC LC), so an AAC source is already in the right codec.  5.1-channel
+    # AAC plays correctly in Chrome/Edge (downmixed to stereo by the browser
+    # if the output device is stereo, same as native playback).
+    audio_copyable = selected_audio&.dig(:codec) == "aac"
+    if audio_copyable
+      cmd += [ "-c:a", "copy" ]
+    else
+      cmd += [ "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+               # aresample=async=1 forces audio timestamp resynchronization
+               # (stretch/squeeze to match video PTS) for sources being
+               # re-encoded.  Applied as an -af audio filter (aresample is
+               # part of libswresample, a mandatory ffmpeg dependency).
+               "-af", "aresample=async=1" ]
+    end
     cmd += case output_spec
     when :hls
       raise ArgumentError, "segment_dir is required for HLS output" if segment_dir.blank?
@@ -918,26 +946,36 @@ class TranscodeService
   end
   private_class_method :log_subtitle_result
 
-  def self.selected_audio_stream_index(input_url, headers:, audio_stream:, default_language:, preferred_languages:)
+  # Returns the selected audio track (full hash with :index, :codec,
+  # :channels, etc.) or nil.  Selection order:
+  #   1. Explicit stream index (audio_stream param) if it exists.
+  #   2. Preferred language track (lowest position wins on ties).
+  #   3. Track marked default.
+  #   4. First audio track.
+  # Returning the full track (not just the index) lets the caller branch
+  # on codec — e.g. copy AAC sources verbatim instead of re-encoding,
+  # which preserves original timestamps and avoids A/V drift.
+  def self.selected_audio_track(input_url, headers:, audio_stream:, default_language:, preferred_languages:)
     explicit_stream_index = normalized_stream_index(audio_stream)
     tracks = probe_media_tracks(input_url, headers: headers)[:audio]
 
-    if explicit_stream_index && tracks.any? { |track| track[:index] == explicit_stream_index }
-      return explicit_stream_index
+    if explicit_stream_index
+      match = tracks.find { |track| track[:index] == explicit_stream_index }
+      return match if match
     end
 
     language_priority = language_priority(default_language, preferred_languages)
     preferred_track = tracks
       .select { |track| language_priority.include?(track[:language]) }
       .min_by { |track| [ language_priority.index(track[:language]), track[:position] ] }
-    return preferred_track[:index] if preferred_track
+    return preferred_track if preferred_track
 
     default_track = tracks.find { |track| track[:default] }
-    return default_track[:index] if default_track
+    return default_track if default_track
 
-    tracks.first&.dig(:index)
+    tracks.first
   end
-  private_class_method :selected_audio_stream_index
+  private_class_method :selected_audio_track
 
   def self.extract_media_tracks(output)
     data = JSON.parse(output)

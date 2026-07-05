@@ -1282,9 +1282,22 @@ export default class extends Controller {
   // restartPlaybackAt and setupMseSource already clear it, and
   // restoring it to true afterwards would permanently block all
   // further recovery if the reconnect fetch produces no data (the
-  reconnectFromCurrentPosition() {
+  async reconnectFromCurrentPosition() {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
     const savedAttempts = this.streamRecoveryAttempts
+
+    // Backoff before the 2nd and 3rd reconnect attempts so a transient
+    // upstream throttle has time to clear before we hammer the same RD
+    // link again.  handleStreamStall pre-increments streamRecoveryAttempts
+    // before calling us, so savedAttempts is 1 on the first stall, 2 on
+    // the second, 3 on the third.  Skip the backoff on the first attempt
+    // (no delay on a fresh stall).  During the sleep, streamRecoveryActive
+    // is still true (set by handleStreamStall) so the guard at
+    // handleStreamStall:1087 blocks concurrent re-entry.  The "Buffering…"
+    // overlay is already shown by handleStreamStall and stays visible.
+    if (savedAttempts >= 2) {
+      await this.#sleep(2000)
+    }
 
     // Don't show the "Seeking..." overlay for automatic recovery —
     // it sets isSeeking=true which blocks the seek bar and shows a
@@ -1325,6 +1338,12 @@ export default class extends Controller {
 
     this.clearSubtitleCues()
     this.streamRecoveryAttempts = savedAttempts
+  }
+
+  // Private: promise-based sleep. Used by reconnectFromCurrentPosition
+  // to back off between reconnect attempts. No existing equivalent.
+  #sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms))
   }
 
   // fMP4 box parser: the HTTP response delivers arbitrary byte chunks
@@ -1456,8 +1475,15 @@ export default class extends Controller {
     // the rebuffer gate may never reach REBUFFER_AHEAD_SECONDS on a
     // slow source, and the shorter timeout triggers recovery sooner.
     // If the video is playing, use the default 60s.
-    const stalled = this.isStalled && !this.userPaused && this.playbackStarted
-    this.startStallWatchdog(stalled ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
+    // Only use the shorter rebuffer watchdog when the video is actually
+    // waiting on an empty buffer.  While data is trickling in during a
+    // rebuffer, isStalled is still true but the buffer is no longer empty
+    // — using REBUFFER_STALL_TIMEOUT_MS there can trip a spurious stall
+    // right at the 20s boundary of an otherwise-healthy rebuffer.  Gate
+    // on hasBufferedAhead(0.5) so the 20s timer only applies when the
+    // buffer is genuinely dry; otherwise the 60s timer is correct.
+    const actuallyWaiting = this.isStalled && !this.userPaused && !this.hasBufferedAhead(0.5)
+    this.startStallWatchdog(actuallyWaiting ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
     this.maybeHideBufferingOverlay()
