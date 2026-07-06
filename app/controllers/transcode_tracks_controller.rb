@@ -43,6 +43,7 @@ class TranscodeTracksController < ApplicationController
 
   def transcode_headers
     return {} unless current_user.has_realdebrid_key?
+    return {} unless realdebrid_cdn_url?(params[:url].to_s)
 
     { "Authorization" => "Bearer #{current_user.realdebrid_api_key}" }
   end

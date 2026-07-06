@@ -63,6 +63,36 @@ RSpec.describe "Transcode", type: :request do
       expect(Rails.logger).to have_received(:error).with(/\[Transcode\].*stream stalled/)
       expect(response).to have_http_status(:ok)
     end
+
+    it "clamps start_seconds to 24 hours (MAX_START_SECONDS)" do
+      captured_kwargs = nil
+      allow(TranscodeService).to receive(:transcode_to_fmp4) do |*_args, **kwargs|
+        captured_kwargs = kwargs
+        raise TranscodeService::TranscodeError, "stub"
+      end
+
+      get transcode_stream_path, params: {
+        url: "https://download.real-debrid.com/d/file123/video.mkv",
+        start_seconds: "999999"
+      }
+
+      expect(captured_kwargs[:start_seconds]).to eq(86_400) # 24*60*60
+    end
+
+    it "clamps negative start_seconds to 0" do
+      captured_kwargs = nil
+      allow(TranscodeService).to receive(:transcode_to_fmp4) do |*_args, **kwargs|
+        captured_kwargs = kwargs
+        raise TranscodeService::TranscodeError, "stub"
+      end
+
+      get transcode_stream_path, params: {
+        url: "https://download.real-debrid.com/d/file123/video.mkv",
+        start_seconds: "-100"
+      }
+
+      expect(captured_kwargs[:start_seconds]).to eq(0)
+    end
   end
 
   describe "GET /transcode/tracks" do

@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 class ContentController < ApplicationController
+  include ContentParamValidation
   before_action :authenticate_user!
 
   def show
     @imdb_id = params[:imdb_id]
     @type = params[:type]
+
+    return if reject_invalid_imdb_id!(@imdb_id) || reject_invalid_content_type!(@type)
 
     torrentio = TorrentioService.new(rd_api_key: current_user&.realdebrid_api_key)
 
@@ -19,18 +22,20 @@ class ContentController < ApplicationController
       @streams_error = streams_result.failure? ? streams_result.error_message : nil
     end
 
-    @in_library = current_user.library_entries.exists?(imdb_id: @imdb_id)
-    @in_wishlist = current_user.wishlist_entries.exists?(imdb_id: @imdb_id)
     @library_entry = current_user.library_entries.find_by(imdb_id: @imdb_id)
     @wishlist_entry = current_user.wishlist_entries.find_by(imdb_id: @imdb_id)
+    @in_library = @library_entry.present?
+    @in_wishlist = @wishlist_entry.present?
 
     if @type == "show"
       @episode_progress = current_user.episode_progresses.for_show(@imdb_id).index_by { |ep| [ ep.season_number, ep.episode_number ] }
       @selected_season = params[:season]&.to_i || 1
-      # Show progress = last watched episode
+      # Show progress = last watched episode (ordered by watched_at so
+      # the result is deterministic — find_by without ORDER BY returns
+      # whichever row the DB happens to find first).
       @progress = current_user.watch_history_entries
-        .find_by(show_imdb_id: @imdb_id, content_type: :episode)
-        &.progress_percentage
+        .where(show_imdb_id: @imdb_id, content_type: :episode)
+        .order(watched_at: :desc).first&.progress_percentage
     else
       # Movie progress
       @progress = current_user.watch_history_entries
@@ -41,6 +46,9 @@ class ContentController < ApplicationController
 
   def status
     imdb_id = params[:imdb_id]
+    type = params[:type]
+    return if reject_invalid_imdb_id!(imdb_id) || reject_invalid_content_type!(type)
+
     library_entry = current_user.library_entries.find_by(imdb_id: imdb_id)
     wishlist_entry = current_user.wishlist_entries.find_by(imdb_id: imdb_id)
 
@@ -57,6 +65,8 @@ class ContentController < ApplicationController
     @type = params[:type]
     @season = params[:season]&.to_i
     @episode = params[:episode]&.to_i
+
+    return if reject_invalid_imdb_id!(@imdb_id) || reject_invalid_content_type!(@type)
 
     torrentio = TorrentioService.new(rd_api_key: current_user&.realdebrid_api_key)
 

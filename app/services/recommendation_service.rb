@@ -63,7 +63,11 @@ class RecommendationService
   end
 
   def self.exclude_set(user)
-    watched = user.watch_history_entries.pluck(:imdb_id, :show_imdb_id).flatten.compact
+    # Cap the history pluck — 500 rows is far more than any realistic
+    # exclude set needs, and avoids loading the entire table for users
+    # with thousands of history rows.  library/wishlist are naturally
+    # small and uncapped.
+    watched = user.watch_history_entries.limit(500).pluck(:imdb_id, :show_imdb_id).flatten.compact
     library = user.library_entries.pluck(:imdb_id)
     wishlist = user.wishlist_entries.pluck(:imdb_id)
     (watched + library + wishlist).to_set

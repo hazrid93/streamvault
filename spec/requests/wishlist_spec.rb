@@ -104,5 +104,44 @@ RSpec.describe "Wishlist", type: :request do
 
       expect(response).to redirect_to(library_index_path)
     end
+
+    it "refreshes metadata on an existing library entry (no stale data)" do
+      # Pre-existing library entry with old metadata — move_to_library
+      # should update its title/poster/year from the wishlist entry,
+      # not silently keep the stale values.
+      existing = create(:library_entry, user: user, imdb_id: entry.imdb_id,
+                        title: "OLD TITLE", poster_url: "OLD_URL", year: 1999)
+      entry.update!(title: "NEW TITLE", poster_url: "NEW_URL", year: 2024)
+
+      post move_to_library_wishlist_path(entry)
+
+      expect(existing.reload.title).to eq("NEW TITLE")
+      expect(existing.reload.poster_url).to eq("NEW_URL")
+      expect(existing.reload.year).to eq(2024)
+    end
+
+    it "denies moving another user's entry" do
+      other_entry = create(:wishlist_entry, user: other_user)
+      expect {
+        post move_to_library_wishlist_path(other_entry)
+      }.not_to change(LibraryEntry, :count)
+
+      expect(response).to redirect_to(root_path)
+    end
+  end
+
+  describe "DELETE /wishlist/:id cross-user (IDOR)" do
+    let!(:other_entry) { create(:wishlist_entry, user: other_user) }
+
+    before { sign_in user }
+
+    it "does not delete another user's entry" do
+      expect {
+        delete wishlist_path(other_entry)
+      }.not_to change(WishlistEntry, :count)
+
+      # set_entry uses current_user.wishlist_entries.find → RecordNotFound → rescued to redirect
+      expect(response).to redirect_to(root_path)
+    end
   end
 end

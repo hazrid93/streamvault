@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class ContentStreamingService
-  MAX_STREAM_ATTEMPTS = 50
+  MAX_STREAM_ATTEMPTS = 20
   RESOLVE_BATCH_SIZE = 10
   RESOLVE_RETRIES = 1
 
@@ -170,7 +170,12 @@ class ContentStreamingService
       mutex.synchronize { break if winner }
       thread.join
     end
-    threads.each { |t| t.kill unless t == Thread.current }
+    # Let any still-running threads finish naturally rather than
+    # Thread.kill — hard-killing a thread mid-Faraday-request leaks
+    # sockets until GC.  The winner is already set, so their results
+    # are ignored.  Use a bounded wait so we don't block forever on a
+    # 15s-timeout straggler.
+    threads.each { |t| t.join(0.1) if t.alive? }
 
     winner
   end
@@ -186,6 +191,13 @@ class ContentStreamingService
       return nil if location.blank?
       return nil if location.match?(BLOCKED_PATTERNS)
       return nil unless http_url?(location)
+      # The final streaming URL must be a RealDebrid CDN URL — the
+      # resolve URL is an intermediary on the provider (Torrentio/Comet)
+      # host, but the Location it redirects to should be the RD download
+      # host.  Reject anything else to prevent an untrusted/compromised
+      # provider from redirecting the server (which attaches the user's
+      # RD API key as a Bearer header) to an attacker-controlled host.
+      return nil unless realdebrid_cdn_url?(location)
       filename = location.split("/").last.to_s
       return nil if filename.match?(BLOCKED_PATTERNS)
       { streaming_url: location, filename: filename }
@@ -231,6 +243,25 @@ class ContentStreamingService
 
   def http_url?(url)
     URI.parse(url.to_s).is_a?(URI::HTTP)
+  rescue URI::InvalidURIError
+    false
+  end
+
+  # The final destination after a resolve-URL redirect must be a
+  # RealDebrid CDN host.  Provider hosts (Comet/Torrentio) are
+  # intermediaries only — they should never appear as the final
+  # streaming_url because the transcode/direct_stream proxies attach
+  # the user's RD API key as a Bearer header to whatever host they
+  # fetch, and we don't want to send the key to a provider host.
+  REALDEBRID_CDN_HOSTS = %w[
+    real-debrid.com
+    download.real-debrid.com
+    streaming.real-debrid.com
+  ].freeze
+
+  def realdebrid_cdn_url?(url)
+    host = URI.parse(url.to_s).host.to_s.downcase
+    REALDEBRID_CDN_HOSTS.any? { |cdn| host == cdn || host.end_with?(".#{cdn}") }
   rescue URI::InvalidURIError
     false
   end

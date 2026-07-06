@@ -44,19 +44,24 @@ class WishlistController < ApplicationController
   end
 
   def move_to_library
-    ActiveRecord::Base.transaction do
-      # find_or_create_by! handles the case where the movie is already
-      # in the library (duplicate submit) without raising — create!
-      # alone would 500 on the uniqueness validation.
-      library_entry = current_user.library_entries.find_or_create_by!(imdb_id: @entry.imdb_id) do |entry|
-        entry.content_type = @entry.content_type
-        entry.title = @entry.title
-        entry.poster_url = @entry.poster_url
-        entry.year = @entry.year
-      end
-      @entry.destroy
-      redirect_to library_index_path, notice: "#{library_entry.title} moved to library."
+    # find_or_initialize_by + assign_attributes so an existing library
+    # entry gets its metadata refreshed from the wishlist entry (the
+    # old find_or_create_by! skipped the block for existing records,
+    # silently keeping stale title/poster/year).  Redirect outside the
+    # transaction so the DB connection isn't held across response setup.
+    library_entry = ActiveRecord::Base.transaction do
+      entry = current_user.library_entries.find_or_initialize_by(imdb_id: @entry.imdb_id)
+      entry.assign_attributes(
+        content_type: @entry.content_type,
+        title: @entry.title,
+        poster_url: @entry.poster_url,
+        year: @entry.year
+      )
+      entry.save!
+      @entry.destroy!
+      entry
     end
+    redirect_to library_index_path, notice: "#{library_entry.title} moved to library."
   end
 
   private

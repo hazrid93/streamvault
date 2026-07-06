@@ -37,6 +37,29 @@ module StreamUrlValidation
     /\.real-debrid\.com\z/i
   ].freeze
 
+  # Hosts that should receive the user's RealDebrid API key as an
+  # Authorization: Bearer header.  Provider hosts (Comet/Torrentio) are
+  # intermediaries that don't need the bearer token — only the
+  # RealDebrid CDN does.  Limiting the key to these hosts prevents
+  # credential leakage if a provider host is untrusted or compromised.
+  REALDEBRID_BEARER_HOSTS = [
+    "real-debrid.com",
+    /\.real-debrid\.com\z/i
+  ].freeze
+
+  # True if +url+'s host is a RealDebrid CDN host that should receive
+  # the user's Authorization: Bearer header.  Provider hosts (Comet/
+  # Torrentio) return false — they don't need the bearer token.
+  def realdebrid_cdn_url?(url)
+    host = URI.parse(url.to_s).host.to_s.downcase
+    return false if host.blank?
+    REALDEBRID_BEARER_HOSTS.any? do |entry|
+      entry.is_a?(Regexp) ? host.match?(entry) : host == entry || host.end_with?(".#{entry}")
+    end
+  rescue URI::InvalidURIError
+    false
+  end
+
   # Provider resolve origins (torrentio/comet) are allowlisted
   # dynamically from StreamProvider.resolve_base_urls so a custom
   # TORRENTIO_API_BASE_URL or COMET_URL is honoured.

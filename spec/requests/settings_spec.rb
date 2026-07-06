@@ -50,4 +50,14 @@ RSpec.describe "Settings", type: :request do
       expect(user.reload.preferred_languages).to include("ENG", "FRENCH")
     end
   end
+
+  describe "RD key exposure (SEC-08)" do
+    before { sign_in user }
+
+    it "does not leak the plaintext RD key in the settings page body" do
+      user.update!(realdebrid_api_key: "SECRET_KEY_DO_NOT_LEAK")
+      get settings_path
+      expect(response.body).not_to include("SECRET_KEY_DO_NOT_LEAK")
+    end
+  end
 end

@@ -24,12 +24,14 @@ class RefreshRecommendationsJob < ApplicationJob
     Rails.logger.error("[RefreshRecommendationsJob] error: #{e.message}")
   end
 
-  # Debounce: only enqueue if the job hasn't been enqueued recently.
+  # Debounce: only enqueue if the lock wasn't already set.  Uses
+  # unless_exist: true so the read+write is atomic against Solid Cache
+  # (DB-backed) — two concurrent callers can't both see nil and both
+  # enqueue, which the old read-then-write pattern allowed.
   def self.enqueue_debounced(user_id)
     lock_key = "recommendations:job:#{user_id}"
-    return if Rails.cache.read(lock_key)
+    return unless Rails.cache.write(lock_key, true, expires_in: DEBOUNCE_TTL, unless_exist: true)
 
-    Rails.cache.write(lock_key, true, expires_in: DEBOUNCE_TTL)
     perform_later(user_id)
   end
 end

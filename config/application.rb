@@ -39,6 +39,12 @@ module StreamVault
     # Don't generate system test files.
     config.generators.system_tests = nil
 
+    # Cookies: the app is never embedded in third-party iframes, so
+    # SameSite=Strict is safer than the Rails default (Lax).  Combined
+    # with force_ssl in production (which marks cookies Secure), this
+    # gives Strict + Secure + HttpOnly on the session cookie.
+    config.action_dispatch.cookies_same_site_protection = :strict
+
     # Active Record Encryption
     # Falls back to nil when the env vars are missing (e.g. during
     # docker build assets:precompile without RAILS_MASTER_KEY).  nil is

@@ -130,6 +130,8 @@ class ProgressTrackingService
     recent = user.watch_history_entries
       .where("progress_percentage < ?", 95)
       .order(watched_at: :desc)
+      .limit(200) # safety cap before Ruby dedup — the upsert design means
+                  # dedup is mostly a no-op, so 200 is far more than needed
 
     seen = {}
     items = recent.filter_map do |e|

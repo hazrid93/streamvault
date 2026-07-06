@@ -25,6 +25,12 @@ RSpec.describe "Episodes", type: :request do
         get episodes_path(show_imdb_id: "tt0903747")
         expect(response).to have_http_status(:ok)
       end
+
+      it "rejects a malformed show_imdb_id (SEC-09)" do
+        get episodes_path(show_imdb_id: "not_an_imdb_id")
+        expect(response).to redirect_to(root_path)
+        expect(flash[:alert]).to eq("Invalid content ID.")
+      end
     end
   end
 end

@@ -58,6 +58,13 @@ RSpec.describe "Home", type: :request do
         get root_path
         expect(response).to have_http_status(:ok)
       end
+
+      it "does not show other users' recommendations (TST-18)" do
+        other_user = create(:user)
+        create(:recommendation, user: other_user, title: "OTHER_USER_REC_TITLE")
+        get root_path
+        expect(response.body).not_to include("OTHER_USER_REC_TITLE")
+      end
     end
   end
 end

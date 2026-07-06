@@ -91,6 +91,24 @@ RSpec.describe "Search", type: :request do
         expect(response.body).to include("Showing 26")
         expect(response.body).to include("of 60 results")
       end
+
+      it "escapes HTML in external API titles (XSS regression test)" do
+        # If Cinemeta returned a malicious title containing <script>,
+        # ERB's default escaping should render it as &lt;script&gt;.
+        stub_request(:get, %r{v3-cinemeta\.strem\.io/catalog/movie/top/search=.*\.json})
+          .to_return(
+            status: 200,
+            body: { "metas" => [{ "id" => "tt0000001", "name" => "<script>alert(1)</script>", "releaseInfo" => "2020" }] }.to_json,
+            headers: { 'Content-Type' => 'application/json' }
+          )
+
+        stub_request(:get, %r{v3-cinemeta\.strem\.io/catalog/series/top/search=.*\.json})
+          .to_return(status: 200, body: { "metas" => [] }.to_json, headers: { 'Content-Type' => 'application/json' })
+
+        get search_index_path(q: "test")
+        expect(response.body).to include("&lt;script&gt;")
+        expect(response.body).not_to include("<script>alert(1)</script>")
+      end
     end
   end
 end

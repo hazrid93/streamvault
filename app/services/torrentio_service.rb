@@ -89,11 +89,11 @@ class TorrentioService
     elsif response.status == 404
       ServiceResult.success([])
     else
-      Rails.logger.error("[TorrentioService] streams request failed: HTTP #{response.status} for #{path}")
+      Rails.logger.error("[TorrentioService] streams request failed: HTTP #{response.status} for #{redact_path(path)}")
       ServiceResult.failure("Failed to fetch streams (HTTP #{response.status})")
     end
   rescue Faraday::TimeoutError
-    Rails.logger.error("[TorrentioService] streams request timed out for #{path}")
+    Rails.logger.error("[TorrentioService] streams request timed out for #{redact_path(path)}")
     ServiceResult.failure("Stream request timed out")
   rescue Faraday::ConnectionFailed => e
     Rails.logger.error("[TorrentioService] streams connection failed: #{e.message}")
@@ -155,18 +155,19 @@ class TorrentioService
     path += "?genre=#{CGI.escape(genre)}" if genre.present?
 
     cache_key = "torrentio/catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{limit}"
-    cached = Rails.cache.read(cache_key)
-    return ServiceResult.success(cached) if cached
-
-    response = @cinemeta.get(path)
-    if response.success? && response.body.is_a?(Hash)
-      metas = (response.body["metas"] || []).first(limit)
-      result = metas.map { |m| normalize_cinemeta(m, type.to_s) }
-      Rails.cache.write(cache_key, result, expires_in: CATALOG_CACHE_TTL)
-      ServiceResult.success(result)
-    else
-      ServiceResult.success([])
+    # Use fetch with race_condition_ttl so concurrent cache misses (e.g.
+    # multiple users hitting home at once on a cold cache) coalesce onto
+    # a single HTTP call instead of spawning N×threads.
+    result = Rails.cache.fetch(cache_key, expires_in: CATALOG_CACHE_TTL, race_condition_ttl: 30.seconds) do
+      response = @cinemeta.get(path)
+      if response.success? && response.body.is_a?(Hash)
+        metas = (response.body["metas"] || []).first(limit)
+        metas.map { |m| normalize_cinemeta(m, type.to_s) }
+      else
+        []
+      end
     end
+    ServiceResult.success(result)
   rescue StandardError => e
     Rails.logger.error("TorrentioService#catalog error: #{e.message}")
     ServiceResult.success([])
@@ -238,6 +239,14 @@ class TorrentioService
     end
 
     "#{base}/stream/#{episode_path}.json"
+  end
+
+  # Redact the RealDebrid API key from paths before logging so the
+  # plaintext key never enters the production log.  The key is embedded
+  # in build_stream_path as "/realdebrid=<KEY>/stream/...".
+  def redact_path(path)
+    return path if @rd_api_key.blank?
+    path.to_s.gsub(@rd_api_key, "[REDACTED]")
   end
 
   def parse_streams(raw_streams)
@@ -366,14 +375,7 @@ class TorrentioService
     api_key = ENV.fetch("OMDB_API_KEY", "")
     return {} if api_key.blank? || api_key == "your_omdb_api_key_here"
 
-    connection = Faraday.new(url: "https://www.omdbapi.com") do |f|
-      f.response :json
-      f.adapter Faraday.default_adapter
-      f.options.timeout = 5
-      f.options.open_timeout = 3
-    end
-
-    response = connection.get("", { i: imdb_id, apikey: api_key, tomatoes: "true" })
+    response = omdb_connection.get("", { i: imdb_id, apikey: api_key, tomatoes: "true" })
     data = response.body
     return {} unless data.is_a?(Hash) && data["Response"] == "True"
 
@@ -390,6 +392,17 @@ class TorrentioService
     }
   rescue Faraday::TimeoutError, Faraday::ConnectionFailed, StandardError
     {}
+  end
+
+  # Memoize the OMDb connection so repeated metadata calls reuse it
+  # instead of building a new Faraday object per call.
+  def omdb_connection
+    @omdb_connection ||= Faraday.new(url: "https://www.omdbapi.com") do |f|
+      f.response :json
+      f.adapter Faraday.default_adapter
+      f.options.timeout = 5
+      f.options.open_timeout = 3
+    end
   end
 
   def extract_total_seasons(meta)

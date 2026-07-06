@@ -1,10 +1,12 @@
 # frozen_string_literal: true
 
 class EpisodesController < ApplicationController
+  include ContentParamValidation
   before_action :authenticate_user!
 
   def index
     @show_imdb_id = params[:show_imdb_id]
+    return if reject_invalid_imdb_id!(@show_imdb_id)
     @season = params[:season]&.to_i || 1
 
     # Get progress for all episodes of this show

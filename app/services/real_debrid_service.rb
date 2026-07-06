@@ -116,24 +116,6 @@ class RealDebridService
     ServiceResult.failure("Failed to select files")
   end
 
-  # Get a streaming link for a torrent file
-  def streaming_link(torrent_id, file_id)
-    info_result = torrent_info(torrent_id)
-    return info_result if info_result.failure?
-
-    info = info_result.data
-    file = info[:files]&.find { |f| f[:id].to_s == file_id.to_s }
-
-    return ServiceResult.failure("File not found in torrent") unless file
-    return ServiceResult.failure("File not selected for download") unless file[:selected]
-
-    # Find the corresponding download link
-    link = info[:links]&.dig(file[:id].to_i)
-    return ServiceResult.failure("Download link not available yet") unless link
-
-    unrestrict_link(link)
-  end
-
   private
 
   def parse_error(response)

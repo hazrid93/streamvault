@@ -192,4 +192,33 @@ RSpec.describe TorrentioService do
       expect(result.data[:episodes].second[:runtime_seconds]).to eq(2880)
     end
   end
+
+  describe "RD key redaction from logs (SEC-08)" do
+    let(:service) { described_class.new(rd_api_key: "SECRET_KEY_DO_NOT_LOG") }
+
+    it "does not log the plaintext RD key on a failed streams request" do
+      stub_request(:get, %r{torrentio\.strem\.fun/realdebrid=SECRET_KEY_DO_NOT_LOG/stream/})
+        .to_return(status: 500, body: "Server Error")
+
+      expect(Rails.logger).to receive(:error).with(
+        /\[TorrentioService\] streams request failed: HTTP 500 for .*/
+      ) do |msg|
+        # The log message must not contain the plaintext key
+        expect(msg).not_to include("SECRET_KEY_DO_NOT_LOG")
+      end
+
+      service.streams("tt1375666", "movie")
+    end
+
+    it "does not log the plaintext RD key on a timed-out streams request" do
+      stub_request(:get, %r{torrentio\.strem\.fun/realdebrid=SECRET_KEY_DO_NOT_LOG/stream/})
+        .to_timeout
+
+      expect(Rails.logger).to receive(:error) do |msg|
+        expect(msg).not_to include("SECRET_KEY_DO_NOT_LOG")
+      end.at_least(:once)
+
+      service.streams("tt1375666", "movie")
+    end
+  end
 end

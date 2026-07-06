@@ -3,6 +3,7 @@
 require "json"
 require "fileutils"
 require "tempfile"
+require "shellwords"
 
 # Remuxes/transcodes streams via FFmpeg for browser playback.
 # Browser-safe H.264 video is copied when possible; risky/unsupported
@@ -1306,7 +1307,11 @@ class TranscodeService
     @probe_cache_mutex.synchronize do
       entry = @probe_cache[url]
       return nil unless entry
-      if Time.now > entry[:expires_at]
+      # Use monotonic clock for expiry — wall-clock (Time.now) can jump
+      # backward on NTP steps, making entries immortal until the clock
+      # catches up.  The rest of the file uses CLOCK_MONOTONIC for
+      # deadlines; the cache was the odd one out.
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > entry[:expires_at]
         @probe_cache.delete(url)
         return nil
       end
@@ -1322,8 +1327,9 @@ class TranscodeService
         break unless oldest_key
         @probe_cache.delete(oldest_key)
       end
-      existing = @probe_cache[url] || { expires_at: Time.now + PROBE_CACHE_TTL }
-      @probe_cache[url] = existing.merge(fields).merge(expires_at: Time.now + PROBE_CACHE_TTL)
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      existing = @probe_cache[url] || { expires_at: now + PROBE_CACHE_TTL }
+      @probe_cache[url] = existing.merge(fields).merge(expires_at: now + PROBE_CACHE_TTL)
     end
   end
   private_class_method :cache_store

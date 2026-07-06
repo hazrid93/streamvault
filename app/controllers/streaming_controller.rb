@@ -1,16 +1,25 @@
 # frozen_string_literal: true
 
 class StreamingController < ApplicationController
+  include ContentParamValidation
 
   layout "player"
   MIN_KNOWN_DURATION_SECONDS = 60
   MAX_KNOWN_DURATION_SECONDS = 24 * 60 * 60
 
   before_action :authenticate_user!
-  before_action :verify_realdebrid_key!, except: [ :progress ]
+  # stall_telemetry is a diagnostic endpoint — it should work even if
+  # the user hasn't configured an RD key yet (so we can see stalls from
+  # the player regardless of auth state).  progress is excluded because
+  # it's a fire-and-forget save that doesn't need the key.
+  before_action :verify_realdebrid_key!, except: [ :progress, :stall_telemetry ]
 
   # POST /streaming — start stream, redirect to player page
   def create
+    imdb_id = params[:imdb_id]
+    type = params[:type]
+    return if reject_invalid_imdb_id!(imdb_id) || reject_invalid_content_type!(type)
+
     service = ContentStreamingService.new(current_user)
 
     # When the user clicks a specific stream's "Watch" button, we
@@ -21,31 +30,31 @@ class StreamingController < ApplicationController
       result = service.resolve_single(
         params[:resolve_url],
         filename: params[:filename],
-        imdb_id: params[:imdb_id],
-        type: params[:type],
+        imdb_id: imdb_id,
+        type: type,
         season: params[:season]&.to_i,
         episode: params[:episode]&.to_i
       )
     else
       result = service.start_stream(
-        params[:imdb_id],
-        params[:type],
+        imdb_id,
+        type,
         season: params[:season]&.to_i,
         episode: params[:episode]&.to_i
       )
     end
 
     if result.success?
-      progress_entry = find_progress_entry(params[:imdb_id], params[:type], params[:season], params[:episode])
+      progress_entry = find_progress_entry(imdb_id, type, params[:season], params[:episode])
       resume_at = progress_entry&.progress_seconds
-      duration = find_duration_seconds(progress_entry, params[:imdb_id], params[:type], params[:season], params[:episode])
+      duration = find_duration_seconds(progress_entry, imdb_id, type, params[:season], params[:episode])
 
       redirect_to streaming_path(
         "play",
         streaming_url: result.data[:streaming_url],
         filename: result.data[:filename],
-        imdb_id: params[:imdb_id],
-        type: params[:type],
+        imdb_id: imdb_id,
+        type: type,
         season: params[:season],
         episode: params[:episode],
         title: params[:title],
@@ -168,10 +177,10 @@ class StreamingController < ApplicationController
   # POST /streaming/stall_telemetry — log client-side stall events for
   # diagnostics.  No DB write — only structured logs that can be grepped.
   def stall_telemetry
-    event = params[:event].to_s
+    event = sanitize_log_value(params[:event])
     position = params[:position].to_f
     buffer_ahead = params[:buffer_ahead].to_f
-    mode = params[:mode].to_s
+    mode = sanitize_log_value(params[:mode])
     recovery_count = params[:recovery_count].to_i
 
     Rails.logger.info("[StallTelemetry] event=#{event} position=#{position}s " \
@@ -187,6 +196,12 @@ class StreamingController < ApplicationController
     unless current_user.has_realdebrid_key?
       redirect_to settings_path, alert: "RealDebrid API key not configured. Please add it in Settings."
     end
+  end
+
+  # Strip CR/LF/tab from log values to prevent log injection (forging
+  # fake log lines that a naive log consumer might ingest as real).
+  def sanitize_log_value(value)
+    value.to_s.gsub(/[\r\n\t]/, " ")
   end
 
   def find_progress_entry(imdb_id, type, season, episode)

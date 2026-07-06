@@ -21,11 +21,14 @@ class HlsSession
   # In-memory PID registry: session_id => pid (only the worker that
   # spawned ffmpeg can kill it).
   @pids = {}
-  # In-memory error registry: session_id => error_message (set by
-  # the background monitor thread if ffmpeg exits before producing
-  # any segments).  nil means "still starting or succeeded".
-  @errors = {}
   @mutex = Mutex.new
+
+  # Errors are stored in Rails.cache (shared across all workers via
+  # Solid Cache) so the playlist endpoint on worker B can see an error
+  # set by the monitor thread on worker A.  The old in-memory @errors
+  # hash was per-worker, so under multi-worker the 424 error path
+  # never fired if the playlist request landed on a different worker.
+  ERROR_CACHE_TTL = 5.minutes
 
   attr_reader :id, :pid, :segment_dir, :user_id
 
@@ -77,7 +80,7 @@ class HlsSession
               break  # ffmpeg finished naturally after producing segments
             end
             # ffmpeg exited without producing segments — record error.
-            @mutex.synchronize { @errors[session_id] = "FFmpeg exited (status #{status.exitstatus}) without producing segments." }
+            self.class.set_error(session_id, "FFmpeg exited (status #{status.exitstatus}) without producing segments.")
             break
           end
 
@@ -86,14 +89,14 @@ class HlsSession
           end
 
           if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-            @mutex.synchronize { @errors[session_id] = "FFmpeg timed out after #{TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS}s waiting for first segment." }
+            self.class.set_error(session_id, "FFmpeg timed out after #{TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS}s waiting for first segment.")
             break
           end
 
           sleep 0.2
         end
       rescue StandardError => e
-        @mutex.synchronize { @errors[session_id] = e.message }
+        self.class.set_error(session_id, e.message)
       end
     end
     # Don't block shutdown on this thread.
@@ -117,9 +120,19 @@ class HlsSession
   end
 
   # Returns the error message if ffmpeg failed before producing any
-  # segments, or nil if ffmpeg is still starting or succeeded.
+  # segments, or nil if ffmpeg is still starting or succeeded.  Stored
+  # in Rails.cache so any worker can read it.
   def self.error(id)
-    @mutex.synchronize { @errors[id] }
+    Rails.cache.read(error_cache_key(id))
+  end
+
+  # Store an error for a session in Rails.cache (shared across workers).
+  def self.set_error(id, message)
+    Rails.cache.write(error_cache_key(id), message, expires_in: ERROR_CACHE_TTL)
+  end
+
+  def self.error_cache_key(id)
+    "hls_session/error/#{id}"
   end
 
   def self.stop(id)
@@ -132,7 +145,7 @@ class HlsSession
     # (running in the SolidQueue worker, whose @pids is empty) can
     # still kill orphaned ffmpeg processes from other workers.
     pid = @mutex.synchronize { @pids.delete(id) }
-    @mutex.synchronize { @errors.delete(id) }
+    Rails.cache.delete(error_cache_key(id))
     pid ||= record.pid
     if pid
       HlsSessionKiller.new(pid).kill

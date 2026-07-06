@@ -148,5 +148,14 @@ RSpec.describe "Library", type: :request do
       expect(response.parsed_body["ok"]).to be true
       expect(response.parsed_body["kind"]).to eq("library")
     end
+
+    it "denies deleting another user's entry (IDOR)" do
+      other_entry = create(:library_entry, user: other_user)
+      expect {
+        delete library_path(other_entry)
+      }.not_to change(LibraryEntry, :count)
+
+      expect(response).to redirect_to(root_path)
+    end
   end
 end

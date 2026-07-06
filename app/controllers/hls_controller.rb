@@ -24,7 +24,7 @@ class HlsController < ApplicationController
     end
 
     headers = {}
-    if current_user.has_realdebrid_key?
+    if current_user.has_realdebrid_key? && realdebrid_cdn_url?(input_url)
       headers["Authorization"] = "Bearer #{current_user.realdebrid_api_key}"
     end
 
@@ -75,6 +75,10 @@ class HlsController < ApplicationController
 
     response.headers["Cache-Control"] = "no-cache"
     response.headers["X-Accel-Buffering"] = "no"
+    # The session ID in the URL path is an unguessable bearer token.
+    # Prevent it leaking to third-party hosts via a Referer header if
+    # the player page has external links.
+    response.headers["Referrer-Policy"] = "no-referrer"
     send_data File.read(session.playlist_path),
               type: "application/vnd.apple.mpegurl",
               disposition: :inline
@@ -128,6 +132,7 @@ class HlsController < ApplicationController
     end
 
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
     send_file path, type: "video/mp2t", disposition: :inline
   end
 

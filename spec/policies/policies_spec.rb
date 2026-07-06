@@ -128,3 +128,56 @@ RSpec.describe EpisodeProgressPolicy do
     end
   end
 end
+
+RSpec.describe RecommendationPolicy do
+  let(:user) { create(:user) }
+  let(:other_user) { create(:user) }
+  let(:recommendation) { create(:recommendation, user: user) }
+
+  describe "#show?" do
+    it "allows owner" do
+      policy = described_class.new(recommendation, user: user)
+      expect(policy.show?).to be true
+    end
+
+    it "denies non-owner" do
+      policy = described_class.new(recommendation, user: other_user)
+      expect(policy.show?).to be false
+    end
+  end
+
+  describe "#update?" do
+    it "allows owner" do
+      policy = described_class.new(recommendation, user: user)
+      expect(policy.update?).to be true
+    end
+
+    it "denies non-owner" do
+      policy = described_class.new(recommendation, user: other_user)
+      expect(policy.update?).to be false
+    end
+  end
+
+  describe "#destroy?" do
+    it "allows owner" do
+      policy = described_class.new(recommendation, user: user)
+      expect(policy.destroy?).to be true
+    end
+
+    it "denies non-owner" do
+      policy = described_class.new(recommendation, user: other_user)
+      expect(policy.destroy?).to be false
+    end
+  end
+
+  describe "scope" do
+    let!(:other_recommendation) { create(:recommendation, user: other_user) }
+
+    it "returns only user's recommendations" do
+      scope = described_class.new(recommendation, user: user)
+        .apply_scope(Recommendation.all, type: :relation)
+      expect(scope).to include(recommendation)
+      expect(scope).not_to include(other_recommendation)
+    end
+  end
+end
