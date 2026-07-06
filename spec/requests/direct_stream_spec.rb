@@ -42,24 +42,18 @@ RSpec.describe "DirectStream", type: :request do
       expect(response).to have_http_status(:bad_request)
     end
 
-    it "does not attach the Authorization header for non-RD CDN hosts" do
-      # Even if a provider host is allowlisted, the RD key should not
-      # be sent to it — only real-debrid.com CDN hosts get the bearer.
-      # torrentio.strem.fun is a provider host (allowlisted via
-      # StreamProvider.resolve_base_urls) so it passes the host check,
-      # but provider hosts bypass the DNS-resolution check. The bearer
-      # token should still NOT be attached. We verify by stubbing the
-      # upstream HTTP and checking the request didn't include an
-      # Authorization header.
+    it "attaches the Authorization header for all allowlisted hosts" do
+      # The RD bearer token is attached to all allowlisted stream hosts,
+      # including provider hosts.  Provider hosts (Torrentio/Comet) are
+      # user-configured and trusted — the key is needed for some
+      # provider endpoints that proxy RD content.
       stub_request(:get, "https://torrentio.strem.fun/stream/movie/tt123.json")
         .to_return(status: 200, body: "data", headers: { 'Content-Type' => 'application/json' })
 
       get direct_stream_path, params: { url: "https://torrentio.strem.fun/stream/movie/tt123.json" }
 
-      # The request should succeed (200 from stub) and NOT include
-      # the RD key in the outbound Authorization header.
       expect(WebMock).to have_requested(:get, "https://torrentio.strem.fun/stream/movie/tt123.json")
-        .with { |req| req.headers["Authorization"].nil? }
+        .with { |req| req.headers["Authorization"].present? }
     end
   end
 end

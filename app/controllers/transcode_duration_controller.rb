@@ -18,7 +18,7 @@ class TranscodeDurationController < ApplicationController
     end
 
     headers = {}
-    if current_user.has_realdebrid_key? && realdebrid_cdn_url?(input_url)
+    if current_user.has_realdebrid_key?
       headers["Authorization"] = "Bearer #{current_user.realdebrid_api_key}"
     end
 

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class ContentStreamingService
-  MAX_STREAM_ATTEMPTS = 20
+  MAX_STREAM_ATTEMPTS = 50
   RESOLVE_BATCH_SIZE = 10
   RESOLVE_RETRIES = 1
 
@@ -170,12 +170,7 @@ class ContentStreamingService
       mutex.synchronize { break if winner }
       thread.join
     end
-    # Let any still-running threads finish naturally rather than
-    # Thread.kill — hard-killing a thread mid-Faraday-request leaks
-    # sockets until GC.  The winner is already set, so their results
-    # are ignored.  Use a bounded wait so we don't block forever on a
-    # 15s-timeout straggler.
-    threads.each { |t| t.join(0.1) if t.alive? }
+    threads.each { |t| t.kill unless t == Thread.current }
 
     winner
   end
@@ -202,6 +197,12 @@ class ContentStreamingService
       return nil if filename.match?(BLOCKED_PATTERNS)
       { streaming_url: location, filename: filename }
     elsif [ 200, 206 ].include?(response.status)
+      # Some Comet playback endpoints return 200 with a tiny trailer/
+      # placeholder MP4 instead of 302-redirecting to the actual RD
+      # download URL.  Only accept 200 responses from RD CDN hosts —
+      # provider hosts that return 200 are almost certainly serving a
+      # trailer/placeholder, not the real content.
+      return nil unless realdebrid_cdn_url?(resolve_url)
       filename = resolve_url.split("/").last.to_s
       return nil if filename.match?(BLOCKED_PATTERNS)
       { streaming_url: resolve_url, filename: filename }
