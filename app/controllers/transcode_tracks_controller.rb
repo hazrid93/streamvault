@@ -51,17 +51,53 @@ class TranscodeTracksController < ApplicationController
     TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
   end
 
+  # Can the file be played directly by the browser via <video src>?
+  # Direct play uses the native <video> element + /direct_stream proxy (no
+  # ffmpeg, no MSE).  The browser downloads at network speed and handles
+  # its own buffering, so this is the fastest path — same as Stremio.
+  #
+  # Requirements:
+  #   1. Container is MP4 (.mp4/.m4v/.mov) — the browser plays these
+  #      natively without MSE.
+  #   2. Video codec is H.264 with yuv420p pixel format, ≤ 1080p.
+  #   3. Audio is AAC (or absent) — the browser decodes it natively.
+  #
+  # NOT required: B-frame-free.  The B-frame constraint only applies to
+  # MSE's SourceBuffer (Chrome's fMP4 chunk demuxer rejects B-frames).
+  # The native <video> element handles B-frames correctly, so most x264
+  # releases (which HAVE B-frames) qualify for direct play.  This is the
+  # key difference from TranscodeService.browser_safe_video? which is used
+  # for the MSE stream-copy path and DOES reject B-frames.
   def direct_playable?(input_url, tracks, video_stream = nil)
     filename = params[:filename].to_s.downcase
     return false unless MP4_EXTENSIONS.any? { |ext| filename.end_with?(ext) }
 
     video_stream ||= probe_video_stream(input_url)
-    return false unless TranscodeService.browser_safe_video?(video_stream)
+    return false unless direct_play_video?(video_stream)
 
     audio_codecs = tracks[:audio].filter_map { |t| t[:codec] }
     return true if audio_codecs.empty? || audio_codecs.any? { |c| c == AAC_CODEC }
 
     false
+  end
+
+  # Check if the video stream is directly playable by the browser.
+  # Same as TranscodeService.browser_safe_video? but WITHOUT the B-frame
+  # constraint — the native <video> element handles B-frames correctly.
+  def direct_play_video?(video_stream)
+    return false unless video_stream.is_a?(Hash)
+
+    codec = video_stream[:codec_name].to_s
+    width = video_stream[:width].to_i
+    height = video_stream[:height].to_i
+    pix_fmt = video_stream[:pix_fmt].to_s
+
+    codec == "h264" &&
+      width.positive? &&
+      height.positive? &&
+      width <= TranscodeService::MAX_COPY_VIDEO_WIDTH &&
+      height <= TranscodeService::MAX_COPY_VIDEO_HEIGHT &&
+      TranscodeService::SAFE_H264_PIXEL_FORMATS.include?(pix_fmt)
   end
 
   def direct_stream_url(input_url)

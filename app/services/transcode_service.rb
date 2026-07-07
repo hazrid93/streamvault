@@ -687,15 +687,17 @@ class TranscodeService
     end
 
     cmd = [ FFMPEG_PATH, "-loglevel", "error" ]
-    # -re: read input at native frame rate (1× speed).  Without this,
-    # ffmpeg reads as fast as possible and exits in minutes — the upstream
-    # connection closes, and no more data arrives.  With -re, ffmpeg
-    # paces output at 1× speed, keeping the upstream alive for the entire
-    # movie.  Essential for remux (-c:v copy) where ffmpeg can read a
-    # 2-hour movie in a few minutes on a fast CDN.
-    # Only needed for remux/copy paths — transcode is already bottlenecked
-    # by the encoder at ~1× speed.
-    cmd += [ "-re" ] if video_args == [ "-c:v", "copy" ]
+    # No -re flag: by default ffmpeg reads the input as fast as possible.
+    # This is the correct behaviour for remux/copy (-c:v copy) because the
+    # native <video> element downloading the fMP4 output needs data at
+    # *network* speed to build a buffer ahead — capping throughput at 1×
+    # playback speed (what -re does) leaves zero buffer margin and any
+    # transient transcode dip (probe, audio re-encode, CDN latency spike)
+    # immediately stalls the video.  The disk-based Tempfile buffer in
+    # transcode_to_fmp4_internal decouples ffmpeg stdout from HTTP
+    # backpressure, so a fast ffmpeg never overflows anything.
+    # The upstream-keepalive concern (ffmpeg finishes early and the CDN
+    # closes the connection) is handled by -reconnect below + -rw_timeout.
     # Reconnect on HTTP connection drops — RealDebrid CDN / Cloudflare
     # may close the connection after a period.  Without reconnect,
     # ffmpeg exits when the upstream dies.  With reconnect, ffmpeg
