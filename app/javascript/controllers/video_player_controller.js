@@ -352,17 +352,31 @@ export default class extends Controller {
 
   // Can the current stream be played directly by the browser?  Requires:
   //   1. A direct stream proxy URL is available
-  //   2. The tracks probe confirmed direct_playable (H.264/AAC MP4, no B-frames)
+  //   2. The tracks probe confirmed direct_playable (H.264/AAC MP4)
   //   3. No subtitle burn is active (browser renders text subs natively)
-  //   4. No audio track switch is active (default audio only — alternate
-  //      tracks require ffmpeg to extract)
+  //   4. No audio track switch is active — the native <video> element
+  //      plays whatever audio is muxed as default in the file; it can't
+  //      reliably switch audio tracks for MP4/MKV sources across browsers.
+  //      Direct play is allowed when selectedAudioStream is null (no
+  //      preference) OR when it matches the default audio track (the
+  //      browser will play that track anyway).  Only an explicit switch
+  //      to a non-default track blocks direct play.
   //   5. Not in a stall recovery cycle (recovery always uses MSE/transcode)
   directPlayEligible() {
     if (!this.directStreamUrlValue) return false
     if (this.streamRecoveryAttempts > 0) return false
     if (this.burnedSubtitleSelected()) return false
-    if (this.selectedAudioStream) return false
+    if (this.selectedAudioStream && this.selectedAudioStream !== this.defaultAudioStreamIndex()) return false
     return this.tracksData?.direct_playable === true
+  }
+
+  // Return the index (as string) of the default audio track, or null if
+  // there's no default track.  Used by directPlayEligible to allow direct
+  // play when the user's preferred language matches the default track —
+  // the browser plays the default track anyway, so no ffmpeg is needed.
+  defaultAudioStreamIndex() {
+    const defaultTrack = this.audioTracks.find((track) => track.default) || this.audioTracks[0]
+    return defaultTrack?.index?.toString() || null
   }
 
   // Can the current stream be remuxed (video copy, no re-encode)?
@@ -387,12 +401,50 @@ export default class extends Controller {
   }
 
   // Check if the browser can natively play a video codec via <video>.
+  // canPlayType is conservative — it returns "" (treated as "no") for
+  // HEVC even on macOS Chrome 107+ where the <video> element CAN play
+  // HEVC via VideoToolbox.  So for HEVC we also check the platform:
+  // macOS (Chrome/Edge/Safari) and iOS/iPadOS have native HEVC support.
+  // Windows requires the HEVC Video Extension from the Store, which
+  // most users have, so we allow "maybe" there too.
   browserCanPlayCodec(codec) {
-    const mime = codec === "hevc" || codec === "h265"
+    const isHevc = codec === "hevc" || codec === "h265"
+    const mime = isHevc
       ? 'video/mp4; codecs="hvc1"'
       : `video/mp4; codecs="${codec}"`
     const result = this.videoTarget.canPlayType(mime)
-    return result === "probably" || result === "maybe"
+    if (result === "probably" || result === "maybe") return true
+
+    // canPlayType returned "" but the browser may still play HEVC.
+    // Chrome 107+ on macOS supports HEVC via VideoToolbox but
+    // canPlayType can return "" depending on the build/flags.
+    // Safari always reports "probably" for HEVC on macOS/iOS.
+    // Allow HEVC on macOS and iOS regardless of canPlayType — the
+    // worst case is the <video> fires an "error" event, which the
+    // player already handles by falling back to MSE/transcode.
+    if (isHevc && this.platformSupportsHevc()) return true
+
+    return false
+  }
+
+  // Returns true on platforms with native HEVC support:
+  //   - macOS (Chrome 107+, Edge, Safari) via VideoToolbox
+  //   - iOS/iPadOS (Safari) via hardware decoder
+  //   - Android (Chrome) via hardware decoder (most devices)
+  // Windows is NOT included here because HEVC requires a Store
+  // extension that not all users have installed — let canPlayType
+  // handle it (returns "probably" when the extension is present).
+  platformSupportsHevc() {
+    const ua = navigator.userAgent
+    // macOS: Safari, Chrome, Edge all support HEVC via VideoToolbox.
+    // Chrome 107+ enabled HEVC by default on macOS.
+    if (/Mac OS X/.test(ua) && !/Windows/.test(ua)) return true
+    // iPhone/iPad: native HEVC support (hardware decoder).
+    if (/iPhone|iPad|iPod/.test(ua)) return true
+    // Android: most modern devices have HEVC hardware decode.
+    // Chrome on Android supports HEVC since Chrome 107.
+    if (/Android/.test(ua)) return true
+    return false
   }
 
   // Start direct play: set <video> src to the proxied RD URL so the
@@ -452,13 +504,14 @@ export default class extends Controller {
     this.videoTarget.src = remuxUrl
     this.videoTarget.load()
 
-    const p = this.videoTarget.play()
-    if (p?.catch) p.catch(() => {})
-    // Don't set playbackStarted=true or start progress watchdog here —
-    // ffmpeg needs time to start up and produce the first data.  The
-    // stall watchdog (60s initial timeout via onVideoWaiting) gives
-    // ffmpeg plenty of time.  onVideoReady() sets playbackStarted=true
-    // and starts the progress watchdog when "playing" fires.
+    // Wait for the first frame to be decoded before starting playback.
+    // HEVC (h265) via VideoToolbox has higher startup latency than
+    // H.264 — the decoder needs a few frames to initialise.  Without
+    // this, audio starts playing before the first video frame is
+    // ready, causing a brief video freeze that catches up abruptly.
+    this.videoTarget.addEventListener("loadeddata", () => {
+      this.videoTarget.play().catch(() => {})
+    }, { once: true })
   }
 
   // Build the remux transcode URL with the current start_seconds and
@@ -1140,8 +1193,16 @@ export default class extends Controller {
     }
 
     this.videoTarget.load()
-    const p = this.videoTarget.play()
-    if (p?.catch) p.catch(() => {})
+    if (this.isRemuxDirectPlay()) {
+      // Wait for the first frame before playing — HEVC decoder warmup.
+      this.videoTarget.addEventListener("loadeddata", () => {
+        this.videoTarget.play().catch(() => {})
+      }, { once: true })
+    } else {
+      // Direct play (H.264) — no decoder warmup delay needed.
+      const p = this.videoTarget.play()
+      if (p?.catch) p.catch(() => {})
+    }
 
     this.clearStallWatchdog()
     this.stopProgressWatchdog()
@@ -2604,8 +2665,10 @@ export default class extends Controller {
       const remuxUrl = this.buildRemuxDirectUrl()
       this.videoTarget.src = remuxUrl
       this.videoTarget.load()
-      const p = this.videoTarget.play()
-      if (p?.catch) p.catch(() => {})
+      // Wait for the first frame before playing (same as startRemuxDirectPlay).
+      this.videoTarget.addEventListener("loadeddata", () => {
+        this.videoTarget.play().catch(() => {})
+      }, { once: true })
       this.clearSubtitleCues()
       this.resetProgressBaseline()
       return
