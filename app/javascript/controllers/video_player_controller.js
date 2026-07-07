@@ -1067,6 +1067,20 @@ export default class extends Controller {
 
       if (stalled) {
         const bufferAhead = this.bufferedAheadOfCurrent()
+
+        // For remux direct play (native <video>), the browser manages its
+        // own download.  When the browser's internal media buffer is full,
+        // it stops reading from the HTTP response — no 'progress' event
+        // fires.  This is NORMAL: the browser is playing from its buffer
+        // and will resume reading when it needs more data.  Only reconnect
+        // when the buffer is actually running dry (< 5s ahead).
+        if (this.isRemuxDirectPlay() && bufferAhead > 5) {
+          this.lastProgressEventTime = now
+          this.lastBufferDataTime = now
+          this.lastBufferEnd = bufEnd
+          return
+        }
+
         console.warn(`Download stalled — no progress event for ${Math.round(dlStalledMs / 1000)}s, buffer ahead: ${bufferAhead.toFixed(1)}s — reconnecting`)
         this.progressWatchdogArmed = false
         this.reportStall("download_stall")
