@@ -1,0 +1,50 @@
+<%# Reusable expandable catalog section.
+    locals:
+      title:         section heading
+      items:         array of item hashes (imdb_id, title, poster_url, year, type)
+      type:          default content type for links ("movie"/"show")
+      browse_path:   optional "Browse all" link
+      view_all_path:  optional "View all" link
+%>
+<% if items.any? %>
+  <section class="mb-10 collapsible-section" data-controller="carousel collapsible-section">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-bold text-white"><%= title %></h2>
+      <div class="flex items-center gap-2">
+        <% if view_all_path %>
+          <%= link_to "View all", view_all_path, class: "text-sm text-sv-accent hover:underline" %>
+        <% end %>
+        <% if browse_path %>
+          <%= link_to "Browse all", browse_path, class: "text-sm text-sv-accent hover:underline" %>
+        <% end %>
+        <button type="button"
+                data-action="click->collapsible-section#toggle"
+                data-collapsible-section-target="toggle"
+                class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors"
+                aria-label="Expand section" aria-expanded="false">
+          <svg class="w-4 h-4 cs-chevron" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <button data-action="click->carousel#prev" data-carousel-target="prevBtn"
+                class="cs-nav w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <button data-action="click->carousel#next" data-carousel-target="nextBtn"
+                class="cs-nav w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="relative">
+      <div data-carousel-target="track" data-collapsible-section-target="track"
+           class="cs-track flex gap-4 overflow-x-auto scrollbar-hide pb-2">
+        <% items.each do |item| %>
+          <%= render "shared/poster_card",
+                item: item,
+                link_path: content_path(type: item[:type].presence || type, imdb_id: item[:imdb_id]) %>
+        <% end %>
+      </div>
+    </div>
+  </section>
+<% end %>

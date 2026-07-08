@@ -15,22 +15,29 @@
     </div>
   <% end %>
 
-  <%# Continue Watching %>
+  <%# Continue Watching (custom markup with progress bars) %>
   <% if @continue_watching.any? %>
-    <section class="mb-10" data-controller="carousel">
+    <section class="mb-10 collapsible-section" data-controller="carousel collapsible-section">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-xl font-bold text-white">Continue Watching</h2>
-        <div class="flex gap-2">
-          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
+        <div class="flex items-center gap-2">
+          <button type="button"
+                  data-action="click->collapsible-section#toggle"
+                  data-collapsible-section-target="toggle"
+                  class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors"
+                  aria-label="Expand section" aria-expanded="false">
+            <svg class="w-4 h-4 cs-chevron" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="cs-nav w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
           </button>
-          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
+          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="cs-nav w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
           </button>
         </div>
       </div>
       <div class="relative">
-        <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
+        <div data-carousel-target="track" data-collapsible-section-target="track" class="cs-track flex gap-4 overflow-x-auto scrollbar-hide pb-2">
           <% @continue_watching.each do |item| %>
             <div class="poster-card group shrink-0" style="width: 180px">
               <%= link_to resume_streaming_index_path(type: item[:content_type] == "episode" ? "show" : "movie", show_imdb_id: item[:imdb_id], imdb_id: item[:imdb_id]), data: { page_loader: "link" } do %>
@@ -64,150 +71,57 @@
   <% end %>
 
   <%# Recommended for You %>
-  <% if @recommendations.success? && @recommendations.data.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Recommended for You</h2>
-        <div class="flex gap-2">
-          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-          </button>
-          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-          </button>
-        </div>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @recommendations.data.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: item[:type], imdb_id: item[:imdb_id]) %>
-        <% end %>
-      </div>
-    </section>
+  <% if @recommendations.success? %>
+    <%= render "home/catalog_section",
+          title: "Recommended for You",
+          items: @recommendations.data %>
   <% end %>
 
   <%# Recently Added %>
-  <% if @recently_added.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Recently Added</h2>
-        <div class="flex gap-2">
-          <%= link_to "View all", library_index_path, class: "text-sm text-sv-accent hover:underline" %>
-          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-          </button>
-          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-          </button>
-        </div>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @recently_added.each do |entry| %>
-          <%= render "shared/poster_card", item: { imdb_id: entry.imdb_id, title: entry.title, poster_url: entry.poster_url, year: entry.year, type: entry.content_type }, link_path: content_path(type: entry.content_type, imdb_id: entry.imdb_id) %>
-        <% end %>
-      </div>
-    </section>
-  <% end %>
+  <%= render "home/catalog_section",
+        title: "Recently Added",
+        items: @recently_added.map { |e| { imdb_id: e.imdb_id, title: e.title, poster_url: e.poster_url, year: e.year, type: e.content_type } },
+        view_all_path: library_index_path %>
 
   <%# Wishlist %>
-  <% if @wishlist_preview.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Wishlist</h2>
-        <div class="flex gap-2">
-          <%= link_to "View all", wishlist_index_path, class: "text-sm text-sv-accent hover:underline" %>
-          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-          </button>
-          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-          </button>
-        </div>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @wishlist_preview.each do |entry| %>
-          <%= render "shared/poster_card", item: { imdb_id: entry.imdb_id, title: entry.title, poster_url: entry.poster_url, year: entry.year, type: entry.content_type }, link_path: content_path(type: entry.content_type, imdb_id: entry.imdb_id) %>
-        <% end %>
-      </div>
-    </section>
-  <% end %>
+  <%= render "home/catalog_section",
+        title: "Wishlist",
+        items: @wishlist_preview.map { |e| { imdb_id: e.imdb_id, title: e.title, poster_url: e.poster_url, year: e.year, type: e.content_type } },
+        view_all_path: wishlist_index_path %>
 
   <%# Popular Movies %>
-  <% if @popular.success? && @popular.data.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Popular Movies</h2>
-        <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-        </button>
-        <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @popular.data.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: "movie", imdb_id: item[:imdb_id]) %>
-        <% end %>
-      </div>
-    </section>
+  <% if @popular.success? %>
+    <%= render "home/catalog_section",
+          title: "Popular Movies",
+          items: @popular.data,
+          type: "movie",
+          browse_path: browse_path(type: "movie", catalog: "top") %>
   <% end %>
 
   <%# Trending Movies %>
-  <% if @trending.success? && @trending.data.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Trending Movies</h2>
-        <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-        </button>
-        <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @trending.data.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: "movie", imdb_id: item[:imdb_id]) %>
-        <% end %>
-      </div>
-    </section>
+  <% if @trending.success? %>
+    <%= render "home/catalog_section",
+          title: "Trending Movies",
+          items: @trending.data,
+          type: "movie",
+          browse_path: browse_path(type: "movie", catalog: "year") %>
   <% end %>
 
   <%# Popular Shows %>
-  <% if @popular_shows.success? && @popular_shows.data.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Popular Shows</h2>
-        <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-        </button>
-        <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @popular_shows.data.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: "show", imdb_id: item[:imdb_id]) %>
-        <% end %>
-      </div>
-    </section>
+  <% if @popular_shows.success? %>
+    <%= render "home/catalog_section",
+          title: "Popular Shows",
+          items: @popular_shows.data,
+          type: "show",
+          browse_path: browse_path(type: "show", catalog: "top") %>
   <% end %>
 
   <%# Trending Shows %>
-  <% if @trending_shows.success? && @trending_shows.data.any? %>
-    <section class="mb-10" data-controller="carousel">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-bold text-white">Trending Shows</h2>
-        <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-        </button>
-        <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-        <% @trending_shows.data.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: "show", imdb_id: item[:imdb_id]) %>
-        <% end %>
-      </div>
-    </section>
+  <% if @trending_shows.success? %>
+    <%= render "home/catalog_section",
+          title: "Trending Shows",
+          items: @trending_shows.data,
+          type: "show",
+          browse_path: browse_path(type: "show", catalog: "year") %>
   <% end %>
 </div>

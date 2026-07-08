@@ -6,6 +6,26 @@ class TorrentioService
   CINEMETA_URL = "https://v3-cinemeta.strem.io"
   QUALITY_SORT = { "4K" => 0, "1080p" => 1, "720p" => 2, "480p" => 3, "Unknown" => 4 }.freeze
 
+  # Cinemeta catalog ids double as sort modes: "top" = popular,
+  # "year" = new releases, "imdbRating" = top rated.
+  CATALOGS = {
+    "top" => "Popular",
+    "year" => "New Releases",
+    "imdbRating" => "Top Rated"
+  }.freeze
+
+  # Genres supported by the cinemeta catalog (per the addon manifest).
+  MOVIE_GENRES = %w[Action Adventure Animation Biography Comedy Crime
+                    Documentary Drama Family Fantasy History Horror Mystery
+                    Romance Sci-Fi Sport Thriller War Western].freeze
+  SERIES_GENRES = %w[Action Adventure Animation Biography Comedy Crime
+                     Documentary Drama Family Fantasy History Horror Mystery
+                     Romance Sci-Fi Sport Thriller War Western
+                     Reality-TV Talk-Show Game-Show].freeze
+
+  # How many items a single cinemeta catalog page returns.
+  CATALOG_PAGE_SIZE = 50
+
   LANGUAGE_PATTERNS = {
     "ENG" => /\b(ENG|ENGLISH|EN)\b/i,
     "FRENCH" => /\b(FRENCH|FR|VFF|VFQ|TRUEFRENCH)\b/i,
@@ -149,19 +169,30 @@ class TorrentioService
     catalog(type, "imdbRating", limit: limit)
   end
 
-  def catalog(type, catalog_id, genre: nil, limit: 20)
+  # Fetch a cinemeta catalog page.  +genre+ and +skip+ are passed in the
+  # URL *path* (e.g. catalog/movie/top/genre=Action&skip=100.json) because
+  # cinemeta ignores them as query parameters — using ?genre= silently
+  # returns the unfiltered catalog.
+  def catalog(type, catalog_id, genre: nil, skip: nil, limit: 20)
     cinemeta_type = type.to_s == "show" ? "series" : type.to_s
-    path = "catalog/#{cinemeta_type}/#{catalog_id}.json"
-    path += "?genre=#{CGI.escape(genre)}" if genre.present?
+    extras = []
+    extras << "genre=#{CGI.escape(genre)}" if genre.present?
+    extras << "skip=#{skip.to_i}" if skip.present? && skip.to_i.positive?
+    path = if extras.any?
+      "catalog/#{cinemeta_type}/#{catalog_id}/#{extras.join('&')}.json"
+    else
+      "catalog/#{cinemeta_type}/#{catalog_id}.json"
+    end
 
-    cache_key = "torrentio/catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{limit}"
+    cache_key = "torrentio/catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{skip}/#{limit}"
     # Use fetch with race_condition_ttl so concurrent cache misses (e.g.
     # multiple users hitting home at once on a cold cache) coalesce onto
     # a single HTTP call instead of spawning N×threads.
     result = Rails.cache.fetch(cache_key, expires_in: CATALOG_CACHE_TTL, race_condition_ttl: 30.seconds) do
       response = @cinemeta.get(path)
       if response.success? && response.body.is_a?(Hash)
-        metas = (response.body["metas"] || []).first(limit)
+        metas = response.body["metas"] || []
+        metas = metas.first(limit) if limit && limit.positive?
         metas.map { |m| normalize_cinemeta(m, type.to_s) }
       else
         []
@@ -171,6 +202,11 @@ class TorrentioService
   rescue StandardError => e
     Rails.logger.error("TorrentioService#catalog error: #{e.message}")
     ServiceResult.success([])
+  end
+
+  # Genres available for a given content type.
+  def self.genres_for(type)
+    type.to_s == "show" ? SERIES_GENRES : MOVIE_GENRES
   end
 
   private
