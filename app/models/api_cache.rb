@@ -30,6 +30,12 @@ class ApiCache < ApplicationRecord
     record.fetch_error = nil
     record.save!
     record
+  rescue ActiveRecord::RecordNotUnique
+    # Lost the create race (two threads initialised the same missing key
+    # concurrently) — reload the winning record and update it.
+    record = find_by!(key: key)
+    record.update!(payload: payload, cached_at: now, fetching: false, fetch_error: nil)
+    record
   end
 
   # Atomically claim the refresh lock for a record so only one thread

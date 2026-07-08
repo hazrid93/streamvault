@@ -211,14 +211,7 @@ class TorrentioService
   # returns the unfiltered catalog.
   def catalog(type, catalog_id, genre: nil, skip: nil, limit: 20)
     cinemeta_type = type.to_s == "show" ? "series" : type.to_s
-    extras = []
-    extras << "genre=#{CGI.escape(genre)}" if genre.present?
-    extras << "skip=#{skip.to_i}" if skip.present? && skip.to_i.positive?
-    path = if extras.any?
-      "catalog/#{cinemeta_type}/#{catalog_id}/#{extras.join('&')}.json"
-    else
-      "catalog/#{cinemeta_type}/#{catalog_id}.json"
-    end
+    path = build_catalog_path(cinemeta_type, catalog_id, genre, skip)
 
     # DB-backed stale-while-revalidate: a stale catalog page is served
     # instantly and refreshed in the background.  The advisory lock
@@ -232,6 +225,21 @@ class TorrentioService
   rescue StandardError => e
     Rails.logger.error("TorrentioService#catalog error: #{e.message}")
     ServiceResult.success([])
+  end
+
+  # Build a cinemeta catalog request path.  genre and skip must be in
+  # the URL *path* (e.g. catalog/movie/top/genre=Action&skip=100.json)
+  # because cinemeta ignores them as query parameters — using ?genre=
+  # silently returns the unfiltered catalog.
+  def build_catalog_path(cinemeta_type, catalog_id, genre, skip)
+    extras = []
+    extras << "genre=#{CGI.escape(genre.to_s)}" if genre.present?
+    extras << "skip=#{skip.to_i}" if skip.present? && skip.to_i.positive?
+    if extras.any?
+      "catalog/#{cinemeta_type}/#{catalog_id}/#{extras.join('&')}.json"
+    else
+      "catalog/#{cinemeta_type}/#{catalog_id}.json"
+    end
   end
 
   def fetch_catalog_uncached(path, type, limit)
