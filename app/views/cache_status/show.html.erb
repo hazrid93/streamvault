@@ -1,0 +1,198 @@
+<div class="px-6 py-8 max-w-5xl">
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-3xl font-bold text-white">Cache Status</h1>
+      <p class="text-sm text-sv-text-muted mt-1">DB-backed stale-while-revalidate cache, crawler &amp; warmer health</p>
+    </div>
+    <%= link_to cache_status_path, class: "text-sm text-sv-text-muted hover:text-sv-accent transition-colors flex items-center gap-1" do %>
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      Refresh
+    <% end %>
+  </div>
+
+  <%# ---- Summary stat cards ---- %>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <%= render "stat_card", label: "Total entries", value: number_with_delimiter(@cache_totals[:total]),
+                hint: "#{number_to_human_size(@cache_totals[:bytes])} cached" %>
+    <%= render "stat_card", label: "Fresh", value: number_with_delimiter(@cache_totals[:fresh]),
+                hint: "served instantly", tone: :success %>
+    <%= render "stat_card", label: "Stale", value: number_with_delimiter(@cache_totals[:stale]),
+                hint: "serve + bg refresh", tone: :warning %>
+    <%= render "stat_card", label: "Fetching", value: number_with_delimiter(@cache_totals[:fetching]),
+                hint: "refresh in progress", tone: @cache_totals[:fetching].positive? ? :accent : nil %>
+  </div>
+
+  <%# ---- Cache warmer status ---- %>
+  <div class="bg-sv-surface rounded-xl p-6 border border-sv-border mb-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="text-lg font-semibold text-white">Cache Warmer</h2>
+      <span class="text-xs text-sv-text-muted">re-warm every <%= humanize_duration(@warmer_status[:rewarm_interval]) %></span>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <%# Boot warm %>
+      <div class="bg-sv-bg rounded-lg p-4 border border-sv-border">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-sm font-medium text-white">Boot warm</span>
+          <%= state_badge(@warmer_status[:boot][:state], @warmer_status[:boot][:thread_alive]) %>
+        </div>
+        <dl class="space-y-1.5 text-sm">
+          <%= stat_row "Started", time_ago(@warmer_status[:boot][:started_at]) %>
+          <%= stat_row "Finished", time_ago(@warmer_status[:boot][:finished_at]) %>
+          <%= stat_row "Duration", duration_ms(@warmer_status[:boot][:duration_ms]) %>
+          <% if @warmer_status[:boot][:error].present? %>
+            <div class="pt-1 text-sv-danger text-xs break-words">⚠ <%= @warmer_status[:boot][:error] %></div>
+          <% end %>
+        </dl>
+      </div>
+
+      <%# Periodic re-warm %>
+      <div class="bg-sv-bg rounded-lg p-4 border border-sv-border">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-sm font-medium text-white">Periodic re-warm</span>
+          <%= state_badge(@warmer_status[:periodic][:state], @warmer_status[:periodic][:thread_alive]) %>
+        </div>
+        <dl class="space-y-1.5 text-sm">
+          <%= stat_row "Last run", time_ago(@warmer_status[:periodic][:last_finished_at]) %>
+          <%= stat_row "Last duration", duration_ms(@warmer_status[:periodic][:duration_ms]) %>
+          <%= stat_row "Next run", next_run_in(@warmer_status[:periodic][:next_run_at]) %>
+          <%= stat_row "Total runs", @warmer_status[:periodic][:runs] %>
+          <% if @warmer_status[:periodic][:error].present? %>
+            <div class="pt-1 text-sv-danger text-xs break-words">⚠ <%= @warmer_status[:periodic][:error] %></div>
+          <% end %>
+        </dl>
+      </div>
+    </div>
+
+    <% threads = @warmer_status[:boot][:thread_alive].to_s + " / " + @warmer_status[:periodic][:thread_alive].to_s %>
+    <p class="text-xs text-sv-text-muted mt-4">Threads alive — boot: <%= @warmer_status[:boot][:thread_alive] ? "yes" : "no" %>, periodic: <%= @warmer_status[:periodic][:thread_alive] ? "yes" : "no" %></p>
+  </div>
+
+  <%# ---- Crawler coverage ---- %>
+  <div class="bg-sv-surface rounded-xl p-6 border border-sv-border mb-6">
+    <h2 class="text-lg font-semibold text-white mb-5">Crawler Coverage</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <%= render "mini_stat", label: "Catalog pages", value: @crawler_status[:catalog_pages] %>
+      <%= render "mini_stat", label: "Titles discovered", value: number_with_delimiter(@crawler_status[:titles_discovered]) %>
+      <%= render "mini_stat", label: "Metadata warmed", value: number_with_delimiter(@crawler_status[:metadata_warmed]) %>
+      <%= render "mini_stat", label: "Missing metadata", value: number_with_delimiter(@crawler_status[:missing]),
+                  tone: @crawler_status[:missing].positive? ? :warning : :success %>
+    </div>
+    <div class="mt-4">
+      <div class="flex items-center justify-between text-xs text-sv-text-muted mb-1">
+        <span>Metadata coverage</span>
+        <span><%= @crawler_status[:coverage_pct] %>%</span>
+      </div>
+      <div class="h-2 bg-sv-bg rounded-full overflow-hidden border border-sv-border">
+        <div class="h-full bg-sv-accent rounded-full transition-all" style="width: <%= @crawler_status[:coverage_pct] %>%"></div>
+      </div>
+    </div>
+  </div>
+
+  <%# ---- Cache breakdown table ---- %>
+  <div class="bg-sv-surface rounded-xl p-6 border border-sv-border mb-6">
+    <h2 class="text-lg font-semibold text-white mb-5">Cache Breakdown</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-sv-text-muted border-b border-sv-border">
+            <th class="pb-2 font-medium">Type</th>
+            <th class="pb-2 font-medium text-right">Total</th>
+            <th class="pb-2 font-medium text-right">Fresh</th>
+            <th class="pb-2 font-medium text-right">Stale</th>
+            <th class="pb-2 font-medium text-right">Fetching</th>
+            <th class="pb-2 font-medium text-right">Errors</th>
+            <th class="pb-2 font-medium text-right">Size</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @cache_breakdown.each do |row| %>
+            <tr class="border-b border-sv-border/50 hover:bg-sv-bg/40">
+              <td class="py-2.5 text-white"><%= row[:bucket] %></td>
+              <td class="py-2.5 text-right text-sv-text"><%= number_with_delimiter(row[:total]) %></td>
+              <td class="py-2.5 text-right text-sv-success"><%= row[:fresh] %></td>
+              <td class="py-2.5 text-right text-sv-warning"><%= row[:stale] %></td>
+              <td class="py-2.5 text-right text-sv-accent"><%= row[:fetching] %></td>
+              <td class="py-2.5 text-right <%= row[:errors].positive? ? 'text-sv-danger' : 'text-sv-text-muted' %>"><%= row[:errors] %></td>
+              <td class="py-2.5 text-right text-sv-text-muted"><%= number_to_human_size(row[:bytes]) %></td>
+            </tr>
+          <% end %>
+        </tbody>
+        <% if @cache_breakdown.any? %>
+          <tfoot>
+            <tr class="text-sv-text-muted">
+              <td class="pt-3 font-medium text-white">Total</td>
+              <td class="pt-3 text-right font-medium"><%= number_with_delimiter(@cache_totals[:total]) %></td>
+              <td class="pt-3 text-right"><%= @cache_totals[:fresh] %></td>
+              <td class="pt-3 text-right"><%= @cache_totals[:stale] %></td>
+              <td class="pt-3 text-right"><%= @cache_totals[:fetching] %></td>
+              <td class="pt-3 text-right"><%= @cache_totals[:errors] %></td>
+              <td class="pt-3 text-right"><%= number_to_human_size(@cache_totals[:bytes]) %></td>
+            </tr>
+          </tfoot>
+        <% end %>
+      </table>
+    </div>
+    <div class="flex items-center gap-6 mt-4 text-xs text-sv-text-muted">
+      <span>Oldest entry: <%= @cache_totals[:oldest]&.strftime("%b %d, %H:%M") || "—" %></span>
+      <span>Newest entry: <%= @cache_totals[:newest]&.strftime("%b %d, %H:%M") || "—" %></span>
+    </div>
+  </div>
+
+  <%# ---- Per-account stream prefetch ---- %>
+  <div class="bg-sv-surface rounded-xl p-6 border border-sv-border mb-6">
+    <h2 class="text-lg font-semibold text-white mb-1">Per-Account Stream Cache</h2>
+    <p class="text-xs text-sv-text-muted mb-5">Stream listings are cached per RealDebrid account — warmed by StreamPrefetcher on Home visit (once per TTL).</p>
+
+    <% if @stream_status.empty? %>
+      <p class="text-sm text-sv-text-muted">No users with a RealDebrid key configured.</p>
+    <% else %>
+      <div class="space-y-3">
+        <% @stream_status.each do |s| %>
+          <div class="bg-sv-bg rounded-lg p-4 border border-sv-border">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-white"><%= s[:email] %></span>
+              <span class="text-xs text-sv-text-muted">
+                last warm: <%= s[:warmed_at] ? time_ago_in_words(s[:warmed_at]) + " ago" : "never" %>
+              </span>
+            </div>
+            <div class="grid grid-cols-3 gap-3 text-center mb-2">
+              <div>
+                <div class="text-lg font-semibold text-sv-accent"><%= s[:comet_cached] %></div>
+                <div class="text-xs text-sv-text-muted">Comet streams</div>
+              </div>
+              <div>
+                <div class="text-lg font-semibold text-sv-text"><%= s[:torrentio_cached] %></div>
+                <div class="text-xs text-sv-text-muted">Torrentio streams</div>
+              </div>
+              <div>
+                <div class="text-lg font-semibold text-sv-success"><%= s[:coverage_pct] %>%</div>
+                <div class="text-xs text-sv-text-muted">coverage</div>
+              </div>
+            </div>
+            <div class="h-1.5 bg-sv-surface rounded-full overflow-hidden">
+              <div class="h-full bg-sv-accent rounded-full transition-all" style="width: <%= s[:coverage_pct] %>%"></div>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+
+  <%# ---- How it works ---- %>
+  <div class="bg-sv-surface rounded-xl p-6 border border-sv-border">
+    <h2 class="text-lg font-semibold text-white mb-3">How it works</h2>
+    <ul class="text-sm text-sv-text-muted space-y-2">
+      <li><span class="text-sv-success">Fresh</span> (&lt; 1 day) — served instantly from DB.</li>
+      <li><span class="text-sv-warning">Stale</span> (&gt; 1 day) — served instantly, refreshed in the background (next visit gets fresh).</li>
+      <li><span class="text-sv-accent">Fetching</span> — a background refresh thread holds the advisory lock on this key.</li>
+      <li><b>Boot warmer</b> — runs 10s after startup, pre-warms ~100 popular + ~100 new-release titles per type.</li>
+      <li><b>Periodic re-warm</b> — every <%= humanize_duration(@warmer_status[:rewarm_interval]) %>, re-fetches all entries and discovers new titles.</li>
+      <li><b>Stream prefetcher</b> — per-account, warms streams for all discovered titles on Home visit (once per hour per user).</li>
+    </ul>
+  </div>
+</div>
+
+<%# ---- helpers (partial-like, inline) ---- %>
+<%# stat_card partial %>
+<%# Defined inline via a helper module below to keep this self-contained. %>

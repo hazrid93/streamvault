@@ -27,6 +27,82 @@ class CacheWarmer
   # titles promptly as catalogs shift.
   REWARM_INTERVAL = 3.hours
 
+  # ---- In-process status registry (read by CacheStatusController) ----
+  # Single web process, so a class-level hash guarded by a mutex is
+  # sufficient.  Survives across requests; lost on restart (intended).
+  @status = {
+    boot:     { state: :pending, started_at: nil, finished_at: nil, duration_ms: nil, error: nil },
+    periodic: { state: :idle, last_started_at: nil, last_finished_at: nil, duration_ms: nil,
+                next_run_at: nil, runs: 0, error: nil }
+  }
+  @status_mutex = Mutex.new
+  @boot_thread = nil
+  @periodic_thread = nil
+
+  class << self
+    def status
+      @status_mutex.synchronize { @status.deep_dup }
+    end
+
+    def threads_alive?
+      @status_mutex.synchronize do
+        { boot: @boot_thread&.alive?, periodic: @periodic_thread&.alive? }
+      end
+    end
+
+    def register_boot_thread(t)
+      @status_mutex.synchronize { @boot_thread = t }
+    end
+
+    def register_periodic_thread(t)
+      @status_mutex.synchronize { @periodic_thread = t }
+    end
+
+    def record_boot_start
+      @status_mutex.synchronize do
+        @status[:boot] = { state: :running, started_at: Time.current,
+                           finished_at: nil, duration_ms: nil, error: nil }
+      end
+    end
+
+    def record_boot_finish(duration_ms)
+      @status_mutex.synchronize do
+        @status[:boot].merge!(state: :complete, finished_at: Time.current, duration_ms: duration_ms, error: nil)
+      end
+    end
+
+    def record_boot_error(msg)
+      @status_mutex.synchronize do
+        @status[:boot].merge!(state: :failed, finished_at: Time.current, error: msg)
+      end
+    end
+
+    def record_periodic_start
+      @status_mutex.synchronize do
+        s = @status[:periodic]
+        s[:state] = :running
+        s[:last_started_at] = Time.current
+        s[:error] = nil
+      end
+    end
+
+    def record_periodic_finish(duration_ms)
+      @status_mutex.synchronize do
+        s = @status[:periodic]
+        s.merge!(state: :idle, last_finished_at: Time.current, duration_ms: duration_ms,
+                 runs: s[:runs].to_i + 1, next_run_at: Time.current + REWARM_INTERVAL)
+      end
+    end
+
+    def record_periodic_error(msg)
+      @status_mutex.synchronize do
+        s = @status[:periodic]
+        s.merge!(state: :idle, last_finished_at: Time.current, error: msg,
+                 next_run_at: Time.current + REWARM_INTERVAL)
+      end
+    end
+  end
+
   def initialize
     @service = TorrentioService.new
   end
@@ -34,6 +110,31 @@ class CacheWarmer
   def warm_all
     warm_catalogs
     warm_metadata_for_cached_titles
+  end
+
+  # Instrumented wrapper used by the initializer so the status registry
+  # captures timing.  warm_all itself stays silent for ad-hoc console use.
+  def warm_all_with_status(periodic: false)
+    t0 = Time.current
+    if periodic
+      self.class.record_periodic_start
+    else
+      self.class.record_boot_start
+    end
+    warm_all
+    ms = ((Time.current - t0) * 1000).round
+    if periodic
+      self.class.record_periodic_finish(ms)
+    else
+      self.class.record_boot_finish(ms)
+    end
+  rescue => e
+    if periodic
+      self.class.record_periodic_error(e.message)
+    else
+      self.class.record_boot_error(e.message)
+    end
+    raise
   end
 
   private

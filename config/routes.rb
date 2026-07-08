@@ -64,6 +64,7 @@ Rails.application.routes.draw do
   # Settings
   get "settings", to: "settings#show", as: :settings
   patch "settings", to: "settings#update"
+  get "cache_status", to: "cache_status#show", as: :cache_status
 
   # Direct stream proxy (bypass ffmpeg for browser-compatible content)
   get "direct_stream", to: "direct_stream#show", as: :direct_stream

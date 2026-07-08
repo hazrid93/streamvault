@@ -30,26 +30,28 @@ Rails.application.config.after_initialize do
       sleep 10
       begin
         Rails.logger.info("[CacheWarmer] starting background cache pre-warm")
-        CacheWarmer.new.warm_all
+        CacheWarmer.new.warm_all_with_status(periodic: false)
         Rails.logger.info("[CacheWarmer] background cache pre-warm complete")
       rescue => e
         Rails.logger.error("[CacheWarmer] pre-warm failed: #{e.message}")
       end
-    end
+    end.then { |t| CacheWarmer.register_boot_thread(t) }
 
     # Periodic re-warm loop.  A separate long-lived thread sleeps between
     # runs; each run re-fetches stale entries and discovers new titles.
     Thread.new do
+      CacheWarmer.record_periodic_start
+      CacheWarmer.record_periodic_finish(0) # seed next_run_at from now
       loop do
         sleep CacheWarmer::REWARM_INTERVAL
         begin
           Rails.logger.info("[CacheWarmer] starting periodic re-warm")
-          CacheWarmer.new.warm_all
+          CacheWarmer.new.warm_all_with_status(periodic: true)
           Rails.logger.info("[CacheWarmer] periodic re-warm complete")
         rescue => e
           Rails.logger.error("[CacheWarmer] periodic re-warm failed: #{e.message}")
         end
       end
-    end
+    end.then { |t| CacheWarmer.register_periodic_thread(t) }
   end
 end
