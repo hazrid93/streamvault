@@ -11,10 +11,10 @@
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-xl font-bold text-white"><%= title %></h2>
       <div class="flex items-center gap-2">
-        <% if view_all_path %>
+        <% if local_assigns[:view_all_path] %>
           <%= link_to "View all", view_all_path, class: "text-sm text-sv-accent hover:underline" %>
         <% end %>
-        <% if browse_path %>
+        <% if local_assigns[:browse_path] %>
           <%= link_to "Browse all", browse_path, class: "text-sm text-sv-accent hover:underline" %>
         <% end %>
         <button type="button"
