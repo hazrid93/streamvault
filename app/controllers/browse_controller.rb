@@ -76,7 +76,12 @@ class BrowseController < ApplicationController
       )
       @items = result.success? ? result.data : []
       @error = result.failure? ? result.error_message : nil
-      @has_next = @items.size >= TorrentioService::CATALOG_PAGE_SIZE
+      # Cinemeta returns variable page sizes (the "top" catalog's first
+      # page is ~46, later pages ~50) yet still has more pages, so a
+      # strict size-threshold check would hide "Load more" prematurely.
+      # Instead, show it whenever we got any items; the next fetch simply
+      # removes the button if it comes back empty.
+      @has_next = @items.any?
       @has_prev = @page > 1
     end
 
