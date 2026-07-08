@@ -35,13 +35,14 @@ Rails.application.config.after_initialize do
       rescue => e
         Rails.logger.error("[CacheWarmer] pre-warm failed: #{e.message}")
       end
-    end.then { |t| CacheWarmer.register_boot_thread(t) }
+    end
 
     # Periodic re-warm loop.  A separate long-lived thread sleeps between
     # runs; each run re-fetches stale entries and discovers new titles.
     Thread.new do
-      CacheWarmer.record_periodic_start
-      CacheWarmer.record_periodic_finish(0) # seed next_run_at from now
+      # Seed next_run_at so the dashboard shows a countdown before the
+      # first periodic run.
+      CacheWarmer.update_status(periodic: { next_run_at: Time.current + CacheWarmer::REWARM_INTERVAL })
       loop do
         sleep CacheWarmer::REWARM_INTERVAL
         begin
@@ -52,6 +53,6 @@ Rails.application.config.after_initialize do
           Rails.logger.error("[CacheWarmer] periodic re-warm failed: #{e.message}")
         end
       end
-    end.then { |t| CacheWarmer.register_periodic_thread(t) }
+    end
   end
 end

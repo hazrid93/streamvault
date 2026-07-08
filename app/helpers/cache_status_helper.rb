@@ -18,7 +18,7 @@ module CacheStatusHelper
          when :warning then "bg-sv-warning/15 text-sv-warning border-sv-warning/30"
          else "bg-sv-bg text-sv-text-muted border-sv-border"
          end
-    suffix = thread_alive.nil? ? "" : (thread_alive ? " • live" : " • dead")
+    suffix = thread_alive.nil? ? "" : (thread_alive ? " • live" : " • stale")
     tag.span(label + suffix, class: "#{classes} #{bg}")
   end
 

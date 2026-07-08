@@ -82,10 +82,8 @@ class CacheStatusController < ApplicationController
 
   def build_warmer_status
     s = CacheWarmer.status.with_indifferent_access
-    alive = CacheWarmer.threads_alive?
-
-    boot = s[:boot] || {}
-    periodic = s[:periodic] || {}
+    boot = (s[:boot] || {}).with_indifferent_access
+    periodic = (s[:periodic] || {}).with_indifferent_access
 
     {
       rewarm_interval: CacheWarmer::REWARM_INTERVAL,
@@ -95,7 +93,8 @@ class CacheStatusController < ApplicationController
         finished_at: boot[:finished_at],
         duration_ms: boot[:duration_ms],
         error: boot[:error],
-        thread_alive: alive[:boot]
+        updated_at: boot[:updated_at],
+        live: live?(boot[:state], boot[:updated_at])
       },
       periodic: {
         state: periodic[:state],
@@ -105,9 +104,19 @@ class CacheStatusController < ApplicationController
         next_run_at: periodic[:next_run_at],
         runs: periodic[:runs],
         error: periodic[:error],
-        thread_alive: alive[:periodic]
+        updated_at: periodic[:updated_at],
+        live: live?(periodic[:state], periodic[:updated_at])
       }
     }
+  end
+
+  # A warmer is "live" if it's currently running, OR its last heartbeat
+  # was within the re-warm interval (i.e. the process is still alive and
+  # reporting).  Pending/idle states are informational, not liveness.
+  def live?(state, updated_at)
+    return true if state.to_s == "running"
+    return false unless updated_at
+    updated_at > CacheWarmer::REWARM_INTERVAL.ago
   end
 
   # ---- Crawler coverage ---------------------------------------------------

@@ -34,7 +34,7 @@
       <div class="bg-sv-bg rounded-lg p-4 border border-sv-border">
         <div class="flex items-center justify-between mb-3">
           <span class="text-sm font-medium text-white">Boot warm</span>
-          <%= state_badge(@warmer_status[:boot][:state], @warmer_status[:boot][:thread_alive]) %>
+          <%= state_badge(@warmer_status[:boot][:state], @warmer_status[:boot][:live]) %>
         </div>
         <dl class="space-y-1.5 text-sm">
           <%= stat_row "Started", time_ago(@warmer_status[:boot][:started_at]) %>
@@ -50,7 +50,7 @@
       <div class="bg-sv-bg rounded-lg p-4 border border-sv-border">
         <div class="flex items-center justify-between mb-3">
           <span class="text-sm font-medium text-white">Periodic re-warm</span>
-          <%= state_badge(@warmer_status[:periodic][:state], @warmer_status[:periodic][:thread_alive]) %>
+          <%= state_badge(@warmer_status[:periodic][:state], @warmer_status[:periodic][:live]) %>
         </div>
         <dl class="space-y-1.5 text-sm">
           <%= stat_row "Last run", time_ago(@warmer_status[:periodic][:last_finished_at]) %>
@@ -64,8 +64,7 @@
       </div>
     </div>
 
-    <% threads = @warmer_status[:boot][:thread_alive].to_s + " / " + @warmer_status[:periodic][:thread_alive].to_s %>
-    <p class="text-xs text-sv-text-muted mt-4">Threads alive — boot: <%= @warmer_status[:boot][:thread_alive] ? "yes" : "no" %>, periodic: <%= @warmer_status[:periodic][:thread_alive] ? "yes" : "no" %></p>
+    <p class="text-xs text-sv-text-muted mt-4">Status heartbeat — boot: <%= @warmer_status[:boot][:live] ? "live" : "idle" %>, periodic: <%= @warmer_status[:periodic][:live] ? "live" : "idle" %></p>
   </div>
 
   <%# ---- Crawler coverage ---- %>

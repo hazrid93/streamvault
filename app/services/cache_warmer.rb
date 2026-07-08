@@ -27,80 +27,35 @@ class CacheWarmer
   # titles promptly as catalogs shift.
   REWARM_INTERVAL = 3.hours
 
-  # ---- In-process status registry (read by CacheStatusController) ----
-  # Single web process, so a class-level hash guarded by a mutex is
-  # sufficient.  Survives across requests; lost on restart (intended).
-  @status = {
-    boot:     { state: :pending, started_at: nil, finished_at: nil, duration_ms: nil, error: nil },
-    periodic: { state: :idle, last_started_at: nil, last_finished_at: nil, duration_ms: nil,
-                next_run_at: nil, runs: 0, error: nil }
-  }
-  @status_mutex = Mutex.new
-  @boot_thread = nil
-  @periodic_thread = nil
+  # Reserved ApiCache key holding the warmer's status document (shared
+  # across all Puma workers/processes — in-memory state isn't visible
+  # cross-process).  Updated on every warm event.
+  STATUS_KEY = "internal:warmer:status"
 
-  class << self
-    def status
-      @status_mutex.synchronize { @status.deep_dup }
-    end
+  # Read the persisted status (boot + periodic).  Returns nil if the
+  # warmer hasn't run yet this boot.
+  def self.status
+    rec = ApiCache.find_by(key: STATUS_KEY)
+    rec&.payload&.deep_symbolize_keys || default_status
+  end
 
-    def threads_alive?
-      @status_mutex.synchronize do
-        { boot: @boot_thread&.alive?, periodic: @periodic_thread&.alive? }
-      end
-    end
+  def self.default_status
+    {
+      boot:     { state: :pending, started_at: nil, finished_at: nil, duration_ms: nil, error: nil, updated_at: nil },
+      periodic: { state: :idle, last_started_at: nil, last_finished_at: nil, duration_ms: nil,
+                  next_run_at: nil, runs: 0, error: nil, updated_at: nil }
+    }
+  end
 
-    def register_boot_thread(t)
-      @status_mutex.synchronize { @boot_thread = t }
-    end
-
-    def register_periodic_thread(t)
-      @status_mutex.synchronize { @periodic_thread = t }
-    end
-
-    def record_boot_start
-      @status_mutex.synchronize do
-        @status[:boot] = { state: :running, started_at: Time.current,
-                           finished_at: nil, duration_ms: nil, error: nil }
-      end
-    end
-
-    def record_boot_finish(duration_ms)
-      @status_mutex.synchronize do
-        @status[:boot].merge!(state: :complete, finished_at: Time.current, duration_ms: duration_ms, error: nil)
-      end
-    end
-
-    def record_boot_error(msg)
-      @status_mutex.synchronize do
-        @status[:boot].merge!(state: :failed, finished_at: Time.current, error: msg)
-      end
-    end
-
-    def record_periodic_start
-      @status_mutex.synchronize do
-        s = @status[:periodic]
-        s[:state] = :running
-        s[:last_started_at] = Time.current
-        s[:error] = nil
-      end
-    end
-
-    def record_periodic_finish(duration_ms)
-      @status_mutex.synchronize do
-        s = @status[:periodic]
-        s.merge!(state: :idle, last_finished_at: Time.current, duration_ms: duration_ms,
-                 runs: s[:runs].to_i + 1, next_run_at: Time.current + REWARM_INTERVAL)
-      end
-    end
-
-    def record_periodic_error(msg)
-      @status_mutex.synchronize do
-        s = @status[:periodic]
-        s.merge!(state: :idle, last_finished_at: Time.current, error: msg,
-                 next_run_at: Time.current + REWARM_INTERVAL)
-      end
-    end
+  # Merge + persist a partial status update atomically.
+  def self.update_status(boot: nil, periodic: nil)
+    current = status
+    current[:boot] = current[:boot].merge(boot) if boot
+    current[:periodic] = current[:periodic].merge(periodic) if periodic
+    now = Time.current
+    current[:boot][:updated_at] = now if boot
+    current[:periodic][:updated_at] = now if periodic
+    ApiCache.upsert(STATUS_KEY, current.deep_stringify_keys)
   end
 
   def initialize
@@ -117,22 +72,25 @@ class CacheWarmer
   def warm_all_with_status(periodic: false)
     t0 = Time.current
     if periodic
-      self.class.record_periodic_start
+      CacheWarmer.update_status(periodic: { state: :running, last_started_at: t0, error: nil })
     else
-      self.class.record_boot_start
+      CacheWarmer.update_status(boot: { state: :running, started_at: t0, error: nil })
     end
     warm_all
     ms = ((Time.current - t0) * 1000).round
     if periodic
-      self.class.record_periodic_finish(ms)
+      CacheWarmer.update_status(periodic: { state: :idle, last_finished_at: Time.current,
+                                            duration_ms: ms, runs: CacheWarmer.status[:periodic][:runs].to_i + 1,
+                                            next_run_at: Time.current + REWARM_INTERVAL })
     else
-      self.class.record_boot_finish(ms)
+      CacheWarmer.update_status(boot: { state: :complete, finished_at: Time.current, duration_ms: ms })
     end
   rescue => e
     if periodic
-      self.class.record_periodic_error(e.message)
+      CacheWarmer.update_status(periodic: { state: :failed, last_finished_at: Time.current, error: e.message,
+                                            next_run_at: Time.current + REWARM_INTERVAL })
     else
-      self.class.record_boot_error(e.message)
+      CacheWarmer.update_status(boot: { state: :failed, finished_at: Time.current, error: e.message })
     end
     raise
   end
