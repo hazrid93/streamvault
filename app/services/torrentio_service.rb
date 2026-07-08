@@ -382,7 +382,8 @@ class TorrentioService
       year: meta["releaseInfo"] || meta["year"],
       type: type == "series" ? "show" : type,
       poster_url: meta["poster"],
-      imdb_rating: meta["imdbRating"]
+      imdb_rating: meta["imdbRating"],
+      genre: meta["genres"]&.join(", ")
     }
   end
 
