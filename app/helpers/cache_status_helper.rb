@@ -22,11 +22,13 @@ module CacheStatusHelper
     tag.span(label + suffix, class: "#{classes} #{bg}")
   end
 
-  # A label/value row used inside <dl>.
+  # A label/value row used inside the warmer status cards.  Uses flex
+  # justify-between instead of float-right (which overlaps on mobile).
   def stat_row(label, value)
-    tag.dt(label, class: "text-sv-text-muted inline") +
-      " " +
-      tag.dd(value.to_s, class: "text-white inline float-right")
+    tag.div(class: "flex items-center justify-between gap-2") do
+      tag.span(label, class: "text-sv-text-muted text-xs sm:text-sm shrink-0") +
+        tag.span(value.to_s, class: "text-white text-xs sm:text-sm text-right truncate")
+    end
   end
 
   def time_ago(time)

@@ -1,10 +1,10 @@
 <% tone ||= nil %>
-<div class="bg-sv-surface rounded-xl p-4 border border-sv-border">
-  <div class="text-2xl font-bold <%= case tone; when :success then 'text-sv-success'; when :warning then 'text-sv-warning'; when :accent then 'text-sv-accent'; when :danger then 'text-sv-danger'; else 'text-white' end %>">
+<div class="bg-sv-surface rounded-xl p-3 sm:p-4 border border-sv-border">
+  <div class="text-xl sm:text-2xl font-bold leading-tight <%= case tone; when :success then 'text-sv-success'; when :warning then 'text-sv-warning'; when :accent then 'text-sv-accent'; when :danger then 'text-sv-danger'; else 'text-white' end %>">
     <%= value %>
   </div>
-  <div class="text-sm text-sv-text-muted mt-0.5"><%= label %></div>
+  <div class="text-xs sm:text-sm text-sv-text-muted mt-0.5"><%= label %></div>
   <% if hint.present? %>
-    <div class="text-xs text-sv-text-muted/70 mt-1"><%= hint %></div>
+    <div class="text-[10px] sm:text-xs text-sv-text-muted/70 mt-1 truncate"><%= hint %></div>
   <% end %>
 </div>

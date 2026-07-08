@@ -1,7 +1,7 @@
 <% tone ||= nil %>
-<div class="bg-sv-bg rounded-lg p-3 border border-sv-border text-center">
-  <div class="text-xl font-semibold <%= case tone; when :success then 'text-sv-success'; when :warning then 'text-sv-warning'; when :danger then 'text-sv-danger'; else 'text-white' end %>">
+<div class="bg-sv-bg rounded-lg p-2.5 sm:p-3 border border-sv-border text-center">
+  <div class="text-lg sm:text-xl font-semibold <%= case tone; when :success then 'text-sv-success'; when :warning then 'text-sv-warning'; when :danger then 'text-sv-danger'; else 'text-white' end %>">
     <%= value %>
   </div>
-  <div class="text-xs text-sv-text-muted mt-0.5"><%= label %></div>
+  <div class="text-[10px] sm:text-xs text-sv-text-muted mt-0.5 leading-tight"><%= label %></div>
 </div>
