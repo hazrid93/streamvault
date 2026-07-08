@@ -45,7 +45,7 @@ export default class extends Controller {
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay",
-      "speedButton", "speedMenu"
+      "speedButton", "speedMenu", "nextEpisodeCard"
     ]
   }
   static get values() {
@@ -54,7 +54,8 @@ export default class extends Controller {
       season: String, episode: String, resumeAt: String, startSeconds: Number,
       title: String, duration: Number, posterUrl: String,
       defaultLanguage: String, preferredLanguages: String,
-      tracksUrl: String, subtitlesUrl: String, resumeUrl: String
+      tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
+      nextEpisodeTitle: String, hasNextEpisode: Boolean
     }
   }
 
@@ -1821,6 +1822,43 @@ export default class extends Controller {
     // Flush final progress so the finished episode crosses 95%.
     await this.saveProgress()
 
+    // If we know the next episode, show a countdown overlay instead
+    // of redirecting instantly — gives the viewer a moment to bail.
+    if (this.hasNextEpisodeValue && this.hasNextEpisodeCardTarget) {
+      this.showNextEpisodeCountdown()
+      return
+    }
+
+    if (this.resumeUrlValue) {
+      const url = `${this.resumeUrlValue}?type=show&show_imdb_id=${encodeURIComponent(this.imdbIdValue)}`
+      window.location.href = url
+    }
+  }
+
+  // Show the "Up Next" card with a 10-second auto-play countdown.
+  showNextEpisodeCountdown() {
+    const card = this.nextEpisodeCardTarget
+    card.classList.remove("hidden")
+    const countdownEl = card.querySelector("[data-next-countdown]")
+    let remaining = 10
+    if (countdownEl) countdownEl.textContent = remaining
+    this.nextEpisodeTimer = setInterval(() => {
+      remaining -= 1
+      if (countdownEl) countdownEl.textContent = remaining
+      if (remaining <= 0) {
+        clearInterval(this.nextEpisodeTimer)
+        this.advanceToNextEpisode()
+      }
+    }, 1000)
+  }
+
+  cancelNextEpisode() {
+    if (this.nextEpisodeTimer) clearInterval(this.nextEpisodeTimer)
+    if (this.hasNextEpisodeCardTarget) this.nextEpisodeCardTarget.classList.add("hidden")
+  }
+
+  advanceToNextEpisode() {
+    if (this.nextEpisodeTimer) clearInterval(this.nextEpisodeTimer)
     if (this.resumeUrlValue) {
       const url = `${this.resumeUrlValue}?type=show&show_imdb_id=${encodeURIComponent(this.imdbIdValue)}`
       window.location.href = url

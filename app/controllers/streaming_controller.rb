@@ -104,6 +104,16 @@ class StreamingController < ApplicationController
       transcode_params[:subtitle_stream] = params[:subtitle_stream] if params[:subtitle_stream].present?
       @streaming_url = transcode_stream_path(transcode_params)
     end
+
+    # Next episode for the end-of-episode "Up Next" prompt.  Best-effort:
+    # a metadata fetch failure just disables the overlay, never breaks
+    # playback.  The actual auto-advance target is the resume endpoint
+    # (already used by onVideoEnded) — this only supplies the title for
+    # the countdown UI.
+    @next_episode = nil
+    if @type == "show" && @season.present? && @episode.present?
+      @next_episode = compute_next_episode(@imdb_id, @season.to_i, @episode.to_i)
+    end
   end
 
   # GET /streaming/resume — resolve which episode/movie to play and where to
@@ -268,6 +278,21 @@ class StreamingController < ApplicationController
   def request_duration_seconds
     duration = params[:duration].presence || params[:duration_seconds].presence
     normalized_duration_seconds(duration)
+  end
+
+  def compute_next_episode(show_imdb_id, season, episode)
+    result = TorrentioService.new.metadata(show_imdb_id, "series")
+    return nil unless result.success?
+    episodes = result.data&.dig(:episodes) || []
+    ordered = episodes.sort_by { |e| [ e[:season], e[:episode] ] }
+    idx = ordered.index { |e| e[:season] == season && e[:episode] == episode }
+    return nil unless idx
+    nxt = ordered[idx + 1]
+    return nil unless nxt
+    { title: nxt[:title], season: nxt[:season], episode: nxt[:episode] }
+  rescue StandardError => e
+    Rails.logger.error("[StreamingController] next episode error: #{e.message}")
+    nil
   end
 
   def metadata_duration_seconds(imdb_id, type, season, episode)

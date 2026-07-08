@@ -17,7 +17,9 @@
      data-video-player-tracks-url-value="<%= transcode_tracks_path %>"
      data-video-player-subtitles-url-value="<%= transcode_subtitles_path %>"
      data-video-player-progress-url-value="<%= progress_streaming_path("play") %>"
-     data-video-player-resume-url-value="<%= resume_streaming_index_path %>">
+     data-video-player-resume-url-value="<%= resume_streaming_index_path %>"
+     data-video-player-next-episode-title-value="<%= @next_episode&.dig(:title) || "" %>"
+     data-video-player-has-next-episode-value="<%= @next_episode.present? ? "true" : "false" %>">
 
   <%# Back button %>
   <div class="absolute top-4 left-4 z-50 opacity-100 transition-opacity duration-500" data-video-player-target="backButton"
@@ -163,5 +165,23 @@
       <span data-video-player-target="seekingOverlayMessage" class="text-white text-sm font-medium" style="text-shadow: 0 2px 8px rgba(0,0,0,0.95);">Seeking...</span>
     </div>
   </div>
+
+  <%# Up Next: end-of-episode countdown card (shown by onVideoEnded) %>
+  <% if @next_episode.present? %>
+    <div data-video-player-target="nextEpisodeCard" class="hidden absolute inset-0 flex items-center justify-center bg-black/90 z-30">
+      <div class="text-center max-w-md px-6">
+        <p class="text-xs uppercase tracking-wider text-sv-accent font-semibold mb-2">Up Next</p>
+        <p class="text-lg font-bold text-white mb-1"><%= @next_episode[:title] %></p>
+        <p class="text-sm text-sv-text-muted mb-6">S<%= @next_episode[:season].to_s.rjust(2, '0') %>E<%= @next_episode[:episode].to_s.rjust(2, '0') %></p>
+        <div class="flex items-center justify-center gap-4">
+          <button type="button" data-action="click->video-player#advanceToNextEpisode"
+                class="px-5 py-2.5 bg-sv-accent hover:bg-sv-accent-hover text-white rounded-lg font-medium text-sm transition-colors">Play now</button>
+          <button type="button" data-action="click->video-player#cancelNextEpisode"
+                class="px-5 py-2.5 bg-sv-surface hover:bg-sv-surface-hover text-white rounded-lg font-medium text-sm transition-colors">Cancel</button>
+        </div>
+        <p class="text-xs text-sv-text-muted mt-6">Auto-playing in <span data-next-countdown>10</span>s</p>
+      </div>
+    </div>
+  <% end %>
 
 </div>
