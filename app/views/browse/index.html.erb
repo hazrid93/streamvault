@@ -1,7 +1,7 @@
 <div class="px-6 py-8">
   <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold text-white">Browse</h1>
-    <p class="text-sm text-sv-text-muted"><%= pluralize(@items.size, "title") %> on this page</p>
+    <p class="text-sm text-sv-text-muted"><%= pluralize(@items.size, "title") %><%= " on this page" unless @post_filtering %></p>
   </div>
 
   <%# Filter bar %>
@@ -23,35 +23,45 @@
       <div class="inline-flex flex-wrap gap-1">
         <% TorrentioService::CATALOGS.each do |id, label| %>
           <% active_sort = @catalog == id %>
-          <%= link_to label, browse_path(type: @type, catalog: id),
+          <%= link_to label, browse_path(type: @type, catalog: id, genre: @genre.presence, year: @year.presence),
                 class: "px-3 py-1.5 rounded-md text-sm font-medium transition-colors border #{active_sort ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
         <% end %>
       </div>
     </div>
 
-    <%# Row 2: genre chips (or year selector for the "New releases" catalog) %>
+    <%# Row 2: genre chips (always available) %>
     <div class="flex flex-wrap items-center gap-2">
-      <% if @catalog == "year" %>
-        <span class="text-sm text-sv-text-muted mr-1">Year:</span>
-        <%= form_tag browse_path, method: :get, class: "inline-block", data: { turbo_frame: "_top" } do %>
-          <%= hidden_field_tag :type, @type %>
-          <%= hidden_field_tag :catalog, "year" %>
-          <%= select_tag :genre,
-                options_for_select(@years.map { |y| [y.to_s, y.to_s] }, selected: @genre),
-                onchange: "this.form.requestSubmit()",
-                class: "input-field py-1.5 pr-8" %>
-        <% end %>
-      <% else %>
-        <% chip_base = "px-3 py-1.5 rounded-full text-sm font-medium transition-colors border" %>
-        <%= link_to "All", browse_path(type: @type, catalog: @catalog),
-              class: "#{chip_base} #{@genre.blank? ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
-        <% @genres.each do |g| %>
-          <% active = @genre == g %>
-          <%= link_to g, browse_path(type: @type, catalog: @catalog, genre: g),
-                class: "#{chip_base} #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
-        <% end %>
+      <% chip_base = "px-3 py-1.5 rounded-full text-sm font-medium transition-colors border" %>
+      <%= link_to "All", browse_path(type: @type, catalog: @catalog, year: @year.presence),
+            class: "#{chip_base} #{@genre.blank? ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+      <% @genres.each do |g| %>
+        <% active = @genre == g %>
+        <%= link_to g, browse_path(type: @type, catalog: @catalog, genre: g, year: @year.presence),
+              class: "#{chip_base} #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
       <% end %>
     </div>
+
+    <%# Row 3: year selector (always available) %>
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-sm text-sv-text-muted mr-1">Year:</span>
+      <%# Autosubmits on change via Stimulus (CSP-safe — no inline onchange). %>
+      <%= form_tag browse_path, method: :get, class: "inline-block",
+            data: { controller: "autosubmit", action: "change->autosubmit#submit" } do %>
+        <%= hidden_field_tag :type, @type %>
+        <%= hidden_field_tag :catalog, @catalog %>
+        <%= hidden_field_tag :genre, @genre %>
+        <%= select_tag :year,
+              options_for_select([["All years", ""]] + @years.map { |y| [y.to_s, y.to_s] }, selected: @year),
+              class: "input-field py-1.5 pr-8" %>
+      <% end %>
+    </div>
+
+    <%# Filter context note %>
+    <% if @post_filtering %>
+      <p class="text-xs text-sv-text-muted">
+        Filtering by <%= @catalog == "year" ? "genre" : "year" %> across the latest <%= BrowseController::FILTER_FETCH_PAGES * TorrentioService::CATALOG_PAGE_SIZE %> titles.
+      </p>
+    <% end %>
   </div>
 
   <%# Error %>
@@ -73,15 +83,15 @@
     <div class="text-center py-20 text-sv-text-muted">
       <svg class="w-12 h-12 mx-auto mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
       <p class="text-lg">No titles found</p>
-      <p class="text-sm mt-1">Try a different genre or sort mode.</p>
+      <p class="text-sm mt-1">Try a different genre, year, or sort mode.</p>
     </div>
   <% end %>
 
-  <%# Pagination %>
-  <% if @has_prev || @has_next %>
+  <%# Pagination (only when not post-filtering) %>
+  <% if !@post_filtering && (@has_prev || @has_next) %>
     <div class="flex items-center justify-center gap-4 mt-10">
       <% if @has_prev %>
-        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, page: @page - 1),
+        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page - 1),
               class: "btn-secondary" do %>
           <span class="flex items-center gap-1">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
@@ -95,7 +105,7 @@
       <span class="text-sm text-sv-text-muted px-2">Page <%= @page %></span>
 
       <% if @has_next %>
-        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, page: @page + 1),
+        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page + 1),
               class: "btn-secondary" do %>
           <span class="flex items-center gap-1">
             Next
