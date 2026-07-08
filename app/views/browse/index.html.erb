@@ -1,0 +1,110 @@
+<div class="px-6 py-8">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-white">Browse</h1>
+    <p class="text-sm text-sv-text-muted"><%= pluralize(@items.size, "title") %> on this page</p>
+  </div>
+
+  <%# Filter bar %>
+  <div class="mb-8 space-y-4">
+    <%# Row 1: content type toggle + sort mode %>
+    <div class="flex flex-wrap items-center gap-3 justify-between">
+      <%# Content type toggle %>
+      <div class="inline-flex rounded-lg bg-sv-surface p-1 border border-sv-border">
+        <% [["movie", "Movies"], ["show", "Series"]].each do |val, label| %>
+          <% active_type = @type == val %>
+          <%= link_to browse_path(type: val, catalog: @catalog),
+                class: "px-4 py-1.5 rounded-md text-sm font-medium transition-colors #{active_type ? 'bg-sv-accent text-white' : 'text-sv-text-muted hover:text-white'}" do %>
+            <%= label %>
+          <% end %>
+        <% end %>
+      </div>
+
+      <%# Sort mode tabs %>
+      <div class="inline-flex flex-wrap gap-1">
+        <% TorrentioService::CATALOGS.each do |id, label| %>
+          <% active_sort = @catalog == id %>
+          <%= link_to label, browse_path(type: @type, catalog: id),
+                class: "px-3 py-1.5 rounded-md text-sm font-medium transition-colors border #{active_sort ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+        <% end %>
+      </div>
+    </div>
+
+    <%# Row 2: genre chips (or year selector for the "New releases" catalog) %>
+    <div class="flex flex-wrap items-center gap-2">
+      <% if @catalog == "year" %>
+        <span class="text-sm text-sv-text-muted mr-1">Year:</span>
+        <%= form_tag browse_path, method: :get, class: "inline-block", data: { turbo_frame: "_top" } do %>
+          <%= hidden_field_tag :type, @type %>
+          <%= hidden_field_tag :catalog, "year" %>
+          <%= select_tag :genre,
+                options_for_select(@years.map { |y| [y.to_s, y.to_s] }, selected: @genre),
+                onchange: "this.form.requestSubmit()",
+                class: "input-field py-1.5 pr-8" %>
+        <% end %>
+      <% else %>
+        <% chip_base = "px-3 py-1.5 rounded-full text-sm font-medium transition-colors border" %>
+        <%= link_to "All", browse_path(type: @type, catalog: @catalog),
+              class: "#{chip_base} #{@genre.blank? ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+        <% @genres.each do |g| %>
+          <% active = @genre == g %>
+          <%= link_to g, browse_path(type: @type, catalog: @catalog, genre: g),
+                class: "#{chip_base} #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+
+  <%# Error %>
+  <% if @error %>
+    <div class="flash-alert mb-6">Couldn't load titles right now. Please try again shortly.</div>
+  <% end %>
+
+  <%# Results grid %>
+  <% if @items.any? %>
+    <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-4">
+      <% @items.each do |item| %>
+        <%= render "shared/poster_card",
+              item: item,
+              link_path: content_path(type: item[:type].presence || @type, imdb_id: item[:imdb_id]),
+              variant: "grid" %>
+      <% end %>
+    </div>
+  <% elsif @error.blank? %>
+    <div class="text-center py-20 text-sv-text-muted">
+      <svg class="w-12 h-12 mx-auto mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+      <p class="text-lg">No titles found</p>
+      <p class="text-sm mt-1">Try a different genre or sort mode.</p>
+    </div>
+  <% end %>
+
+  <%# Pagination %>
+  <% if @has_prev || @has_next %>
+    <div class="flex items-center justify-center gap-4 mt-10">
+      <% if @has_prev %>
+        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, page: @page - 1),
+              class: "btn-secondary" do %>
+          <span class="flex items-center gap-1">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            Previous
+          </span>
+        <% end %>
+      <% else %>
+        <span class="btn-secondary opacity-40 cursor-not-allowed">Previous</span>
+      <% end %>
+
+      <span class="text-sm text-sv-text-muted px-2">Page <%= @page %></span>
+
+      <% if @has_next %>
+        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, page: @page + 1),
+              class: "btn-secondary" do %>
+          <span class="flex items-center gap-1">
+            Next
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          </span>
+        <% end %>
+      <% else %>
+        <span class="btn-secondary opacity-40 cursor-not-allowed">Next</span>
+      <% end %>
+    </div>
+  <% end %>
+</div>

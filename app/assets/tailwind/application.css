@@ -234,6 +234,24 @@ body {
   scrollbar-width: none;
 }
 
+/* Expandable home sections — toggle between a horizontal carousel
+   (collapsed, default) and a wrapping grid (expanded). */
+.collapsible-section .cs-chevron {
+  transition: transform 200ms ease;
+}
+.collapsible-section.is-expanded .cs-chevron {
+  transform: rotate(180deg);
+}
+/* Hide the carousel nav arrows while expanded — the grid wraps instead. */
+.collapsible-section.is-expanded .cs-nav {
+  display: none;
+}
+.collapsible-section.is-expanded .cs-track {
+  flex-wrap: wrap;
+  overflow: visible;
+  padding-bottom: 0.5rem;
+}
+
 /* Line clamp for episode descriptions */
 .line-clamp-2 {
   display: -webkit-box;

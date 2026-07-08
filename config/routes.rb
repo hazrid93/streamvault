@@ -7,6 +7,9 @@ Rails.application.routes.draw do
   # Search
   resources :search, only: [:index]
 
+  # Browse by category / genre / sort
+  get "browse", to: "browse#index", as: :browse
+
   # Content detail
   get "content/:type/:imdb_id", to: "content#show", as: :content
   get "content/:type/:imdb_id/status", to: "content#status", as: :content_status
