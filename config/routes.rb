@@ -13,17 +13,6 @@ Rails.application.routes.draw do
   # Person filmography (cast click-through)
   get "person", to: "person#index", as: :person
 
-  # Custom lists / collections
-  resources :lists do
-    member do
-      post :add_item
-      delete :remove_item
-    end
-    collection do
-      get :index_json
-    end
-  end
-
   # Content detail
   get "content/:type/:imdb_id", to: "content#show", as: :content
   get "content/:type/:imdb_id/status", to: "content#status", as: :content_status
