@@ -137,6 +137,16 @@
              class="hidden absolute z-20 p-2 bg-black/80 rounded-lg text-xs text-sv-text-muted space-y-1 border border-white/20"
              style="right: 0; bottom: 2rem; min-width: 14rem; max-height: 14rem; overflow-y: auto;">
           <div data-video-player-target="subtitleOptions"></div>
+          <%# Subtitle sync (offset) — lives in the CC menu %>
+          <div class="mt-2 pt-2 border-t border-white/10">
+            <label class="block mb-1 text-white font-medium">Sync <span data-subtitle-offset-label class="text-sv-accent float-right">+0.0s</span></label>
+            <input type="range" min="-50" max="50" value="0" step="1"
+                   data-action="input->video-player#setSubtitleOffset"
+                   class="w-full accent-indigo-500">
+            <div class="flex justify-between text-[10px] mt-0.5 text-sv-text-muted">
+              <span>-5.0s</span><span>0</span><span>+5.0s</span>
+            </div>
+          </div>
         </div>
       </div>
 

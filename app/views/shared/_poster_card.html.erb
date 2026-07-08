@@ -14,4 +14,25 @@
       <p class="text-xs text-sv-text-muted mt-0.5"><%= item[:year] %></p>
     </div>
   <% end %>
+  <%# Add to list (dropdown) %>
+  <div class="absolute top-2 left-2 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 transition-opacity"
+       data-controller="list-picker"
+       data-list-picker-imdb-id-value="<%= item[:imdb_id] %>"
+       data-list-picker-title-value="<%= item[:title] %>"
+       data-list-picker-poster-url-value="<%= item[:poster_url] %>"
+       data-list-picker-year-value="<%= item[:year] %>"
+       data-list-picker-content-type-value="<%= item[:type] == 'show' ? 'show' : 'movie' %>">
+    <button type="button" data-action="click->list-picker#toggle"
+            class="w-7 h-7 bg-black/60 rounded-full flex items-center justify-center text-white hover:bg-sv-accent transition-colors"
+            title="Add to list">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+    </button>
+    <div data-list-picker-target="menu"
+         class="hidden absolute z-30 left-0 top-9 bg-black/90 border border-white/20 rounded-lg overflow-hidden min-w-[10rem]">
+      <div data-list-picker-target="spinner" class="hidden px-3 py-2 text-xs text-sv-text-muted">Loading…</div>
+      <div data-list-picker-target="list" class="max-h-48 overflow-y-auto"></div>
+      <%= link_to "+ New list", new_list_path(imdb_id: item[:imdb_id], title: item[:title], poster_url: item[:poster_url], year: item[:year], content_type: item[:type] == 'show' ? 'show' : 'movie'),
+            class: "block px-3 py-1.5 text-xs text-sv-accent hover:bg-sv-accent/20 border-t border-white/10" %>
+    </div>
+  </div>
 </div>

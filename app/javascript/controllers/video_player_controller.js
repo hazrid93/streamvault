@@ -82,6 +82,7 @@ export default class extends Controller {
     this.subtitleCues = []
     this.subtitleWindowStart = null
     this.subtitleWindowEnd = null
+    this.subtitleOffset = 0
     this.subtitleLoading = false
     this.subtitleLoadToken = 0
     this.subtitleAbortController = null
@@ -2578,13 +2579,29 @@ export default class extends Controller {
       .replace(/&#39;/g, "'")
   }
 
+  // ── Subtitle offset (sync adjustment) ────────────────────────────
+
+  // Adjust subtitle timing in tenths of a second.  A positive value
+  // delays subtitles (useful when subs arrive too early); negative
+  // advances them.
+  setSubtitleOffset(event) {
+    const tenths = parseInt(event.currentTarget.value, 10)
+    this.subtitleOffset = tenths / 10
+    const label = event.currentTarget.closest("div")?.querySelector("[data-subtitle-offset-label]")
+    if (label) {
+      const secs = (this.subtitleOffset >= 0 ? "+" : "") + this.subtitleOffset.toFixed(1)
+      label.textContent = `${secs}s`
+    }
+  }
+
   updateSubtitleOverlay(currentPos) {
     if (!this.hasSubtitleOverlayTarget) return
     this.ensureSubtitleWindow(currentPos)
     if (this.subtitleCues.length === 0) return
 
+    const effectivePos = currentPos - this.subtitleOffset
     const activeCues = this.subtitleCues
-      .filter((cue) => currentPos >= cue.start && currentPos <= cue.end)
+      .filter((cue) => effectivePos >= cue.start && effectivePos <= cue.end)
       .map((cue) => cue.text)
 
     if (activeCues.length === 0) {

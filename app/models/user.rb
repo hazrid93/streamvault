@@ -8,6 +8,7 @@ class User < ApplicationRecord
   encrypts :realdebrid_api_key, deterministic: false
 
   # Associations
+  has_many :lists, dependent: :destroy
   has_many :library_entries, dependent: :destroy
   has_many :watch_history_entries, dependent: :destroy
   has_many :wishlist_entries, dependent: :destroy
