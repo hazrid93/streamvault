@@ -236,16 +236,29 @@ body {
 
 /* Expandable home sections — toggle between a horizontal carousel
    (collapsed, default) and a wrapping grid (expanded). */
-.collapsible-section .cs-chevron {
-  transition: transform 200ms ease;
+
+/* Carousel nav arrows fade in only on hover/focus, so the collapsed
+   header shows just the title + a single grid toggle — no stray arrows
+   that could be confused with the expand toggle. */
+.collapsible-section .cs-nav {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
 }
-.collapsible-section.is-expanded .cs-chevron {
-  transform: rotate(180deg);
+.collapsible-section:hover .cs-nav,
+.collapsible-section:focus-within .cs-nav {
+  opacity: 1;
+  pointer-events: auto;
 }
-/* Hide the carousel nav arrows while expanded — the grid wraps instead. */
+/* Hide the carousel nav arrows entirely while expanded — the grid wraps. */
 .collapsible-section.is-expanded .cs-nav {
   display: none;
 }
+/* Toggle button shows a grid icon (expand) when collapsed and a list icon
+   (collapse) when expanded — distinct from the carousel scroll arrows. */
+.collapsible-section .cs-icon-list { display: none; }
+.collapsible-section.is-expanded .cs-icon-grid { display: none; }
+.collapsible-section.is-expanded .cs-icon-list { display: inline-block; }
 .collapsible-section.is-expanded .cs-track {
   flex-wrap: wrap;
   overflow: visible;
