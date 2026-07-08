@@ -44,7 +44,8 @@ export default class extends Controller {
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
-      "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay"
+      "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay",
+      "speedButton", "speedMenu"
     ]
   }
   static get values() {
@@ -131,6 +132,7 @@ export default class extends Controller {
     this.element.addEventListener("mousemove", this.mouseMoveHandler)
     document.addEventListener("keydown", this.keydownHandler)
     document.addEventListener("click", this.documentClickHandler)
+    this.renderSpeedControls()
     // Video event listeners
     this.videoTarget.addEventListener("click", this.videoClickHandler)
     this.videoTarget.addEventListener("play", this.updatePlayIconHandler)
@@ -1691,12 +1693,89 @@ export default class extends Controller {
   }
 
   onKeyDown(event) {
-    if (event.key !== " " && event.key !== "Spacebar") return
     if (event.repeat || this.isInteractiveElement(event.target)) return
 
-    event.preventDefault()
-    this.togglePlay()
+    switch (event.key) {
+      case " ":
+      case "Spacebar":
+        event.preventDefault()
+        this.togglePlay()
+        this.showOverlayUi()
+        break
+      case "ArrowLeft":
+        event.preventDefault()
+        this.skip(-10)
+        this.showOverlayUi()
+        break
+      case "ArrowRight":
+        event.preventDefault()
+        this.skip(10)
+        this.showOverlayUi()
+        break
+      case "f":
+      case "F":
+        event.preventDefault()
+        this.toggleFullscreen()
+        break
+      case "m":
+      case "M":
+        event.preventDefault()
+        this.toggleMute()
+        break
+    }
+  }
+
+  // Skip forward/backward by a number of seconds (±10s default).
+  skip(deltaSeconds) {
+    const target = Math.max(0, Math.min(this.knownDuration, this.currentPlaybackPosition() + deltaSeconds))
+    this.restartPlaybackAt(Math.floor(target))
+  }
+
+  skipBack() {
+    this.skip(-10)
     this.showOverlayUi()
+  }
+
+  skipForward() {
+    this.skip(10)
+    this.showOverlayUi()
+  }
+
+  // ── Playback speed ────────────────────────────────────────────────
+
+  toggleSpeedMenu(event) {
+ if (event) event.stopPropagation()
+    this.toggleTrackMenu(this.speedMenuTarget, this.hasAudioMenuTarget ? this.audioMenuTarget : null)
+    if (this.hasSubtitleMenuTarget) this.subtitleMenuTarget.classList.add("hidden")
+    this.showOverlayUi()
+  }
+
+  selectSpeed(event) {
+    const speed = parseFloat(event.currentTarget.dataset.speed)
+    if (!Number.isFinite(speed)) return
+    this.videoTarget.playbackRate = speed
+    this.renderSpeedControls()
+    this.closeTrackMenus()
+  }
+
+  renderSpeedControls() {
+    if (!this.hasSpeedMenuTarget) return
+    const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2]
+    const current = this.videoTarget.playbackRate || 1
+    this.speedMenuTarget.replaceChildren()
+    speeds.forEach((speed) => {
+      const button = this.trackOptionButton({
+        label: speed === 1 ? "Normal" : `${speed}×`,
+        selected: Math.abs((this.videoTarget.playbackRate || 1) - speed) < 0.01,
+        datasetName: "speed",
+        datasetValue: speed,
+        action: "click->video-player#selectSpeed"
+      })
+      this.speedMenuTarget.appendChild(button)
+    })
+    if (this.hasSpeedButtonTarget) {
+      this.speedButtonTarget.textContent = current === 1 ? "1×" : `${current}×`
+    }
   }
 
   isInteractiveElement(element) {
@@ -2539,18 +2618,21 @@ export default class extends Controller {
   closeTrackMenus() {
     if (this.hasAudioMenuTarget) this.audioMenuTarget.classList.add("hidden")
     if (this.hasSubtitleMenuTarget) this.subtitleMenuTarget.classList.add("hidden")
+    if (this.hasSpeedMenuTarget) this.speedMenuTarget.classList.add("hidden")
     this.scheduleUiHide()
   }
 
   trackMenuOpen() {
     return (this.hasAudioMenuTarget && !this.audioMenuTarget.classList.contains("hidden")) ||
-      (this.hasSubtitleMenuTarget && !this.subtitleMenuTarget.classList.contains("hidden"))
+      (this.hasSubtitleMenuTarget && !this.subtitleMenuTarget.classList.contains("hidden")) ||
+      (this.hasSpeedMenuTarget && !this.speedMenuTarget.classList.contains("hidden"))
   }
 
   onDocumentClick(event) {
     if (!this.trackMenuOpen()) return
     if (this.hasAudioControlsTarget && this.audioControlsTarget.contains(event.target)) return
     if (this.hasSubtitleControlsTarget && this.subtitleControlsTarget.contains(event.target)) return
+    if (this.hasSpeedButtonTarget && this.speedButtonTarget.contains(event.target)) return
 
     this.closeTrackMenus()
   }

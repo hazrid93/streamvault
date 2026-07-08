@@ -88,6 +88,15 @@
         <svg data-video-player-target="pauseIcon" class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
       </button>
 
+      <%# Skip back 10s %>
+      <button data-action="click->video-player#skipBack" class="hover:text-indigo-400 transition-colors" title="Back 10s (←)">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M20 19l-7-7 7-7"/></svg>
+      </button>
+      <%# Skip forward 10s %>
+      <button data-action="click->video-player#skipForward" class="hover:text-indigo-400 transition-colors" title="Forward 10s (→)">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M4 5l7 7-7 7"/></svg>
+      </button>
+
       <%# Time display %>
       <span data-video-player-target="currentTime" class="tabular-nums"><%= player_time(@resume_at) %></span>
       <span class="text-white/40">/</span>
@@ -133,6 +142,17 @@
       <button data-action="click->video-player#toggleFullscreen" class="hover:text-indigo-400 transition-colors">
         <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
       </button>
+
+      <%# Playback speed %>
+      <div class="relative">
+        <button type="button" data-video-player-target="speedButton"
+                data-action="click->video-player#toggleSpeedMenu"
+                class="px-2 py-1 bg-black/60 rounded text-xs text-sv-text-muted hover:text-white transition-colors tabular-nums"
+                title="Playback speed">1×</button>
+        <div data-video-player-target="speedMenu"
+             class="hidden absolute z-20 p-2 bg-black/80 rounded-lg text-xs text-sv-text-muted space-y-1 border border-white/20"
+             style="right: 0; bottom: 2rem; min-width: 8rem;"></div>
+      </div>
     </div>
   </div>
 

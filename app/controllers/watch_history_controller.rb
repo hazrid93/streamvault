@@ -6,11 +6,15 @@ class WatchHistoryController < ApplicationController
   def index
     @page = (params[:page] || 1).to_i.clamp(1, Float::INFINITY)
     @per_page = (params[:per_page] || 25).to_i.clamp(1, 100)
+    @sort = (params[:sort].presence || "recent").to_s
+    @filter = (params[:filter].presence || "all").to_s
 
     # Use policy_scope for consistency with library/wishlist/home — if a
     # future policy adds a scope condition (e.g. hide soft-deleted), this
     # controller will honour it rather than silently bypassing it.
-    entries = policy_scope(WatchHistoryEntry).recently_watched
+    entries = policy_scope(WatchHistoryEntry)
+    entries = apply_filter(entries, @filter)
+    entries = apply_sort(entries, @sort)
 
     @total = entries.count
     @total_pages = (@total.to_f / @per_page).ceil
@@ -46,5 +50,31 @@ class WatchHistoryController < ApplicationController
       current_user.episode_progresses.delete_all
     end
     redirect_to watch_history_index_path, notice: "Watch history cleared."
+  end
+
+  private
+
+  COMPLETED_THRESHOLD = 95
+
+  def apply_filter(scope, filter)
+    case filter
+    when "in_progress"
+      scope.where("progress_percentage < ?", COMPLETED_THRESHOLD)
+    when "completed"
+      scope.where("progress_percentage >= ?", COMPLETED_THRESHOLD)
+    else
+      scope
+    end
+  end
+
+  def apply_sort(scope, sort)
+    case sort
+    when "title"
+      scope.order(title: :asc)
+    when "progress"
+      scope.order(progress_percentage: :desc)
+    else
+      scope.recently_watched
+    end
   end
 end

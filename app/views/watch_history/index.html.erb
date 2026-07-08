@@ -6,7 +6,25 @@
     <% end %>
   </div>
 
-  <% if @entries.any? %>
+  <% if @entries.any? || params[:filter].present? || params[:sort].present? %>
+    <%# Sort & filter bar %>
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <div class="inline-flex flex-wrap gap-1">
+        <% [["all", "All"], ["in_progress", "In Progress"], ["completed", "Completed"]].each do |val, label| %>
+          <% active = @filter == val %>
+          <%= link_to label, watch_history_index_path(request.query_parameters.merge(filter: val, page: 1)),
+                class: "px-3 py-1 rounded-full text-xs font-medium transition-colors border #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white'}" %>
+        <% end %>
+      </div>
+      <div class="inline-flex flex-wrap gap-1">
+        <% [["recent", "Recent"], ["title", "Title"], ["progress", "Progress"]].each do |val, label| %>
+          <% active = @sort == val %>
+          <%= link_to label, watch_history_index_path(request.query_parameters.merge(sort: val, page: 1)),
+                class: "px-3 py-1 rounded-full text-xs font-medium transition-colors border #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white'}" %>
+        <% end %>
+      </div>
+    </div>
+
     <%# Result count and page size %>
     <div class="flex items-center justify-between mb-4">
       <p class="text-sm text-sv-text-muted">
@@ -17,7 +35,7 @@
           <% if size == @per_page %>
             <span class="px-2 py-1 rounded bg-sv-accent text-white text-xs font-medium"><%= size %></span>
           <% else %>
-            <%= link_to size, watch_history_index_path(per_page: size, page: 1), class: "px-2 py-1 rounded bg-sv-surface text-sv-text-muted hover:text-white text-xs transition-colors" %>
+            <%= link_to size, watch_history_index_path(request.query_parameters.merge(per_page: size, page: 1)), class: "px-2 py-1 rounded bg-sv-surface text-sv-text-muted hover:text-white text-xs transition-colors" %>
           <% end %>
         <% end %>
       </div>
@@ -53,7 +71,7 @@
     <% if @total_pages > 1 %>
       <nav class="flex items-center justify-center gap-2 mt-8">
         <% if @page > 1 %>
-          <%= link_to "&larr; Previous".html_safe, watch_history_index_path(page: @page - 1, per_page: @per_page), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
+          <%= link_to "&larr; Previous".html_safe, watch_history_index_path(request.query_parameters.merge(page: @page - 1)), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
         <% end %>
         <% visible = [] %>
         <% visible << 1 unless @total_pages <= 1 %>
@@ -65,12 +83,12 @@
           <% if p == @page %>
             <span class="px-3 py-2 rounded-lg bg-sv-accent text-white text-sm font-medium"><%= p %></span>
           <% else %>
-            <%= link_to p, watch_history_index_path(page: p, per_page: @per_page), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
+            <%= link_to p, watch_history_index_path(request.query_parameters.merge(page: p)), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
           <% end %>
           <% prev_p = p %>
         <% end %>
         <% if @page < @total_pages %>
-          <%= link_to "Next &rarr;".html_safe, watch_history_index_path(page: @page + 1, per_page: @per_page), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
+          <%= link_to "Next &rarr;".html_safe, watch_history_index_path(request.query_parameters.merge(page: @page + 1)), class: "px-3 py-2 rounded-lg bg-sv-surface text-sv-text hover:bg-sv-surface-hover transition-colors text-sm" %>
         <% end %>
       </nav>
     <% end %>
