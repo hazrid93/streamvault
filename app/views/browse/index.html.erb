@@ -71,12 +71,9 @@
 
   <%# Results grid %>
   <% if @items.any? %>
-    <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-4">
+    <div id="browse_grid" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-4">
       <% @items.each do |item| %>
-        <%= render "shared/poster_card",
-              item: item,
-              link_path: content_path(type: item[:type].presence || @type, imdb_id: item[:imdb_id]),
-              variant: "grid" %>
+        <%= render "browse/poster", item: item, type: @type %>
       <% end %>
     </div>
   <% elsif @error.blank? %>
@@ -87,34 +84,12 @@
     </div>
   <% end %>
 
-  <%# Pagination (only when not post-filtering) %>
-  <% if !@post_filtering && (@has_prev || @has_next) %>
-    <div class="flex items-center justify-center gap-4 mt-10">
-      <% if @has_prev %>
-        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page - 1),
-              class: "btn-secondary" do %>
-          <span class="flex items-center gap-1">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-            Previous
-          </span>
-        <% end %>
-      <% else %>
-        <span class="btn-secondary opacity-40 cursor-not-allowed">Previous</span>
-      <% end %>
-
-      <span class="text-sm text-sv-text-muted px-2">Page <%= @page %></span>
-
-      <% if @has_next %>
-        <%= link_to browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page + 1),
-              class: "btn-secondary" do %>
-          <span class="flex items-center gap-1">
-            Next
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-          </span>
-        <% end %>
-      <% else %>
-        <span class="btn-secondary opacity-40 cursor-not-allowed">Next</span>
-      <% end %>
+  <%# Load more (infinite scroll via Turbo Stream) %>
+  <% if !@post_filtering && @has_next %>
+    <div id="browse_pagination" class="flex items-center justify-center mt-10">
+      <%= link_to "Load more", browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page + 1),
+            data: { turbo_stream: true },
+            class: "btn-secondary" %>
     </div>
   <% end %>
 </div>

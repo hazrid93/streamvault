@@ -42,6 +42,19 @@ class ContentController < ApplicationController
         .find_by(imdb_id: @imdb_id, content_type: :movie)
         &.progress_percentage
     end
+
+    # Similar titles via TMDB recommendations.  Wrapped so a TMDB outage
+    # or missing token never breaks the detail page — the rail just
+    # doesn't render.
+    @similar = []
+    begin
+      tmdb = TmdbService.new
+      recs = tmdb.recommendations_for_imdb_id(@imdb_id)
+      @similar = recs.success? ? recs.data.first(20) : []
+    rescue StandardError => e
+      Rails.logger.error("[ContentController] similar titles error: #{e.message}")
+      @similar = []
+    end
   end
 
   def status

@@ -1,0 +1,6 @@
+<%# A single browse poster card. Shared by the initial HTML render and the
+    turbo_stream append (infinite scroll). %>
+<%= render "shared/poster_card",
+      item: item,
+      link_path: content_path(type: item[:type].presence || type, imdb_id: item[:imdb_id]),
+      variant: "grid" %>

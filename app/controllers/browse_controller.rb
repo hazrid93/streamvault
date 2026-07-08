@@ -82,6 +82,11 @@ class BrowseController < ApplicationController
 
     @genres = TorrentioService.genres_for(@type)
     @years = (1990..Date.today.year).to_a.reverse
+
+    respond_to do |format|
+      format.html
+      format.turbo_stream
+    end
   end
 
   private

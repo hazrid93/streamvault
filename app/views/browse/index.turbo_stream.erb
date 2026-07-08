@@ -1,0 +1,15 @@
+<%# Infinite-scroll append: add the new page's posters to the grid, then
+    replace the "load more" frame with the next page's link (or nothing). %>
+<%= turbo_stream.append "browse_grid" do %>
+  <% @items.each do |item| %>
+    <%= render "browse/poster", item: item, type: @type %>
+  <% end %>
+<% end %>
+
+<%= turbo_stream.replace "browse_pagination" do %>
+  <% if !@post_filtering && @has_next %>
+    <%= link_to "Load more", browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page + 1),
+          data: { turbo_stream: true },
+          class: "btn-secondary" %>
+  <% end %>
+<% end %>
