@@ -7,5 +7,5 @@ class ListItem < ApplicationRecord
 
   validates :imdb_id, presence: true
   validates :title, presence: true
-  validates :imdb_id, uniqueness: { scope: :list_id, message: "is already in this list" }
+  validates :imdb_id, uniqueness: { scope: :list_id }
 end
