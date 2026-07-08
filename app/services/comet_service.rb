@@ -23,8 +23,10 @@ require "json"
 # RealDebrid direct download URL — same follow-redirect flow as Torrentio.
 class CometService
   include StreamCompatibility
+  include Cacheable
   LANGUAGE_PATTERNS = TorrentioService::LANGUAGE_PATTERNS
   QUALITY_SORT = TorrentioService::QUALITY_SORT
+  STREAMS_CACHE_TTL = 1.hour
 
   def self.comet_url
     ENV.fetch("COMET_URL", "")
@@ -51,30 +53,51 @@ class CometService
     return ServiceResult.failure("IMDB ID is required") if imdb_id.blank?
     return ServiceResult.failure("Comet URL not configured") if self.class.comet_url.blank?
 
+    # Stream listings depend on the user's RealDebrid account (Comet checks
+    # RD instant availability per key, and resolve URLs embed the key), so
+    # cache per-RD-key-hash.  Stale-while-revalidate: a stale listing is
+    # served instantly and refreshed in the background.
+    cache_key = "comet:streams:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
+      fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
+    end
+
+    return ServiceResult.success([]) if parsed.nil?
+
+    # Apply per-request language filtering + sorting on the cached (or
+    # freshly fetched) parsed streams — cheap, no upstream call.
+    language_priority = normalize_language_priority(default_language, preferred_languages)
+    result = parsed
+    result = filter_by_preferred_languages(result, language_priority) if language_priority.present?
+    result = sort_streams(result, language_priority: language_priority)
+    ServiceResult.success(result)
+  end
+
+  # Fetch + parse raw streams from Comet (no language filtering).  Returns
+  # the parsed array, or nil on error (nil is intentionally not cached so
+  # a transient Comet outage doesn't stick).  An empty 404 returns []
+  # (cacheable — avoids re-hammering Comet for content with no streams).
+  def fetch_streams_uncached(imdb_id, type, season: nil, episode: nil)
     path = build_stream_path(imdb_id, type, season: season, episode: episode)
     response = @comet.get(path)
 
     if response.success? && response.body.is_a?(Hash) && response.body["streams"]
-      parsed = parse_streams(response.body["streams"])
-      language_priority = normalize_language_priority(default_language, preferred_languages)
-      parsed = filter_by_preferred_languages(parsed, language_priority) if language_priority.present?
-      parsed = sort_streams(parsed, language_priority: language_priority)
-      ServiceResult.success(parsed)
+      parse_streams(response.body["streams"])
     elsif response.status == 404
-      ServiceResult.success([])
+      []
     else
       Rails.logger.error("[CometService] streams request failed: HTTP #{response.status} for #{path}")
-      ServiceResult.failure("Failed to fetch streams from Comet (HTTP #{response.status})")
+      nil
     end
   rescue Faraday::TimeoutError
     Rails.logger.error("[CometService] streams request timed out for #{path}")
-    ServiceResult.failure("Comet stream request timed out")
+    nil
   rescue Faraday::ConnectionFailed => e
     Rails.logger.error("[CometService] streams connection failed: #{e.message}")
-    ServiceResult.failure("Could not connect to Comet")
+    nil
   rescue StandardError => e
     Rails.logger.error("[CometService] streams error: #{e.message}")
-    ServiceResult.failure("An unexpected error occurred")
+    nil
   end
 
   # The base URL for resolve-URL origin validation.  Comet's playback
@@ -84,6 +107,14 @@ class CometService
   end
 
   private
+
+  # Stable, non-reversible hash of the RD key for cache isolation.  Keying
+  # by the hash (not the raw key) avoids leaking the API key in cache keys
+  # or logs, while still giving each account its own cache namespace.
+  def rd_key_hash
+    return "none" if @rd_api_key.blank?
+    Digest::SHA256.hexdigest(@rd_api_key)[0, 16]
+  end
 
   def build_stream_path(imdb_id, type, season: nil, episode: nil)
     config = build_config

@@ -2,6 +2,7 @@
 
 class TorrentioService
   include StreamCompatibility
+  include Cacheable
   TORRENTIO_URL = ENV.fetch("TORRENTIO_API_BASE_URL", "https://torrentio.strem.fun")
   CINEMETA_URL = "https://v3-cinemeta.strem.io"
   QUALITY_SORT = { "4K" => 0, "1080p" => 1, "720p" => 2, "480p" => 3, "Unknown" => 4 }.freeze
@@ -78,6 +79,20 @@ class TorrentioService
   def search(query)
     return ServiceResult.failure("Query cannot be blank") if query.blank?
 
+    # Search results change rarely for a given query — cache in the DB
+    # with stale-while-revalidate so repeat searches are instant.
+    cache_key = "cinemeta:search:#{query.downcase}"
+    results = cached_fetch(cache_key, ttl: SEARCH_CACHE_TTL) do
+      fetch_search_uncached(query)
+    end
+
+    ServiceResult.success(results || [])
+  rescue StandardError => e
+    Rails.logger.error("TorrentioService#search error: #{e.message}")
+    ServiceResult.failure("Search failed")
+  end
+
+  def fetch_search_uncached(query)
     encoded = URI.encode_www_form_component(query)
     results = []
 
@@ -88,74 +103,95 @@ class TorrentioService
     rescue Faraday::TimeoutError, Faraday::ConnectionFailed
     end
 
-    ServiceResult.success(results)
-  rescue StandardError => e
-    Rails.logger.error("TorrentioService#search error: #{e.message}")
-    ServiceResult.failure("Search failed")
+    results
   end
 
   def streams(imdb_id, type, season: nil, episode: nil, title: nil, preferred_languages: nil, default_language: nil)
     return ServiceResult.failure("IMDB ID is required") if imdb_id.blank?
 
+    # Stream listings depend on the user's RealDebrid account (Torrentio
+    # embeds the RD key in the path and checks RD instant availability
+    # per key), so cache per-RD-key-hash.  Stale-while-revalidate.
+    cache_key = "torrentio:streams:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
+      fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
+    end
+
+    return ServiceResult.success([]) if parsed.nil?
+
+    language_priority = normalize_language_priority(default_language, preferred_languages)
+    result = parsed
+    result = filter_by_preferred_languages(result, language_priority, default_language: default_language) if language_priority.present?
+    result = sort_streams(result, language_priority: language_priority)
+    ServiceResult.success(result)
+  end
+
+  # Fetch + parse raw streams from Torrentio (no language filtering).
+  # Returns the parsed array, [] for a 404, or nil on error (not cached).
+  def fetch_streams_uncached(imdb_id, type, season: nil, episode: nil)
     path = build_stream_path(imdb_id, type, season: season, episode: episode)
     response = @torrentio.get(path)
 
     if response.success? && response.body.is_a?(Hash) && response.body["streams"]
-      parsed = parse_streams(response.body["streams"])
-      language_priority = normalize_language_priority(default_language, preferred_languages)
-      parsed = filter_by_preferred_languages(parsed, language_priority, default_language: default_language) if language_priority.present?
-      parsed = sort_streams(parsed, language_priority: language_priority)
-      ServiceResult.success(parsed)
+      parse_streams(response.body["streams"])
     elsif response.status == 404
-      ServiceResult.success([])
+      []
     else
       Rails.logger.error("[TorrentioService] streams request failed: HTTP #{response.status} for #{redact_path(path)}")
-      ServiceResult.failure("Failed to fetch streams (HTTP #{response.status})")
+      nil
     end
   rescue Faraday::TimeoutError
     Rails.logger.error("[TorrentioService] streams request timed out for #{redact_path(path)}")
-    ServiceResult.failure("Stream request timed out")
+    nil
   rescue Faraday::ConnectionFailed => e
     Rails.logger.error("[TorrentioService] streams connection failed: #{e.message}")
-    ServiceResult.failure("Could not connect to stream service")
+    nil
   rescue StandardError => e
     Rails.logger.error("[TorrentioService] streams error: #{e.message}")
-    ServiceResult.failure("An unexpected error occurred")
+    nil
   end
 
-  METADATA_CACHE_TTL = 1.hour
-  CATALOG_CACHE_TTL = 1.hour
+  METADATA_CACHE_TTL = 1.day
+  CATALOG_CACHE_TTL = 1.day
+  SEARCH_CACHE_TTL = 6.hours
+  STREAMS_CACHE_TTL = 1.hour
+  OMDB_CACHE_TTL = 7.days
 
   def metadata(imdb_id, type)
     return ServiceResult.failure("IMDB ID is required") if imdb_id.blank?
 
-    # Metadata changes rarely — cache it to avoid a 1-10s cinemeta
-    # round-trip on every resume. The cache is shared across all
-    # users via solid_cache_store (database-backed).
-    cache_key = "torrentio/meta/#{type}/#{imdb_id}"
-    cached = Rails.cache.read(cache_key)
-    return ServiceResult.success(cached) if cached
+    # Title metadata changes rarely — cache it in the DB (survives
+    # restarts, shared across users) with stale-while-revalidate: a
+    # stale hit is served instantly and refreshed in the background.
+    cache_key = "cinemeta:meta:#{type}/#{imdb_id}"
+    data = cached_fetch(cache_key, ttl: METADATA_CACHE_TTL) do
+      fetch_metadata_uncached(imdb_id, type)
+    end
 
+    return ServiceResult.failure("Metadata not found") if data.nil?
+    ServiceResult.success(data)
+  end
+
+  def fetch_metadata_uncached(imdb_id, type)
     cinemeta_type = type.to_s == "show" ? "series" : type.to_s
     response = @cinemeta.get("meta/#{cinemeta_type}/#{imdb_id}.json")
 
     if response.success? && response.body.is_a?(Hash) && response.body["meta"]
       result = normalize_cinemeta_meta(response.body["meta"], type)
       result.merge!(fetch_omdb_ratings(imdb_id))
-      Rails.cache.write(cache_key, result, expires_in: METADATA_CACHE_TTL)
-      ServiceResult.success(result)
+      result
     else
-      ServiceResult.failure("Metadata not found")
+      nil
     end
   rescue Faraday::TimeoutError
     Rails.logger.error("[TorrentioService] metadata request timed out for #{imdb_id}")
-    ServiceResult.failure("Metadata request timed out")
+    nil
   rescue Faraday::ConnectionFailed => e
     Rails.logger.error("[TorrentioService] metadata connection failed: #{e.message}")
-    ServiceResult.failure("Could not connect to metadata service")
+    nil
   rescue StandardError => e
     Rails.logger.error("TorrentioService#metadata error: #{e.message}")
-    ServiceResult.failure("Failed to fetch metadata")
+    nil
   end
   def popular(type, limit: 20)
     catalog(type, "top", limit: limit)
@@ -184,24 +220,32 @@ class TorrentioService
       "catalog/#{cinemeta_type}/#{catalog_id}.json"
     end
 
-    cache_key = "torrentio/catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{skip}/#{limit}"
-    # Use fetch with race_condition_ttl so concurrent cache misses (e.g.
-    # multiple users hitting home at once on a cold cache) coalesce onto
-    # a single HTTP call instead of spawning N×threads.
-    result = Rails.cache.fetch(cache_key, expires_in: CATALOG_CACHE_TTL, race_condition_ttl: 30.seconds) do
-      response = @cinemeta.get(path)
-      if response.success? && response.body.is_a?(Hash)
-        metas = response.body["metas"] || []
-        metas = metas.first(limit) if limit && limit.positive?
-        metas.map { |m| normalize_cinemeta(m, type.to_s) }
-      else
-        []
-      end
+    # DB-backed stale-while-revalidate: a stale catalog page is served
+    # instantly and refreshed in the background.  The advisory lock
+    # coalesces concurrent refreshes onto a single HTTP call.
+    cache_key = "cinemeta:catalog/#{cinemeta_type}/#{catalog_id}/#{genre}/#{skip}/#{limit}"
+    result = cached_fetch(cache_key, ttl: CATALOG_CACHE_TTL) do
+      fetch_catalog_uncached(path, type, limit)
     end
-    ServiceResult.success(result)
+
+    ServiceResult.success(result || [])
   rescue StandardError => e
     Rails.logger.error("TorrentioService#catalog error: #{e.message}")
     ServiceResult.success([])
+  end
+
+  def fetch_catalog_uncached(path, type, limit)
+    response = @cinemeta.get(path)
+    if response.success? && response.body.is_a?(Hash)
+      metas = response.body["metas"] || []
+      metas = metas.first(limit) if limit && limit.positive?
+      metas.map { |m| normalize_cinemeta(m, type.to_s) }
+    else
+      []
+    end
+  rescue StandardError => e
+    Rails.logger.error("TorrentioService#fetch_catalog_uncached error: #{e.message}")
+    []
   end
 
   # Genres available for a given content type.
@@ -263,6 +307,13 @@ class TorrentioService
       .map(&:upcase)
       .select { |language| LANGUAGE_PATTERNS.key?(language) }
       .uniq
+  end
+
+  # Stable, non-reversible hash of the RD key for per-account cache
+  # isolation (avoids leaking the raw key in cache keys/logs).
+  def rd_key_hash
+    return "none" if @rd_api_key.blank?
+    Digest::SHA256.hexdigest(@rd_api_key)[0, 16]
   end
 
   def build_stream_path(imdb_id, type, season: nil, episode: nil)
@@ -412,9 +463,17 @@ class TorrentioService
     api_key = ENV.fetch("OMDB_API_KEY", "")
     return {} if api_key.blank? || api_key == "your_omdb_api_key_here"
 
+    # OMDb ratings are effectively static — cache in the DB for a week.
+    cache_key = "omdb:ratings/#{imdb_id}"
+    cached_fetch(cache_key, ttl: OMDB_CACHE_TTL) do
+      fetch_omdb_ratings_uncached(imdb_id, api_key)
+    end || {}
+  end
+
+  def fetch_omdb_ratings_uncached(imdb_id, api_key)
     response = omdb_connection.get("", { i: imdb_id, apikey: api_key, tomatoes: "true" })
     data = response.body
-    return {} unless data.is_a?(Hash) && data["Response"] == "True"
+    return nil unless data.is_a?(Hash) && data["Response"] == "True"
 
     rt_rating = nil
     if data["Ratings"].is_a?(Array)
@@ -428,7 +487,7 @@ class TorrentioService
       metascore: data["Metascore"] != "N/A" ? data["Metascore"] : nil
     }
   rescue Faraday::TimeoutError, Faraday::ConnectionFailed, StandardError
-    {}
+    nil
   end
 
   # Memoize the OMDb connection so repeated metadata calls reuse it

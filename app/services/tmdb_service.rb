@@ -15,6 +15,8 @@ require "set"
 #   /movie/{tmdb_id}/external_ids           → get IMDb ID back
 #   /tv/{tmdb_id}/external_ids
 class TmdbService
+  include Cacheable
+  RECOMMENDATIONS_CACHE_TTL = 1.day
   BASE_URL = "https://api.themoviedb.org/3"
   POSTER_BASE = "https://image.tmdb.org/t/p/w500"
 
@@ -41,19 +43,36 @@ class TmdbService
   def recommendations_for_imdb_id(imdb_id)
     return ServiceResult.failure("IMDb ID required") if imdb_id.blank?
 
+    cache_key = "tmdb:recommendations/#{imdb_id}"
+    results = cached_fetch(cache_key, ttl: RECOMMENDATIONS_CACHE_TTL) do
+      fetch_recommendations_uncached(imdb_id)
+    end
+
+    ServiceResult.success(results || [])
+  rescue Faraday::TimeoutError
+    Rails.logger.error("[TmdbService] request timed out")
+    ServiceResult.failure("TMDB request timed out")
+  rescue Faraday::ConnectionFailed => e
+    Rails.logger.error("[TmdbService] connection failed: #{e.message}")
+    ServiceResult.failure("Could not connect to TMDB")
+  rescue StandardError => e
+    Rails.logger.error("[TmdbService] error: #{e.message}")
+    ServiceResult.failure("TMDB error: #{e.message}")
+  end
+
+  def fetch_recommendations_uncached(imdb_id)
     tmdb_info = find_by_imdb_id(imdb_id)
-    return ServiceResult.failure("Not found on TMDB") if tmdb_info.nil?
+    return nil if tmdb_info.nil?
 
     tmdb_id = tmdb_info[:tmdb_id]
     media_type = tmdb_info[:type]
 
     recs = fetch_recommendations(tmdb_id, media_type)
-    return ServiceResult.success([]) if recs.empty?
+    return [] if recs.empty?
 
-    # Resolve IMDb IDs for all recommendations in one batch
     imdb_ids = recs.map { |r| fetch_imdb_id(r[:tmdb_id], media_type) }
 
-    results = recs.zip(imdb_ids).map do |rec, imdb_id|
+    recs.zip(imdb_ids).map do |rec, imdb_id|
       next nil if imdb_id.blank?
       {
         tmdb_id: rec[:tmdb_id],
@@ -64,17 +83,9 @@ class TmdbService
         year: rec[:year]
       }
     end.compact
-
-    ServiceResult.success(results)
-  rescue Faraday::TimeoutError
-    Rails.logger.error("[TmdbService] request timed out")
-    ServiceResult.failure("TMDB request timed out")
-  rescue Faraday::ConnectionFailed => e
-    Rails.logger.error("[TmdbService] connection failed: #{e.message}")
-    ServiceResult.failure("Could not connect to TMDB")
-  rescue StandardError => e
-    Rails.logger.error("[TmdbService] error: #{e.message}")
-    ServiceResult.failure("TMDB error: #{e.message}")
+  rescue Faraday::TimeoutError, Faraday::ConnectionFailed, StandardError => e
+    Rails.logger.error("[TmdbService] recommendations fetch failed: #{e.message}")
+    nil
   end
 
   # Given a person's name, return their filmography (movies + TV)
@@ -87,31 +98,38 @@ class TmdbService
   def filmography_for_name(name)
     return ServiceResult.failure("Name required") if name.blank?
 
-    cache_key = "tmdb/filmography/#{name.downcase}"
-    Rails.cache.fetch(cache_key, expires_in: 6.hours) do
-      person_id = search_person(name)
-      return ServiceResult.success([]) unless person_id
-
-      credits = fetch_combined_credits(person_id)
-      return ServiceResult.success([]) if credits.empty?
-
-      top = credits.sort_by { |c| c[:popularity].to_f }.reverse.first(18)
-      results = top.map do |c|
-        imdb_id = fetch_imdb_id(c[:tmdb_id], c[:media_type])
-        next nil if imdb_id.blank?
-        {
-          imdb_id: imdb_id,
-          tmdb_id: c[:tmdb_id],
-          title: c[:title],
-          poster_url: c[:poster_url],
-          type: c[:media_type] == "movie" ? "movie" : "show",
-          year: c[:year],
-          character: c[:character]
-        }
-      end.compact
-
-      ServiceResult.success(results)
+    cache_key = "tmdb:filmography/#{name.downcase}"
+    results = cached_fetch(cache_key, ttl: 6.hours) do
+      fetch_filmography_uncached(name)
     end
+
+    ServiceResult.success(results || [])
+  end
+
+  def fetch_filmography_uncached(name)
+    person_id = search_person(name)
+    return [] unless person_id
+
+    credits = fetch_combined_credits(person_id)
+    return [] if credits.empty?
+
+    top = credits.sort_by { |c| c[:popularity].to_f }.reverse.first(18)
+    top.map do |c|
+      imdb_id = fetch_imdb_id(c[:tmdb_id], c[:media_type])
+      next nil if imdb_id.blank?
+      {
+        imdb_id: imdb_id,
+        tmdb_id: c[:tmdb_id],
+        title: c[:title],
+        poster_url: c[:poster_url],
+        type: c[:media_type] == "movie" ? "movie" : "show",
+        year: c[:year],
+        character: c[:character]
+      }
+    end.compact
+  rescue Faraday::TimeoutError, Faraday::ConnectionFailed, StandardError => e
+    Rails.logger.error("[TmdbService] filmography fetch failed: #{e.message}")
+    nil
   end
 
   private

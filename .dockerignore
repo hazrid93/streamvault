@@ -30,6 +30,9 @@
 /tmp/storage/*
 !/tmp/storage/.keep
 
+# Ignore local runtime data (e.g. postgres data dir mounted as a volume).
+/data
+
 # Ignore assets.
 /node_modules/
 /app/assets/builds/*
