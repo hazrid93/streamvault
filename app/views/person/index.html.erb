@@ -1,0 +1,27 @@
+<div class="px-6 py-8">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-white"><%= @name.presence || "Person" %></h1>
+    <%= link_to "Back", :back, class: "text-sm text-sv-accent hover:underline" %>
+  </div>
+
+  <% if @items.any? %>
+    <p class="text-sm text-sv-text-muted mb-6"><%= pluralize(@items.size, "title") %></p>
+    <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-4">
+      <% @items.each do |item| %>
+        <%= render "shared/poster_card",
+              item: item,
+              link_path: content_path(type: item[:type].presence || "movie", imdb_id: item[:imdb_id]),
+              variant: "grid" %>
+      <% end %>
+    </div>
+  <% elsif @name.present? %>
+    <div class="text-center py-20 text-sv-text-muted">
+      <p class="text-lg">No titles found for "<%= @name %>"</p>
+      <p class="text-sm mt-1">TMDB may not have this person indexed.</p>
+    </div>
+  <% else %>
+    <div class="text-center py-20 text-sv-text-muted">
+      <p class="text-lg">Search for a person</p>
+    </div>
+  <% end %>
+</div>

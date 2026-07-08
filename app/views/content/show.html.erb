@@ -61,7 +61,11 @@
           <p class="text-sv-text mt-4"><%= @metadata[:plot] %></p>
         <% end %>
         <% if @metadata[:actors] %>
-          <p class="text-sv-text-muted mt-2 text-sm"><span class="text-sv-text">Cast:</span> <%= @metadata[:actors] %></p>
+          <p class="text-sv-text-muted mt-2 text-sm"><span class="text-sv-text">Cast:</span>
+            <% @metadata[:actors].split(",").map(&:strip).reject(&:blank?).each_with_index do |actor, idx| %>
+              <%= ", " if idx > 0 %><%= link_to actor, person_path(name: actor), class: "text-sv-text-muted hover:text-sv-accent hover:underline transition-colors", data: { page_loader: "link" } %>
+            <% end %>
+          </p>
         <% end %>
 
         <div class="flex gap-3 mt-6">

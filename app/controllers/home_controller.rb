@@ -11,6 +11,7 @@ class HomeController < ApplicationController
       }
     )
     @continue_watching = fetch_continue_watching
+    @up_next = fetch_up_next
     @recently_added = policy_scope(LibraryEntry).where("created_at > ?", 2.weeks.ago).recently_added.limit(20)
     @wishlist_preview = policy_scope(WishlistEntry).recently_added.limit(20)
     # Run the four catalog calls concurrently so a slow cinemeta
@@ -26,6 +27,11 @@ class HomeController < ApplicationController
   end
 
   private
+
+  def fetch_up_next
+    result = UpNextService.new(rd_api_key: current_user.realdebrid_api_key).call(current_user)
+    result.success? ? result.data : []
+  end
 
   def fetch_continue_watching
     result = ProgressTrackingService.continue_watching(current_user)

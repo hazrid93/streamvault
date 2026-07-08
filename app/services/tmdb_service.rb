@@ -77,7 +77,71 @@ class TmdbService
     ServiceResult.failure("TMDB error: #{e.message}")
   end
 
+  # Given a person's name, return their filmography (movies + TV)
+  # sorted by popularity.  Searches TMDB /search/person for the best
+  # match, then pulls /person/{id}/combined_credits and resolves IMDb
+  # IDs so results link into the existing content path.  Cached 6h.
+  #
+  # Returns ServiceResult<Array<Hash>> (imdb_id, title, poster_url,
+  # type, year, character).
+  def filmography_for_name(name)
+    return ServiceResult.failure("Name required") if name.blank?
+
+    cache_key = "tmdb/filmography/#{name.downcase}"
+    Rails.cache.fetch(cache_key, expires_in: 6.hours) do
+      person_id = search_person(name)
+      return ServiceResult.success([]) unless person_id
+
+      credits = fetch_combined_credits(person_id)
+      return ServiceResult.success([]) if credits.empty?
+
+      top = credits.sort_by { |c| c[:popularity].to_f }.reverse.first(18)
+      results = top.map do |c|
+        imdb_id = fetch_imdb_id(c[:tmdb_id], c[:media_type])
+        next nil if imdb_id.blank?
+        {
+          imdb_id: imdb_id,
+          tmdb_id: c[:tmdb_id],
+          title: c[:title],
+          poster_url: c[:poster_url],
+          type: c[:media_type] == "movie" ? "movie" : "show",
+          year: c[:year],
+          character: c[:character]
+        }
+      end.compact
+
+      ServiceResult.success(results)
+    end
+  end
+
   private
+
+  # ── Person helpers ───────────────────────────────────────────────
+
+  def search_person(name)
+    response = @conn.get("search/person", { query: name, page: 1 })
+    return nil unless response.success? && response.body.is_a?(Hash)
+    person = response.body["results"]&.first
+    person&.dig("id")
+  end
+
+  def fetch_combined_credits(person_id)
+    response = @conn.get("person/#{person_id}/combined_credits")
+    return [] unless response.success? && response.body.is_a?(Hash)
+
+    (response.body["cast"] || []).map do |r|
+      media_type = r["media_type"] == "tv" ? "tv" : "movie"
+      {
+        tmdb_id: r["id"],
+        media_type: media_type,
+        title: media_type == "movie" ? r["title"] : r["name"],
+        poster_url: r["poster_path"] ? "#{POSTER_BASE}#{r['poster_path']}" : nil,
+        year: (r["release_date"] || r["first_air_date"])&.[](0..3),
+        popularity: r["popularity"].to_f,
+        character: r["character"]
+      }
+    end
+  end
 
   # Resolve IMDb ID → TMDB ID and media type (movie or tv).
   def find_by_imdb_id(imdb_id)

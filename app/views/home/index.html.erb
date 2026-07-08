@@ -63,6 +63,47 @@
     </section>
   <% end %>
 
+  <%# Up Next (series) %>
+  <% if @up_next.any? %>
+    <section class="mb-10" data-controller="carousel">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-white">Up Next</h2>
+        <div class="flex items-center gap-2">
+          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors invisible">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          </button>
+          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="w-8 h-8 rounded-full bg-sv-surface hover:bg-sv-surface-hover flex items-center justify-center text-white transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="relative">
+        <div data-carousel-target="track" class="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
+          <% @up_next.each do |item| %>
+            <div class="shrink-0" style="width: 240px">
+              <%= link_to content_path(type: "show", imdb_id: item[:show_imdb_id]), class: "block", data: { page_loader: "link" } do %>
+                <div class="relative rounded-lg overflow-hidden bg-sv-surface">
+                  <% if item[:poster_url] %>
+                    <img src="<%= item[:poster_url] %>" alt="<%= item[:show_title] %>" loading="lazy" class="w-full aspect-[2/3] object-cover">
+                  <% end %>
+                  <div class="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/90 to-transparent">
+                    <p class="text-sm font-bold text-white truncate"><%= item[:show_title] %></p>
+                    <p class="text-xs text-sv-text-muted">S<%= item[:season].to_s.rjust(2, '0') %>E<%= item[:episode].to_s.rjust(2, '0') %> &middot; <%= item[:episode_title] %></p>
+                    <% if item[:resume] %>
+                      <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-sv-accent/20 text-sv-accent">Resume <%= item[:progress_percentage] %>%</span>
+                    <% else %>
+                      <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-white/10 text-white">Up Next</span>
+                    <% end %>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+      </div>
+    </section>
+  <% end %>
+
   <%# Recommended for You %>
   <% if @recommendations.success? %>
     <%= render "home/catalog_section",

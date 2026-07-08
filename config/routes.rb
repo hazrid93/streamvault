@@ -10,6 +10,9 @@ Rails.application.routes.draw do
   # Browse by category / genre / sort
   get "browse", to: "browse#index", as: :browse
 
+  # Person filmography (cast click-through)
+  get "person", to: "person#index", as: :person
+
   # Content detail
   get "content/:type/:imdb_id", to: "content#show", as: :content
   get "content/:type/:imdb_id/status", to: "content#status", as: :content_status
