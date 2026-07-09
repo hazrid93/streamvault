@@ -253,6 +253,9 @@ export default class extends Controller {
   async ensureVideoSource() {
     if (!this.streamingUrlValue) return
     if (this.isIOS()) {
+      // HLS handles media playback on iPhone, but the player still needs
+      // track metadata for its audio/subtitle controls and burn-in choices.
+      await this.loadMediaTracks()
       this.startHlsPlayback()
       return
     }
@@ -340,6 +343,17 @@ export default class extends Controller {
   // Range requests, and handles its own buffering.
   isDirectPlay() {
     return !!this.directPlayActive
+  }
+
+  // Native direct play seeks inside the original file, so currentTime is
+  // already absolute. Remux, HLS, and MSE streams restart at zero and need
+  // startSecondsValue added back to recover the source timeline.
+  isNativeDirectPlay() {
+    return this.isDirectPlay() && !this.isRemuxDirectPlay()
+  }
+
+  playbackTimelineOffset() {
+    return this.isNativeDirectPlay() ? 0 : this.startSecondsValue
   }
 
   // True when using remux direct play: native <video src> pointing at
@@ -532,6 +546,12 @@ export default class extends Controller {
     }
     return url.pathname + url.search
   }
+
+  appendSelectedHlsTracks(params) {
+    if (this.selectedAudioStream) params.set('audio_stream', this.selectedAudioStream)
+    if (this.burnedSubtitleSelected()) params.set('subtitle_stream', this.selectedSubtitleStream)
+  }
+
   async startHlsPlayback() {
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
@@ -544,10 +564,7 @@ export default class extends Controller {
       if (this.startSecondsValue && this.startSecondsValue > 0) {
         params.set('start_seconds', this.startSecondsValue)
       }
-      const audioStream = this.currentUrlParam('audio_stream')
-      if (audioStream) params.set('audio_stream', audioStream)
-      const subtitleStream = this.currentUrlParam('subtitle_stream')
-      if (subtitleStream) params.set('subtitle_stream', subtitleStream)
+      this.appendSelectedHlsTracks(params)
 
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
       const response = await fetch('/hls/start', {
@@ -680,6 +697,8 @@ export default class extends Controller {
     // Pause the video immediately so it doesn't keep playing the
     // old stream behind the seeking overlay.
     this.videoTarget.pause()
+    this.clearSubtitleCues()
+    this.reloadTextSubtitlesAt(startSeconds)
 
     // Fire the stop request without awaiting — it runs in parallel
     // with the new session start.  The old ffmpeg process is killed
@@ -700,10 +719,7 @@ export default class extends Controller {
       if (startSeconds > 0) {
         params.set('start_seconds', startSeconds)
       }
-      const audioStream = this.currentUrlParam('audio_stream')
-      if (audioStream) params.set('audio_stream', audioStream)
-      const subtitleStream = this.currentUrlParam('subtitle_stream')
-      if (subtitleStream) params.set('subtitle_stream', subtitleStream)
+      this.appendSelectedHlsTracks(params)
 
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
       const response = await fetch('/hls/start', {
@@ -1257,7 +1273,6 @@ export default class extends Controller {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
     this.isSeeking = true
     this.showSeekingOverlay("Reconnecting...")
-    this.clearSubtitleCues()
     this.restartHlsSession(targetSeconds)
   }
 
@@ -1412,6 +1427,7 @@ export default class extends Controller {
     this.setupMseSource(nextSrc)
 
     this.clearSubtitleCues()
+    this.reloadTextSubtitlesAt(targetSeconds)
     this.streamRecoveryAttempts = savedAttempts
   }
 
@@ -1782,12 +1798,11 @@ export default class extends Controller {
 
     if (this.isDirectPlay()) {
       console.warn("Direct play failed — falling back to MSE/transcode.")
+      const targetSeconds = Math.floor(this.currentPlaybackPosition())
       this.directPlayActive = false
       this.remuxDirectPlay = false
       this.streamingUrlValue = this.element.dataset.videoPlayerStreamingUrlValue
-      const targetSeconds = Math.floor(this.currentPlaybackPosition())
-      this.startSecondsValue = targetSeconds
-      this.setupMseSource(this.streamingUrlValue)
+      this.restartPlaybackAt(targetSeconds)
     }
   }
 
@@ -2081,7 +2096,7 @@ export default class extends Controller {
     this.renderAudioControls()
     this.closeTrackMenus()
 
-    const targetSeconds = Math.floor(this.videoTarget.currentTime + this.startSecondsValue)
+    const targetSeconds = Math.floor(this.currentPlaybackPosition())
     this.restartPlaybackAt(targetSeconds)
   }
 
@@ -2112,7 +2127,17 @@ export default class extends Controller {
   }
 
   currentPlaybackPosition() {
-    return this.videoTarget.currentTime + this.startSecondsValue
+    return this.videoTarget.currentTime + this.playbackTimelineOffset()
+  }
+
+  reloadTextSubtitlesAt(position, holdPlayback = false) {
+    if (!this.textSubtitleSelected()) return
+
+    this.loadSubtitleTrack(position, {
+      durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
+      lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
+      holdPlayback: holdPlayback
+    })
   }
 
   selectedSubtitleTrack() {
@@ -2325,12 +2350,7 @@ export default class extends Controller {
   }
 
   removeTextSubtitleTrack() {
-    this.subtitleLoadToken += 1
-    this.abortSubtitleLoad()
     this.clearSubtitleCues()
-    this.subtitleWindowStart = null
-    this.subtitleWindowEnd = null
-    this.subtitleLoading = false
     this.subtitleRetryAfter = 0
   }
 
@@ -2374,6 +2394,13 @@ export default class extends Controller {
   }
 
   clearSubtitleCues() {
+    // A cleared cue buffer cannot keep claiming its old window is loaded.
+    // Cancel stale responses and force the next overlay update to fetch the
+    // new playback timeline.
+    this.subtitleLoadToken += 1
+    this.abortSubtitleLoad()
+    this.subtitleLoading = false
+    this.resetSubtitleWindow()
     this.subtitleCues = []
     if (this.hasSubtitleOverlayTarget) {
       this.subtitleOverlayTarget.textContent = ""
@@ -2645,7 +2672,7 @@ export default class extends Controller {
   performSeek(percent) {
     if (this.knownDuration <= 0) return
     const targetSeconds = Math.floor(percent * this.knownDuration)
-    if (targetSeconds === this.startSecondsValue) return
+    if (targetSeconds === Math.floor(this.currentPlaybackPosition())) return
 
     if (this.isSeeking) {
       this.pendingSeekSeconds = targetSeconds
@@ -2662,7 +2689,6 @@ export default class extends Controller {
       this.showSeekingOverlay("Seeking...")
       this.startSecondsValue = targetSeconds
       this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
-      this.clearSubtitleCues()
       this.restartHlsSession(targetSeconds)
       return
     }
@@ -2684,18 +2710,27 @@ export default class extends Controller {
         this.videoTarget.play().catch(() => {})
       }, { once: true })
       this.clearSubtitleCues()
+      this.reloadTextSubtitlesAt(targetSeconds)
       this.resetProgressBaseline()
       return
+    }
+
+    // Native direct play cannot burn bitmap subtitles. Switch to the
+    // transcode path below so ffmpeg receives and overlays the selection.
+    if (this.isNativeDirectPlay() && this.burnedSubtitleSelected()) {
+      this.directPlayActive = false
+      this.remuxDirectPlay = false
     }
 
     // Direct play: browser handles seeking via Range requests.
     // Reset the progress watchdog so the freeze detector doesn't
     // fire during the seek (currentTime briefly stalls).
-    if (this.isDirectPlay()) {
+    if (this.isNativeDirectPlay()) {
       this.startSecondsValue = targetSeconds
       this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
       this.videoTarget.currentTime = targetSeconds
       this.clearSubtitleCues()
+      this.reloadTextSubtitlesAt(targetSeconds)
       this.resetProgressBaseline()
       return
     }
@@ -2733,19 +2768,13 @@ export default class extends Controller {
     this.setupMseSource(nextSrc)
 
     this.clearSubtitleCues()
-    if (this.textSubtitleSelected()) {
-      this.loadSubtitleTrack(targetSeconds, {
-        durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
-        lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-        holdPlayback: true
-      })
-    }
+    this.reloadTextSubtitlesAt(targetSeconds, true)
   }
 
   // ── Time / progress updates ───────────────────────────────────────
 
   onTimeUpdate() {
-    const currentPos = this.videoTarget.currentTime + this.startSecondsValue
+    const currentPos = this.currentPlaybackPosition()
     const duration = this.effectiveDuration()
 
     this.currentTimeTarget.textContent = this.formatTime(currentPos)
@@ -2789,11 +2818,12 @@ export default class extends Controller {
     const video = this.videoTarget
     if (!video.buffered.length || this.knownDuration <= 0) return
 
-    const ct = video.currentTime + this.startSecondsValue
+    const timelineOffset = this.playbackTimelineOffset()
+    const ct = video.currentTime + timelineOffset
     let bufferEndAbsolute = ct
     for (let i = 0; i < video.buffered.length; i++) {
-      const rangeStart = video.buffered.start(i) + this.startSecondsValue
-      const rangeEnd = video.buffered.end(i) + this.startSecondsValue
+      const rangeStart = video.buffered.start(i) + timelineOffset
+      const rangeEnd = video.buffered.end(i) + timelineOffset
       if (ct >= rangeStart && ct <= rangeEnd) {
         bufferEndAbsolute = rangeEnd
         break
@@ -2840,7 +2870,7 @@ export default class extends Controller {
   effectiveDuration() {
     if (this.knownDuration > 0) return this.knownDuration
     const d = this.videoTarget.duration
-    return this.validDuration(d) ? d + this.startSecondsValue : 0
+    return this.validDuration(d) ? d + this.playbackTimelineOffset() : 0
   }
 
   updateDurationDisplay() {
@@ -2980,7 +3010,7 @@ export default class extends Controller {
   async saveProgress() {
     const video = this.videoTarget
     if (!video) return
-    const progressSeconds = Math.floor(video.currentTime + this.startSecondsValue)
+    const progressSeconds = Math.floor(this.currentPlaybackPosition())
     const durationSeconds = this.saveableDurationSeconds()
     if (progressSeconds <= 0) return
 
@@ -3033,7 +3063,7 @@ export default class extends Controller {
   progressPayload() {
     const video = this.videoTarget
     if (!video) return null
-    const progressSeconds = Math.floor(video.currentTime + this.startSecondsValue)
+    const progressSeconds = Math.floor(this.currentPlaybackPosition())
     const durationSeconds = this.saveableDurationSeconds()
     if (progressSeconds <= 0) return null
 

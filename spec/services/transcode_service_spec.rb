@@ -592,7 +592,7 @@ RSpec.describe TranscodeService do
       expect(result.vtt).to eq("")
     end
 
-    it "reports a packet timeout as an empty subtitle window without falling back to ffmpeg" do
+    it "reports a packet timeout as retryable without falling back to the slower extractor" do
       track_output = {
         "streams" => [
           { "index" => 3, "codec_type" => "subtitle", "codec_name" => "subrip", "tags" => { "language" => "eng", "title" => "forced" }, "disposition" => { "default" => 0 } }
@@ -601,7 +601,7 @@ RSpec.describe TranscodeService do
 
       allow(described_class).to receive(:capture_command) do |cmd, **kwargs|
         if cmd.include?("-show_data")
-          expect(kwargs[:timeout_seconds]).to eq(described_class::FORCED_SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
+          expect(kwargs[:timeout_seconds]).to eq(described_class::SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
           capture_result("", timed_out: true)
         else
           capture_result(track_output)
@@ -615,7 +615,7 @@ RSpec.describe TranscodeService do
         start_seconds: 120
       )
 
-      expect(result.status).to eq(:empty_window)
+      expect(result.status).to eq(:timeout)
       expect(result.source).to eq(:ffprobe_packets)
       expect(result.diagnostic).to eq("ffprobe packet extraction timed out")
     end
