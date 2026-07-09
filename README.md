@@ -6,19 +6,27 @@
 
 <p align="center"><em>Your personal cinema — search, stream, and manage movies and TV shows, all in one place.</em></p>
 
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#environment-variables">Configuration</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="#testing">Development</a>
+</p>
+
 ---
 
 ## What is StreamVault?
 
-StreamVault is a self-hosted media streaming application that lets you discover, organise, and watch media content directly in your browser — your own personal streaming hub.
+StreamVault is a self-hosted Rails application for discovering, organising, and watching media in a browser. It combines metadata and stream providers with your own RealDebrid account, then chooses the lightest playback path the browser can handle: direct play, video remuxing, or FFmpeg transcoding.
 
-It works with any content available via torrent networks, including **fully legal content**: public domain films and Creative Commons releases. StreamVault integrates with **RealDebrid**, a legitimate premium service that caches torrents on high-speed servers and provides direct streaming links — the same service used by Stremio and other media centres.
+The player supports movies and episodic TV, multiple audio tracks, embedded and external subtitles, progress tracking, automatic recovery, and responsive desktop/mobile controls.
 
-Behind the scenes, StreamVault acts as a client: it searches for available streams, sends a magnet link to RealDebrid (which handles the download on its own infrastructure), and then streams the file to your browser in real time, handling format conversion automatically so everything "just plays." StreamVault itself never downloads, stores, or distributes any media files.
+StreamVault does not ship with a media catalogue or maintain a persistent library of source files. Media is requested from the services you configure and delivered on demand; source data may pass through temporary buffers while it is proxied or transcoded.
 
 ## Disclaimer & responsible use
 
-StreamVault is a **general-purpose media client** — like a web browser or BitTorrent client, it is neutral regarding what users choose to access. The application does not host, store, upload, or distribute any copyrighted content. It does not contain any pre-configured lists of pirated material. All content discovery and streaming is driven by the user's own choices and subscriptions.
+StreamVault is a **general-purpose media client** — like a web browser or BitTorrent client, it is neutral regarding what users choose to access. The repository does not include or publish copyrighted media or pre-configured lists of pirated material. The running application proxies or transcodes only the data requested by its operator and may buffer it temporarily for playback. All discovery and streaming is driven by the user's own choices and subscriptions.
 
 **The author does not endorse, encourage, or support the use of StreamVault to access copyrighted content without proper authorisation.** Users are solely responsible for ensuring they have the legal right to access any content they stream. StreamVault is intended for use with:
 
@@ -34,19 +42,23 @@ This project is provided as-is for educational and personal use. The author acce
 You (browser)
   │
   ▼
-StreamVault (Rails app + FFmpeg)
+StreamVault (Rails app)
   │
-  ├──► Torrentio / Comet  →  finds available streams for the content
+  ├──► Cinemeta / OMDB    →  provides metadata, artwork, and ratings
   │
-  ├──► RealDebrid         →  caches the file on their servers, gives back a direct streaming link
+  ├──► Torrentio / Comet  →  finds available streams
   │
-  └──► FFmpeg             →  converts the file on-the-fly to a browser-friendly format
-                             (MKV → MP4, DTS/AC3 → AAC, burns subtitles if needed)
+  ├──► RealDebrid         →  resolves the selected stream to a direct link
+  │
+  └──► Playback layer
+       ├── Direct proxy   →  passes compatible media to the browser
+       └── FFmpeg         →  remuxes or transcodes incompatible media,
+                             synchronises timestamps, and burns bitmap subtitles
 ```
 
 1. **Search** — Type a title. StreamVault queries metadata catalogues (Cinemeta) and returns matching content with posters, ratings, and plots.
 2. **Pick a stream** — Each title shows a list of available streams with quality (4K, 1080p, 720p), file size, and audio languages. Streams are sorted by your language preferences.
-3. **Press play** — StreamVault sends the magnet link to RealDebrid, which caches the file on its servers and returns a direct streaming link. If the file is already in a browser-friendly format (MP4 with AAC audio), it plays directly. If not (MKV, DTS audio, exotic codecs), FFmpeg transcodes it on-the-fly.
+3. **Press play** — StreamVault resolves the selected stream through RealDebrid and probes its tracks. Compatible media plays directly; other sources are remuxed or transcoded into browser-friendly H.264/AAC fragmented MP4 or HLS. Audio timestamps are normalised, and bitmap subtitles are burned in when necessary.
 4. **Watch** — The custom in-browser player handles playback with seeking, audio track switching, subtitles, and progress tracking. Close the tab and come back later — you'll resume right where you left off.
 
 ## Features
@@ -70,8 +82,10 @@ StreamVault (Rails app + FFmpeg)
 - **Auto-advance** — When an episode finishes, the next one is ready to go.
 
 ### Streaming & playback
+- **Adaptive playback paths** — Uses native direct play when possible, low-cost video remuxing when safe, and full transcoding only when required.
 - **Custom video player** — Built from scratch with seeking, volume control, playback speed, and full keyboard support.
 - **Audio track selection** — Switch between audio languages when a stream has multiple tracks.
+- **A/V timestamp synchronisation** — Corrects source timestamp gaps and keeps resumed, sought, and recovered streams aligned.
 - **Subtitles** — Select from embedded subtitle tracks (text and image-based). Falls back to external subtitles from SubDL when none are embedded.
 - **Burned subtitles** — Image-based subtitles (PGS, VobSub) are burned onto the video via FFmpeg since browsers can't render them natively.
 - **Resume playback** — Automatically resumes from your last position.
@@ -95,7 +109,7 @@ StreamVault relies on several external services. Here's what each one does and h
 
 | Service | Role | Required? | How to get access |
 |---------|------|-----------|-------------------|
-| **RealDebrid** | Caches files on their servers and provides direct streaming links — a legitimate premium service also used by Stremio | **Yes** — streaming won't work without it | Sign up at [real-debrid.com](https://real-debrid.com), then get your API key at [real-debrid.com/apitoken](https://real-debrid.com/apitoken) |
+| **RealDebrid** | Resolves selected files and provides direct streaming links | **Yes** — streaming won't work without it | Sign up at [real-debrid.com](https://real-debrid.com), then get your API key at [real-debrid.com/apitoken](https://real-debrid.com/apitoken) |
 | **Torrentio** | Finds available streams for a given title | Yes (default provider) | Works out of the box with the public instance. May need a proxy if your server IP is blocked (see below) |
 | **Comet** | Alternative stream provider — self-hosted, independent of Torrentio | Optional (recommended) | Self-host via Docker — see [proxy/comet](proxy/comet) |
 | **Cinemeta** | Provides content metadata (titles, posters, plots, episodes) | Yes (built-in) | No setup needed — uses the public Stremio metadata service |
@@ -107,9 +121,9 @@ StreamVault relies on several external services. Here's what each one does and h
 
 - **Torrentio and Comet** are both stream *providers*. They search torrent networks for available streams and return a list with quality, size, and language information. You can use either one or both — when both are configured (`STREAM_PROVIDER=auto`), StreamVault queries them in parallel and picks the best stream regardless of which provider found it. If one is down, the other fills in.
 
-- **RealDebrid** is the *downloader*. Once you pick a stream, StreamVault sends its magnet link to RealDebrid, which retrieves the file on its high-speed servers (from cache if available). RealDebrid then returns a direct HTTPS link that StreamVault can stream from. The file is never downloaded to your server — RealDebrid handles all of that on its infrastructure.
+- **RealDebrid** is the *resolver*. Once you pick a stream, StreamVault sends its magnet link to RealDebrid, which retrieves or resolves the selected file and returns a direct HTTPS link. StreamVault does not add the source file to a persistent local media library, but its bytes pass through the server on demand and may be buffered temporarily during proxying or transcoding.
 
-- **FFmpeg** is the *translator*. Many media files use formats (MKV containers, DTS/AC3 audio, PGS subtitles) that web browsers can't play. FFmpeg runs on your server and converts the stream on-the-fly into browser-friendly MP4 with AAC audio. If the video is already compatible, FFmpeg just remuxes (copies without re-encoding) for minimal CPU usage. If the video is in an exotic codec or 4K, it transcodes to 1080p H.264.
+- **FFmpeg** is the *translator*. StreamVault bypasses it for sources the browser can play directly. Otherwise FFmpeg copies compatible video when safe, normalises audio to AAC with timestamp correction, or re-encodes incompatible/UHD video to browser-friendly 1080p H.264. It also produces HLS for iPhone playback and burns image-based subtitles that browsers cannot render.
 
 - **Cinemeta and OMDB** are the *librarians*. Cinemeta (Stremio's metadata service) provides titles, posters, plots, cast, and episode lists. OMDB adds ratings from IMDb, Rotten Tomatoes, and Metacritic.
 
@@ -131,7 +145,7 @@ The most demanding component is **FFmpeg transcoding**, which happens on-the-fly
 | **Network** | 50 Mbps | 100 Mbps+ (streaming bandwidth) |
 | **OS** | Any Linux with Docker | Ubuntu/Debian LTS |
 
-> **Note on transcoding:** FFmpeg uses the `ultrafast` H.264 preset to minimise CPU load. When the source video is already H.264 with AAC audio in an MP4 container, no transcoding occurs — the stream is remuxed (near-zero CPU). The heavier cases are 4K/UHD sources (transcoded to 1080p) and non-H.264 codecs (x265, AV1), which require real-time video encoding. On Apple Silicon servers, hardware acceleration via VideoToolbox is used automatically when available.
+> **Note on transcoding:** Compatible H.264/AAC MP4 sources can play directly without FFmpeg. At the beginning of a compatible source, StreamVault may copy the video while normalising audio; after a resume or seek, it may re-encode video to prevent keyframe pre-roll from putting audio and video on different timelines. The heaviest cases are 4K/UHD and incompatible codecs such as HEVC or AV1. VideoToolbox acceleration is used when StreamVault runs natively on supported macOS hardware; Docker does not expose it by default.
 
 ### Prerequisites
 
@@ -139,24 +153,30 @@ The most demanding component is **FFmpeg transcoding**, which happens on-the-fly
 - A **RealDebrid subscription** (starts at ~€3/month)
 - API keys for **OMDB** (free) and optionally **TMDB** (free) and **SubDL** (free)
 
-### Steps
+### Quick start
 
 ```bash
 # Clone the repository
-git clone https://github.com/vitobotta/StreamVault.git
-cd StreamVault
+git clone https://github.com/vitobotta/streamvault.git
+cd streamvault
 
 # Create environment config
 cp .env.example .env
 
-# Edit .env and fill in all values — see the table below
-nano .env
+# Generate secrets, then copy each result to the matching .env variable
+openssl rand -hex 64  # SECRET_KEY_BASE
+openssl rand -hex 32  # run separately for each encryption key and POSTGRES_PASSWORD
+
+# Edit .env — see the configuration table below
+${EDITOR:-nano} .env
 
 # Build and start the container
 docker compose up -d --build
 ```
 
-The app is available at `http://localhost:${PORT:-3000}`.
+At minimum, set `SECRET_KEY_BASE`, the three `ACTIVE_RECORD_ENCRYPTION_*` values, `POSTGRES_PASSWORD`, and `OMDB_API_KEY`. Set `APP_DOMAIN` for a public deployment. `RAILS_MASTER_KEY` is only needed if you add Rails encrypted credentials.
+
+The app is available at `http://localhost:3000` unless you change `PORT`.
 
 Assets are precompiled inside the image during build — no local Ruby or Node installation needed. The PostgreSQL database is persisted in a local `./data` directory and survives container rebuilds.
 
@@ -166,8 +186,12 @@ Sign-ups are disabled by default for security. Create your user via the Rails co
 
 ```bash
 docker compose exec web bin/rails c
-> User.create!(email: "you@example.com", password: "password", password_confirmation: "password")
+> password = SecureRandom.base58(24)
+> User.create!(email: "you@example.com", password: password, password_confirmation: password)
+> puts password
 ```
+
+Store the generated password in your password manager, then sign in and change it from your profile if desired.
 
 To enable self-registration, set `ENABLE_SIGNUPS=true` in `.env` and restart.
 
@@ -194,12 +218,12 @@ docker compose up -d --build
 
 | Variable | Description | Default |
 |---|---|---|
-| `RAILS_MASTER_KEY` | Master key for credentials decryption (from `config/master.key`) | Required |
-| `SECRET_KEY_BASE` | Session cookie secret (generate with `bin/rails secret`) | Required |
+| `RAILS_MASTER_KEY` | Master key for Rails encrypted credentials; only required if you create an encrypted credentials file | Optional |
+| `SECRET_KEY_BASE` | Session cookie secret (generate with `openssl rand -hex 64`) | Required |
 | `ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY` | Encryption key for API keys (generate with `openssl rand -hex 32`) | Required |
 | `ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY` | Deterministic encryption key (generate with `openssl rand -hex 32`) | Required |
 | `ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT` | Key derivation salt (generate with `openssl rand -hex 32`) | Required |
-| `APP_DOMAIN` | Domain the app is served from (for Rails host authorisation) | Required |
+| `APP_DOMAIN` | Domain the app is served from (recommended for Rails host authorisation in public deployments) | Optional |
 | `ENABLE_SIGNUPS` | Set to `true` to allow new user registration | `false` |
 | `POSTGRES_USER` | PostgreSQL database user | `streamvault` |
 | `POSTGRES_PASSWORD` | PostgreSQL database password (generate with `openssl rand -hex 16`) | Required |
@@ -215,6 +239,26 @@ docker compose up -d --build
 | `TORRENTIO_PROXY` | Forward proxy URL for Torrentio requests (if IP is blocked) | Optional |
 | `CINEMETA_PROXY` | Forward proxy URL for Cinemeta requests (if needed) | Optional |
 | `COMET_PROXY` | Forward proxy URL for Comet requests (if needed) | Optional |
+| `HTTP_WRITE_TIMEOUT` | Thruster response write deadline in seconds; keep `0` for movie-length streams | `0` |
+| `HTTP_IDLE_TIMEOUT` | Thruster keep-alive idle timeout in seconds; keep `0` to avoid interrupting reconnects | `0` |
+
+## Troubleshooting
+
+Start with the container status, application logs, and health endpoint:
+
+```bash
+docker compose ps
+docker compose logs --tail=200 -f web
+curl -I http://localhost:${PORT:-3000}/up
+```
+
+| Symptom | What to check |
+|---|---|
+| No streams, HTTP 403s, or intermittent provider failures | Your server IP may be blocked by Cloudflare. See the [proxy guide](#proxies-when-and-why-you-might-need-them). |
+| Playback buffers during transcoding | Check CPU saturation and FFmpeg throughput in the web logs; try a 1080p/H.264 source before a 4K, HEVC, or AV1 source. |
+| Direct play works but a resumed stream is CPU-heavy | Expected: non-zero seeks may re-encode video to keep audio and video timestamps aligned. |
+| Subtitles appear slowly on a remote file | The first extraction may need to seek through a large container. StreamVault retries transient extraction timeouts automatically. |
+| The site is reachable but sign-in does not persist behind a proxy | Confirm the public URL uses HTTPS and that the proxy forwards the original scheme and host. Production cookies are Secure. |
 
 ## Proxies: when and why you might need them
 
@@ -293,10 +337,21 @@ If you run StreamVault on your home computer (which has a residential IP that Re
 
 ## Testing
 
+Local development uses Ruby 4.0.5. PostgreSQL and FFmpeg must be available; the JavaScript regression suite uses Node's built-in test runner and needs no npm install.
+
 ```bash
-# Run all tests (requires local Ruby + bundler setup)
+# Prepare Ruby dependencies and the test database
 bundle install
+bin/rails db:prepare
+
+# Run the Rails suite
 bundle exec rspec
+
+# Run video-player controller regressions
+node --test spec/javascript/video_player_controller_test.mjs
+
+# Run Ruby style checks
+bin/rubocop
 
 # Run specific test types
 bundle exec rspec spec/models/      # Model specs
@@ -310,10 +365,11 @@ bundle exec rspec spec/requests/    # Request specs
 ```
 app/
 ├── controllers/     # Home, search, content, library, wishlist, streaming, settings, episodes, transcode
-├── models/          # User, LibraryEntry, WatchHistoryEntry, WishlistEntry, EpisodeProgress
+├── models/          # User-owned media state, recommendations, and HLS session records
 ├── services/        # Business logic (see below)
 ├── policies/        # ActionPolicy authorisation — all resources scoped per-user
 ├── javascript/      # Stimulus controllers (video player, carousels, language picker, etc.)
+├── jobs/            # Recommendation refresh and background work
 └── views/           # Dark-themed Tailwind views with Turbo Drive
 ```
 
