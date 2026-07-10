@@ -1,4 +1,10 @@
 class ApplicationController < ActionController::Base
+  include Devise::Controllers::Rememberable
+
+  REMEMBER_COOKIE_REFRESH_INTERVAL = 30.days
+
+  before_action :refresh_remember_cookie
+
   # Changes to the importmap will invalidate the etag for HTML responses
   stale_when_importmap_changes
 
@@ -12,6 +18,26 @@ class ApplicationController < ActionController::Base
   # Whether new user self-registration is enabled via ENV
   def signups_enabled?
     ENV["ENABLE_SIGNUPS"] == "true"
+  end
+
+  private
+
+  # Browsers cap persistent cookies (typically around 400 days), regardless of
+  # Devise's configured lifetime. Refresh active users' remember cookie every
+  # 30 days so its browser-enforced expiry keeps moving forward.
+  def refresh_remember_cookie
+    return unless user_signed_in?
+    return unless remember_cookie_refresh_due?(current_user)
+
+    remember_me(current_user)
+  end
+
+  def remember_cookie_refresh_due?(user)
+    scope = Devise::Mapping.find_scope!(user)
+    cookie_value = cookies.signed[remember_key(user, scope)]
+    generated_at = cookie_value&.third
+
+    generated_at.blank? || Time.at(generated_at.to_f) <= REMEMBER_COOKIE_REFRESH_INTERVAL.ago
   end
 
   # Rescue from authorization failures
