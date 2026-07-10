@@ -5,7 +5,7 @@ class TorrentioService
   include Cacheable
   TORRENTIO_URL = ENV.fetch("TORRENTIO_API_BASE_URL", "https://torrentio.strem.fun")
   CINEMETA_URL = "https://v3-cinemeta.strem.io"
-  QUALITY_SORT = { "4K" => 0, "1080p" => 1, "720p" => 2, "480p" => 3, "Unknown" => 4 }.freeze
+  STREAM_CACHE_VERSION = 2
 
   # Cinemeta catalog ids double as sort modes: "top" = popular,
   # "year" = new releases, "imdbRating" = top rated.
@@ -112,7 +112,7 @@ class TorrentioService
     # Stream listings depend on the user's RealDebrid account (Torrentio
     # embeds the RD key in the path and checks RD instant availability
     # per key), so cache per-RD-key-hash.  Stale-while-revalidate.
-    cache_key = "torrentio:streams:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    cache_key = "torrentio:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
     parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
       fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
     end
@@ -276,22 +276,14 @@ class TorrentioService
     end
   end
 
-  # Sort: user language preference first, then compatibility (prefer streams
-  # that play directly or via stream-copy over heavy-transcode ones), RD+,
-  # quality, and size.
+  # Sort all cached RD streams first, then reported seeders. Language,
+  # compatibility, quality, and size remain deterministic tie-breakers.
   def sort_streams(streams, language_priority: [])
     streams_with_scores = streams.map do |stream|
       stream.merge(language_score: stream_language_score(stream, language_priority))
     end
 
-    streams_with_scores.sort_by do |s|
-      language_score = s[:language_score]
-      compatibility_score = -(s[:compatibility_score] || 0)
-      rd_score = s[:rd_plus] ? 0 : 1
-      quality_score = QUALITY_SORT[s[:quality]] || 4
-      size_bytes = s[:raw_size].is_a?(Numeric) ? s[:raw_size] : 0
-      [ language_score, compatibility_score, rd_score, quality_score, -size_bytes ]
-    end
+    StreamOrdering.sort(streams_with_scores)
   end
 
   def stream_language_score(stream, language_priority)
@@ -361,7 +353,7 @@ class TorrentioService
         seeders: extract_seeders(s),
         size: size_bytes ? format_size(size_bytes) : "Unknown",
         raw_size: size_bytes || 0,
-        rd_plus: s["sources"].is_a?(Array) && s["sources"].any?,
+        rd_plus: cached_realdebrid_stream?(s),
         filename: filename,
         resolve_url: rewrite_resolve_url(s["url"]),
         languages: extract_languages(title_text),
@@ -413,14 +405,17 @@ class TorrentioService
     end
   end
 
+  def cached_realdebrid_stream?(stream)
+    return true if stream["cached"] == true || stream.dig("behaviorHints", "cached") == true
+
+    [ stream["name"], stream["title"] ].compact.join(" ").match?(/\[RD\+\]|RD⚡/i)
+  end
+
   def extract_seeders(stream)
-    if stream["seeders"]
-      stream["seeders"]
-    elsif stream["title"] && stream["title"] =~ /👤\s*(\d+)/
-      $1.to_i
-    else
-      0
-    end
+    value = stream["seeders"]
+    return value.to_i if value.is_a?(Numeric) || value.to_s.match?(/\A\d+\z/)
+    match = stream["title"].to_s.match(/👤\s*(\d+)/)
+    match ? match[1].to_i : nil
   end
 
   def format_size(bytes)

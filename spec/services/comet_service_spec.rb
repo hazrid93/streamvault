@@ -168,11 +168,11 @@ RSpec.describe CometService do
       expect(stream[:seeders]).to eq(24)
     end
 
-    it "reports zero seeders when none are present" do
+    it "reports unavailable seeders as nil instead of inventing a zero count" do
       stub_streams("tt2015381", "movie", [ cached_stream ])
 
       stream = service.streams("tt2015381", "movie").data.first
-      expect(stream[:seeders]).to eq(0)
+      expect(stream[:seeders]).to be_nil
     end
 
     it "detects quality from the release name" do

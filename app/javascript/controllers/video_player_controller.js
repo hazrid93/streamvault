@@ -44,7 +44,7 @@ export default class extends Controller {
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
-      "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay",
+      "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "speedButton", "speedMenu", "nextEpisodeCard"
     ]
   }
@@ -2521,7 +2521,7 @@ export default class extends Controller {
     this.resetSubtitleWindow()
     this.subtitleCues = []
     if (this.hasSubtitleOverlayTarget) {
-      this.subtitleOverlayTarget.textContent = ""
+      if (this.hasSubtitleTextTarget) this.subtitleTextTarget.textContent = ""
       this.subtitleOverlayTarget.classList.add("hidden")
     }
   }
@@ -2632,12 +2632,12 @@ export default class extends Controller {
       .map((cue) => cue.text)
 
     if (activeCues.length === 0) {
-      this.subtitleOverlayTarget.textContent = ""
+      if (this.hasSubtitleTextTarget) this.subtitleTextTarget.textContent = ""
       this.subtitleOverlayTarget.classList.add("hidden")
       return
     }
 
-    this.subtitleOverlayTarget.textContent = activeCues.join("\n")
+    if (this.hasSubtitleTextTarget) this.subtitleTextTarget.textContent = activeCues.join("\n")
     this.subtitleOverlayTarget.classList.remove("hidden")
   }
 

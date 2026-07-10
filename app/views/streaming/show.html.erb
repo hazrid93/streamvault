@@ -52,8 +52,12 @@
   </video>
 
   <div data-video-player-target="subtitleOverlay"
-       class="hidden pointer-events-none absolute left-1/2 z-20 max-w-3xl -translate-x-1/2 px-4 py-2 rounded-lg bg-black/60 text-center text-lg font-semibold text-white"
-       style="bottom: 6.5rem; white-space: pre-line; text-shadow: 0 2px 8px rgba(0,0,0,0.95);"></div>
+       class="hidden pointer-events-none absolute inset-x-0 z-20 px-6 text-center"
+       style="bottom: 6.5rem; padding-left: calc(env(safe-area-inset-left, 0px) + 1.5rem); padding-right: calc(env(safe-area-inset-right, 0px) + 1.5rem);">
+    <span data-video-player-target="subtitleText"
+          class="inline-block max-w-3xl px-4 py-2 rounded-lg bg-black/60 text-center text-lg font-semibold text-white"
+          style="white-space: pre-line; text-shadow: 0 2px 8px rgba(0,0,0,0.95);"></span>
+  </div>
 
   <%# Initial playback overlay (hidden once media actually starts playing) %>
   <div data-video-player-target="startupOverlay"

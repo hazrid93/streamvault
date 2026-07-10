@@ -97,7 +97,7 @@ class ContentStreamingService
       all_streams.concat(result.data) if result&.success?
     end
 
-    ServiceResult.success(all_streams)
+    ServiceResult.success(StreamOrdering.sort(all_streams))
   end
 
   def stream_candidates(streams)
