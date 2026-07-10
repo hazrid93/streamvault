@@ -128,13 +128,38 @@ RSpec.describe TranscodeService do
       command = described_class.send(:build_ffmpeg_command,
         "https://example.test/video-h264-1080p.mkv",
         headers: { "Authorization" => "Bearer token" },
-        start_seconds: 42.5
+        start_seconds: 0
       )
 
       expect(argument_pairs(command)).to include([ "-c:v", "copy" ])
-      expect(argument_pairs(command)).to include([ "-ss", "42.5" ])
+      expect(command).not_to include("-ss")
       expect(argument_pairs(command)).to include([ "-headers", "Authorization: Bearer token\r\n" ])
       expect(command).not_to include("libx264")
+    end
+
+    it "transcodes browser-safe video after a seek on standard and requested-remux paths" do
+      output = {
+        "streams" => [
+          { "codec_name" => "h264", "width" => 1920, "height" => 1080, "pix_fmt" => "yuv420p" }
+        ]
+      }.to_json
+
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      commands = [ false, true ].map do |remux|
+        described_class.send(:build_ffmpeg_command,
+          "https://example.test/video-h264-1080p.mkv",
+          headers: {},
+          start_seconds: 42.5,
+          remux: remux
+        )
+      end
+
+      commands.each do |command|
+        expect(argument_pairs(command)).to include([ "-ss", "42.5" ])
+        expect(argument_pairs(command)).to include([ "-c:v", "libx264" ])
+        expect(argument_pairs(command)).not_to include([ "-c:v", "copy" ])
+      end
     end
 
     it "transcodes HEVC/UHD video to browser-safe H.264" do
@@ -275,8 +300,8 @@ RSpec.describe TranscodeService do
 
       expect(command).not_to include("-filter_complex")
       expect(argument_pairs(command)).to include([ "-map", "0:v:0" ])
-      expect(argument_pairs(command)).to include([ "-c:v", "copy" ])
-      expect(argument_pairs(command)).not_to include([ "-c:v", "libx264" ])
+      expect(argument_pairs(command)).to include([ "-c:v", "libx264" ])
+      expect(argument_pairs(command)).not_to include([ "-c:v", "copy" ])
     end
 
     it "uses VideoToolbox hardware encoding when available" do
@@ -374,13 +399,13 @@ RSpec.describe TranscodeService do
       )
 
       expect(argument_pairs(command)).to include([ "-map", "0:1" ])
-      # AAC source audio is copied verbatim (preserves timestamps, avoids
-      # A/V drift from re-encoding).  Non-AAC sources are re-encoded.
-      expect(argument_pairs(command)).to include([ "-c:a", "copy" ])
+      expect(argument_pairs(command)).to include([ "-c:a", "aac" ])
+      expect(argument_pairs(command)).to include([ "-af", "aresample=async=1000:first_pts=0" ])
+      expect(argument_pairs(command)).not_to include([ "-c:a", "copy" ])
       expect(argument_pairs(command)).to include([ "-f", "hls" ])
     end
 
-    it "re-encodes non-AAC audio sources to AAC with aresample sync" do
+    it "re-encodes non-AAC audio sources to AAC with continuous clock correction" do
       track_output = {
         "streams" => [
           { "index" => 1, "codec_type" => "audio", "codec_name" => "ac3", "channels" => 6, "tags" => { "language" => "eng" }, "disposition" => { "default" => 1 } }
@@ -401,8 +426,28 @@ RSpec.describe TranscodeService do
       pairs = argument_pairs(command)
       expect(pairs).to include([ "-c:a", "aac" ])
       expect(pairs).to include([ "-b:a", "192k" ])
-      expect(pairs).to include([ "-af", "aresample=async=1" ])
+      expect(pairs).to include([ "-af", "aresample=async=1000:first_pts=0" ])
       expect(pairs).not_to include([ "-c:a", "copy" ])
+    end
+
+    it "applies generated input timestamps before -i on both output paths" do
+      hls_command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv",
+        headers: {},
+        start_seconds: 0,
+        output_spec: :hls,
+        segment_dir: "/tmp/hls/timestamps"
+      )
+      fmp4_command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv",
+        headers: {},
+        start_seconds: 0
+      )
+
+      [ hls_command, fmp4_command ].each do |command|
+        expect(argument_pairs(command)).to include([ "-fflags", "+genpts" ])
+        expect(command.index("-fflags")).to be < command.index("-i")
+      end
     end
   end
 
@@ -547,7 +592,7 @@ RSpec.describe TranscodeService do
       expect(result.vtt).to eq("")
     end
 
-    it "reports a packet timeout as an empty subtitle window without falling back to ffmpeg" do
+    it "reports a packet timeout as retryable without falling back to the slower extractor" do
       track_output = {
         "streams" => [
           { "index" => 3, "codec_type" => "subtitle", "codec_name" => "subrip", "tags" => { "language" => "eng", "title" => "forced" }, "disposition" => { "default" => 0 } }
@@ -556,7 +601,7 @@ RSpec.describe TranscodeService do
 
       allow(described_class).to receive(:capture_command) do |cmd, **kwargs|
         if cmd.include?("-show_data")
-          expect(kwargs[:timeout_seconds]).to eq(described_class::FORCED_SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
+          expect(kwargs[:timeout_seconds]).to eq(described_class::SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
           capture_result("", timed_out: true)
         else
           capture_result(track_output)
@@ -570,7 +615,7 @@ RSpec.describe TranscodeService do
         start_seconds: 120
       )
 
-      expect(result.status).to eq(:empty_window)
+      expect(result.status).to eq(:timeout)
       expect(result.source).to eq(:ffprobe_packets)
       expect(result.diagnostic).to eq("ffprobe packet extraction timed out")
     end
