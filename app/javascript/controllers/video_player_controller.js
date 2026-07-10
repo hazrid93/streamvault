@@ -2378,7 +2378,7 @@ export default class extends Controller {
       const prefetchedResponse = cachedPrefetch || (pendingPrefetch ? await pendingPrefetch : null)
       const response = prefetchedResponse || await this.fetchSubtitleResponse(url, abortController.signal)
       if (this.selectedSubtitleStream !== requestedSubtitleStream || this.subtitleLoadToken !== loadToken) return
-      this.applySubtitleResponse(response, windowStart)
+      this.applySubtitleResponse(response)
     } catch (e) {
       if (e.name === "AbortError") return
 
@@ -2425,7 +2425,7 @@ export default class extends Controller {
     }
   }
 
-  applySubtitleResponse(response, windowStart) {
+  applySubtitleResponse(response) {
     if (response.status === 204) {
       this.subtitleRetryAfter = 0
       this.subtitleCues = this.pruneSubtitleCues(this.subtitleCues, this.currentPlaybackPosition())
@@ -2439,7 +2439,7 @@ export default class extends Controller {
       return
     }
 
-    const incomingCues = this.parseWebVtt(response.text, windowStart)
+    const incomingCues = this.parseWebVtt(response.text)
     this.subtitleCues = this.mergeSubtitleCues(this.subtitleCues, incomingCues, this.currentPlaybackPosition())
     this.subtitleRetryAfter = 0
     this.updateSubtitleOverlay(this.currentPlaybackPosition())
@@ -2544,23 +2544,13 @@ export default class extends Controller {
     return cues.filter((cue) => cue.end >= keepAfter)
   }
 
-  parseWebVtt(text, offsetSeconds = 0) {
-    const cues = text
+  parseWebVtt(text) {
+    return text
       .replace(/^\uFEFF/, "")
       .split(/\r?\n\s*\r?\n/)
       .filter((block) => block.includes("-->"))
       .map((block) => this.parseWebVttCue(block))
       .filter(Boolean)
-
-    if (offsetSeconds <= 0 || cues.some((cue) => cue.start >= offsetSeconds - 30)) {
-      return cues
-    }
-
-    return cues.map((cue) => ({
-      ...cue,
-      start: cue.start + offsetSeconds,
-      end: cue.end + offsetSeconds
-    }))
   }
 
   parseWebVttCue(block) {
