@@ -47,8 +47,10 @@ class TranscodeService
   MAX_VALID_DURATION_SECONDS = 24 * 60 * 60
   MAX_STREAM_INDEX = 200
   SUBTITLE_EXTRACTION_TIMEOUT_SECONDS = 45
-  SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS = 12
-  FORCED_SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS = 8
+  # Representative remote Real-Debrid files can need more than 12 seconds
+  # to seek a sparse subtitle stream. A timeout is a retryable extraction
+  # failure, not proof that the requested window contains no cues.
+  SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS = 30
   SUBTITLE_EXTRACTION_WINDOW_SECONDS = 15
   MIN_SUBTITLE_EXTRACTION_WINDOW_SECONDS = 5
   MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS = 60
@@ -57,6 +59,11 @@ class TranscodeService
   MAX_COPY_VIDEO_HEIGHT = 1080
   SAFE_VIDEO_FILTER =
     "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+  # Keep the audio clock locked to its timestamps.  Values greater than 1
+  # allow soft sample-rate compensation (up to this many samples/second),
+  # while first_pts=0 pads or trims the beginning onto the same zero-based
+  # timeline as video.
+  AUDIO_SYNC_FILTER = "aresample=async=1000:first_pts=0"
   VIDEO_TRANSCODE_ARGS = [
     "-c:v", "libx264",
     "-preset", "ultrafast",
@@ -473,7 +480,7 @@ class TranscodeService
       start_seconds: seek_start_seconds,
       duration_seconds: extraction_duration_seconds
     )
-    if packet_subtitles.ok? || packet_subtitles.empty_window?
+    if packet_subtitles.ok? || packet_subtitles.empty_window? || packet_subtitles.status == :timeout
       log_subtitle_result(packet_subtitles, stream_index: stream_index, start_seconds: seek_start_seconds)
       return packet_subtitles
     end
@@ -528,8 +535,8 @@ class TranscodeService
       input_url
     ]
 
-    result = capture_command(cmd, timeout_seconds: subtitle_packet_timeout_seconds(track))
-    return subtitle_result(:empty_window, source: :ffprobe_packets, diagnostic: "ffprobe packet extraction timed out") if result.timed_out
+    result = capture_command(cmd, timeout_seconds: SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
+    return subtitle_result(:timeout, source: :ffprobe_packets, diagnostic: "ffprobe packet extraction timed out") if result.timed_out
     return subtitle_result(:failed, source: :ffprobe_packets, diagnostic: "ffprobe packets exited unsuccessfully") unless result.status&.success?
 
     packet_result = subtitle_packets_to_webvtt(result.stdout, track[:codec], start_seconds, duration_seconds)
@@ -656,26 +663,33 @@ class TranscodeService
     probe_thread.join
     media_tracks_thread.join
 
-    selected_audio = selected_audio_track(
+    selected_audio_index = selected_audio_stream_index(
       input_url,
       headers: headers,
       audio_stream: audio_stream,
       default_language: default_language,
       preferred_languages: preferred_languages
     )
-    selected_audio_index = selected_audio&.dig(:index)
     selected_burn_subtitle_track = selected_burn_subtitle_track(input_url, headers: headers, subtitle_stream: subtitle_stream)
+    seek_start_seconds = normalized_start_seconds(start_seconds)
     # Remux mode: copy video stream verbatim (-c:v copy) with no decode,
     # scale, or re-encode.  Runs at near network speed.  Only used when
     # the frontend detects H.264 or HEVC video and requests remux=1.
     # Subtitle burn requires re-encoding video, so remux is ignored if a
     # burn subtitle track is selected — falls through to normal transcode.
+    #
+    # A non-zero seek must also be decoded/re-encoded.  Fast input seeking
+    # starts a copied video stream at the preceding keyframe, while decoded
+    # audio is accurately trimmed to the requested time.  With a long GOP
+    # that puts audio seconds ahead of video after every resume, seek, or
+    # recovery.  Decoding video lets ffmpeg discard the same pre-roll from
+    # both streams and start them on one timeline.
     effective_remux = remux && !selected_burn_subtitle_track
     video_args = if selected_burn_subtitle_track
       transcode_args
-    elsif effective_remux
+    elsif effective_remux && seek_start_seconds.zero?
       [ "-c:v", "copy" ]
-    elsif browser_safe_video?(video_stream)
+    elsif browser_safe_video?(video_stream) && seek_start_seconds.zero?
       [ "-c:v", "copy" ]
     else
       [ "-vf", SAFE_VIDEO_FILTER, *transcode_args ]
@@ -718,6 +732,10 @@ class TranscodeService
     # frames are in system memory (default output format), so the
     # software scale/format filter below can process them normally.
     cmd += hwaccel_args if video_args != [ "-c:v", "copy" ]
+    # Generate only missing presentation timestamps from decode timestamps.
+    # This is an input flag, so it must precede -i; applying it to only the
+    # fMP4 output left HLS and inputs with incomplete PTS untreated.
+    cmd += [ "-fflags", "+genpts" ]
     # Moderate probe limits -- enough for MKV and MPEG-TS (M2TS).
     # M2TS needs more data than MKV because PAT/PMT tables are
     # interleaved every ~100ms in 188-byte packets. 32K was too
@@ -726,7 +744,6 @@ class TranscodeService
     cmd += [ "-analyzeduration", "1000000", "-probesize", "1000000" ]
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     # Input seeking (before -i): fast, uses the container's seek table.
-    seek_start_seconds = normalized_start_seconds(start_seconds)
     cmd += [ "-ss", seek_start_seconds.to_s ] if seek_start_seconds.positive?
     cmd += [ "-i", input_url ]
     if selected_burn_subtitle_track
@@ -742,26 +759,13 @@ class TranscodeService
     end
     cmd += [ "-sn", "-dn" ]
     cmd += video_args
-    # Audio output: copy browser-safe AAC sources verbatim to preserve
-    # original timestamps; re-encode everything else (AC3, DTS, FLAC, etc.)
-    # to AAC.  Re-encoding AAC→AAC with +genpts regenerates timestamps and
-    # distributes the source's natural audio/video duration mismatch as
-    # gradual drift — copying the original packets keeps the source's native
-    # timing intact.  The MSE SourceBuffer is configured for mp4a.40.2
-    # (AAC LC), so an AAC source is already in the right codec.  5.1-channel
-    # AAC plays correctly in Chrome/Edge (downmixed to stereo by the browser
-    # if the output device is stereo, same as native playback).
-    audio_copyable = selected_audio&.dig(:codec) == "aac"
-    if audio_copyable
-      cmd += [ "-c:a", "copy" ]
-    else
-      cmd += [ "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-               # aresample=async=1 forces audio timestamp resynchronization
-               # (stretch/squeeze to match video PTS) for sources being
-               # re-encoded.  Applied as an -af audio filter (aresample is
-               # part of libswresample, a mandatory ffmpeg dependency).
-               "-af", "aresample=async=1" ]
-    end
+    # Normalize every audio codec to AAC and continuously reconcile samples
+    # with the source timestamps.  Copying AAC bypassed synchronization for
+    # timestamp gaps/discontinuities, while async=1 on other codecs only did
+    # hard fill/trim and could not correct gradual clock drift.  first_pts=0
+    # also puts delayed/early audio on the same zero-based timeline as video.
+    cmd += [ "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+             "-af", AUDIO_SYNC_FILTER ]
     cmd += case output_spec
     when :hls
       raise ArgumentError, "segment_dir is required for HLS output" if segment_dir.blank?
@@ -783,7 +787,6 @@ class TranscodeService
         # access point as Chrome's MSE chunk demuxer requires.  Setting
         # frag_duration forces fragments at fixed time intervals that
         # don't align with keyframes → CHUNK_DEMUXER_ERROR_APPEND_FAILED.
-        "-fflags", "+genpts",
         "pipe:1"
       ]
     end
@@ -949,36 +952,29 @@ class TranscodeService
   end
   private_class_method :log_subtitle_result
 
-  # Returns the selected audio track (full hash with :index, :codec,
-  # :channels, etc.) or nil.  Selection order:
+  # Returns the selected audio stream index or nil. Selection order:
   #   1. Explicit stream index (audio_stream param) if it exists.
   #   2. Preferred language track (lowest position wins on ties).
   #   3. Track marked default.
   #   4. First audio track.
-  # Returning the full track (not just the index) lets the caller branch
-  # on codec — e.g. copy AAC sources verbatim instead of re-encoding,
-  # which preserves original timestamps and avoids A/V drift.
-  def self.selected_audio_track(input_url, headers:, audio_stream:, default_language:, preferred_languages:)
+  def self.selected_audio_stream_index(input_url, headers:, audio_stream:, default_language:, preferred_languages:)
     explicit_stream_index = normalized_stream_index(audio_stream)
     tracks = probe_media_tracks(input_url, headers: headers)[:audio]
 
-    if explicit_stream_index
-      match = tracks.find { |track| track[:index] == explicit_stream_index }
-      return match if match
-    end
+    return explicit_stream_index if explicit_stream_index && tracks.any? { |track| track[:index] == explicit_stream_index }
 
     language_priority = language_priority(default_language, preferred_languages)
     preferred_track = tracks
       .select { |track| language_priority.include?(track[:language]) }
       .min_by { |track| [ language_priority.index(track[:language]), track[:position] ] }
-    return preferred_track if preferred_track
+    return preferred_track[:index] if preferred_track
 
     default_track = tracks.find { |track| track[:default] }
-    return default_track if default_track
+    return default_track[:index] if default_track
 
-    tracks.first
+    tracks.first&.dig(:index)
   end
-  private_class_method :selected_audio_track
+  private_class_method :selected_audio_stream_index
 
   def self.extract_media_tracks(output)
     data = JSON.parse(output)
@@ -1240,14 +1236,6 @@ class TranscodeService
     seconds.clamp(MIN_SUBTITLE_EXTRACTION_WINDOW_SECONDS, MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS)
   end
   private_class_method :normalized_subtitle_duration_seconds
-
-  def self.subtitle_packet_timeout_seconds(track)
-    title = track[:title].to_s.downcase
-    return FORCED_SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS if title.include?("forced")
-
-    SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS
-  end
-  private_class_method :subtitle_packet_timeout_seconds
 
   def self.extract_probe_duration(output)
     data = JSON.parse(output)
