@@ -125,7 +125,7 @@
         </div>
       <% elsif @streams.present? %>
         <h2 class="text-xl font-bold text-white mt-8 mb-4">Available Streams</h2>
-        <%# Quality / size filter + sort (client-side via stream_filter controller) %>
+        <%# Quality filter + RD-first stream sorting (client-side via stream_filter controller) %>
         <div data-controller="stream-filter">
           <div class="flex flex-wrap items-center gap-3 mb-4">
             <div class="inline-flex flex-wrap gap-1">
@@ -136,7 +136,7 @@
               <% end %>
             </div>
             <div class="inline-flex flex-wrap gap-1">
-              <% [["quality", "Best quality"], ["size", "Largest size"]].each do |val, label| %>
+              <% [["seeders", "Most seeders"], ["quality", "Best quality"], ["size", "Largest size"]].each do |val, label| %>
                 <button type="button" data-action="click->stream-filter#sort" data-sort="<%= val %>"
                       class="px-3 py-1 rounded-full text-xs font-medium transition-colors border border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted"><%= label %></button>
               <% end %>
@@ -147,7 +147,7 @@
           <div class="space-y-2">
             <% @streams.each do |stream| %>
               <% size_bytes = stream[:raw_size] || (stream[:size].to_s =~ /([\d.]+)\s*GB/i ? ($1.to_f * 1024**3).to_i : stream[:size].to_s =~ /([\d.]+)\s*MB/i ? ($1.to_f * 1024**2).to_i : 0) %>
-              <div class="flex items-center justify-between gap-3 p-3 bg-sv-surface rounded-lg" data-stream-filter-target="row" data-quality="<%= stream[:quality] %>" data-size="<%= size_bytes %>">
+              <div class="flex items-center justify-between gap-3 p-3 bg-sv-surface rounded-lg" data-stream-filter-target="row" data-quality="<%= stream[:quality] %>" data-size="<%= size_bytes %>" data-rd-plus="<%= stream[:rd_plus] ? 'true' : 'false' %>" data-seeders="<%= stream[:seeders] %>">
                 <div class="min-w-0 flex-1 overflow-hidden">
                   <div class="flex items-center gap-1.5">
                     <% if stream[:rd_plus] %><span class="badge badge-success shrink-0">RD+</span><% end %>
@@ -159,6 +159,9 @@
                       <span class="px-1.5 py-0.5 rounded text-xs font-medium bg-sv-surface-hover text-sv-text-muted"><%= lang %></span>
                     <% end %>
                     <span class="text-xs text-sv-text-muted"><%= stream[:size] %></span>
+                    <% unless stream[:seeders].nil? %>
+                      <span class="text-xs text-sv-text-muted" title="Seeders">👤 <%= stream[:seeders] %></span>
+                    <% end %>
                   </div>
                 </div>
                 <div class="flex items-center gap-3 shrink-0">

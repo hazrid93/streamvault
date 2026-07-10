@@ -180,6 +180,6 @@ class ContentController < ApplicationController
       all_streams.concat(result.data) if result&.success?
     end
 
-    all_streams.empty? ? ServiceResult.failure("No streams available") : ServiceResult.success(all_streams)
+    all_streams.empty? ? ServiceResult.failure("No streams available") : ServiceResult.success(StreamOrdering.sort(all_streams))
   end
 end

@@ -25,8 +25,8 @@ class CometService
   include StreamCompatibility
   include Cacheable
   LANGUAGE_PATTERNS = TorrentioService::LANGUAGE_PATTERNS
-  QUALITY_SORT = TorrentioService::QUALITY_SORT
   STREAMS_CACHE_TTL = 1.hour
+  STREAM_CACHE_VERSION = 2
 
   def self.comet_url
     ENV.fetch("COMET_URL", "")
@@ -57,7 +57,7 @@ class CometService
     # RD instant availability per key, and resolve URLs embed the key), so
     # cache per-RD-key-hash.  Stale-while-revalidate: a stale listing is
     # served instantly and refreshed in the background.
-    cache_key = "comet:streams:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    cache_key = "comet:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
     parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
       fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
     end
@@ -212,14 +212,7 @@ class CometService
       stream.merge(language_score: stream_language_score(stream, language_priority))
     end
 
-    streams_with_scores.sort_by do |s|
-      language_score = s[:language_score]
-      compatibility_score = -(s[:compatibility_score] || 0)
-      rd_score = s[:rd_plus] ? 0 : 1
-      quality_score = QUALITY_SORT[s[:quality]] || 4
-      size_bytes = s[:raw_size].is_a?(Numeric) ? s[:raw_size] : 0
-      [ language_score, compatibility_score, rd_score, quality_score, -size_bytes ]
-    end
+    StreamOrdering.sort(streams_with_scores)
   end
 
   def stream_language_score(stream, language_priority)
@@ -275,16 +268,11 @@ class CometService
   end
 
   def extract_seeders(stream, description = nil)
-    if stream["seeders"]
-      stream["seeders"]
-    else
-      text = [ stream["title"], description ].compact.join(" ")
-      if text =~ /👤\s*(\d+)/
-        $1.to_i
-      else
-        0
-      end
-    end
+    value = stream["seeders"]
+    return value.to_i if value.is_a?(Numeric) || value.to_s.match?(/\A\d+\z/)
+
+    match = [ stream["title"], description ].compact.join(" ").match(/👤\s*(\d+)/)
+    match ? match[1].to_i : nil
   end
 
   def format_size(bytes)

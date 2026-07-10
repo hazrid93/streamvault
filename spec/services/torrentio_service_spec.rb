@@ -69,6 +69,46 @@ RSpec.describe TorrentioService do
       expect(result.data.first[:quality]).to eq("1080p")
     end
 
+    it "detects RD+ markers and sorts RD streams by seeders before non-RD streams" do
+      stub_request(:get, %r{torrentio\.strem\.fun/([^/]+/)?stream/movie/tt1375666\.json})
+        .to_return(
+          status: 200,
+          body: {
+            "streams" => [
+              { "name" => "Torrentio 4K", "title" => "non-RD 👤 500", "seeders" => 500 },
+              { "name" => "[RD+] Torrentio 1080p", "title" => "RD low 👤 5", "seeders" => 5 },
+              { "name" => "[RD+] Torrentio 720p", "title" => "RD high 👤 40", "seeders" => 40 }
+            ]
+          }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      result = service.streams("tt1375666", "movie")
+
+      expect(result.data.pluck(:title)).to eq([ "RD high 👤 40", "RD low 👤 5", "non-RD 👤 500" ])
+      expect(result.data.pluck(:rd_plus)).to eq([ true, true, false ])
+      expect(result.data.pluck(:seeders)).to eq([ 40, 5, 500 ])
+    end
+
+    it "keeps missing seeder information distinct from a reported zero" do
+      stub_request(:get, %r{torrentio\.strem\.fun/([^/]+/)?stream/movie/tt1375666\.json})
+        .to_return(
+          status: 200,
+          body: {
+            "streams" => [
+              { "name" => "Torrentio 1080p", "title" => "Unknown seeders" },
+              { "name" => "Torrentio 720p", "title" => "Zero seeders", "seeders" => 0 }
+            ]
+          }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      result = service.streams("tt1375666", "movie")
+
+      expect(result.data.pluck(:title)).to eq([ "Zero seeders", "Unknown seeders" ])
+      expect(result.data.pluck(:seeders)).to eq([ 0, nil ])
+    end
+
     it "filters to preferred languages and sorts the default language first" do
       stub_request(:get, %r{torrentio\.strem\.fun/([^/]+/)?stream/movie/tt1375666\.json})
         .to_return(

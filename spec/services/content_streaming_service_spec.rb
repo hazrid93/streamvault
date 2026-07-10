@@ -19,6 +19,26 @@ RSpec.describe ContentStreamingService do
       )
   }
 
+  describe "#fetch_streams" do
+    it "globally groups merged provider results by RD status and seeders" do
+      comet = instance_double(CometService)
+      torrentio = instance_double(TorrentioService)
+      allow(StreamProvider).to receive(:providers).and_return([ comet, torrentio ])
+      allow(comet).to receive(:streams).and_return(ServiceResult.success([
+        { title: "non-RD high", rd_plus: false, seeders: 100 },
+        { title: "RD low", rd_plus: true, seeders: 3 }
+      ]))
+      allow(torrentio).to receive(:streams).and_return(ServiceResult.success([
+        { title: "RD high", rd_plus: true, seeders: 20 },
+        { title: "non-RD low", rd_plus: false, seeders: 2 }
+      ]))
+
+      result = service.send(:fetch_streams, "tt1375666", "movie")
+
+      expect(result.data.pluck(:title)).to eq([ "RD high", "RD low", "non-RD high", "non-RD low" ])
+    end
+  end
+
   describe "#start_stream" do
     it "returns failure when RealDebrid key is missing" do
       user.update!(realdebrid_api_key: nil)

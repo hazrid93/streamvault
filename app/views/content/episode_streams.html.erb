@@ -15,6 +15,9 @@
               <span class="px-1.5 py-0.5 rounded text-xs font-medium bg-sv-surface text-sv-text-muted"><%= lang %></span>
             <% end %>
             <span class="text-xs text-sv-text-muted"><%= stream[:size] %></span>
+            <% unless stream[:seeders].nil? %>
+              <span class="text-xs text-sv-text-muted" title="Seeders">👤 <%= stream[:seeders] %></span>
+            <% end %>
           </div>
         </div>
         <div class="flex items-center gap-3 shrink-0">

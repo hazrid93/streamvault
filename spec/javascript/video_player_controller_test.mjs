@@ -107,6 +107,28 @@ test("clearing cues cancels stale loads and invalidates the remembered window", 
   assert.equal(player.subtitleCues.length, 0)
 })
 
+test("subtitle text renders inside the centered caption box", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set(["hidden"])
+  player.hasSubtitleOverlayTarget = true
+  player.hasSubtitleTextTarget = true
+  player.subtitleOverlayTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name)
+    }
+  }
+  player.subtitleTextTarget = { textContent: "" }
+  player.subtitleCues = [{ start: 10, end: 20, text: "Centered on the TV" }]
+  player.subtitleOffset = 0
+  player.ensureSubtitleWindow = () => {}
+
+  player.updateSubtitleOverlay(15)
+
+  assert.equal(player.subtitleTextTarget.textContent, "Centered on the TV")
+  assert.equal(classes.has("hidden"), false)
+})
+
 test("HLS receives selected audio and bitmap subtitle tracks but not text overlays", () => {
   const player = new VideoPlayerController()
   player.selectedAudioStream = "2"
