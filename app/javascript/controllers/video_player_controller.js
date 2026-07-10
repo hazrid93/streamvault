@@ -1,12 +1,12 @@
 import { Controller } from "@hotwired/stimulus"
 
 const MIN_VALID_DURATION_SECONDS = 60
-const SUBTITLE_STARTUP_WINDOW_SECONDS = 5
-const SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS = 2
-const SUBTITLE_WINDOW_SECONDS = 15
+const SUBTITLE_STARTUP_WINDOW_SECONDS = 60
+const SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS = 5
+const SUBTITLE_WINDOW_SECONDS = 60
 const SUBTITLE_LOOK_BEHIND_SECONDS = 5
 const EXTERNAL_SUBTITLE_WINDOW_SECONDS = 60
-const SUBTITLE_PREFETCH_SECONDS = 10
+const SUBTITLE_PREFETCH_SECONDS = 20
 const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
@@ -82,6 +82,8 @@ export default class extends Controller {
     this.subtitleCues = []
     this.subtitleWindowStart = null
     this.subtitleWindowEnd = null
+    this.subtitlePendingWindowStart = null
+    this.subtitlePendingWindowEnd = null
     this.subtitleOffset = 0
     this.subtitleLoading = false
     this.subtitleLoadToken = 0
@@ -2357,13 +2359,15 @@ export default class extends Controller {
     const requestedDurationSeconds = externalSubtitle ? EXTERNAL_SUBTITLE_WINDOW_SECONDS : this.subtitleWindowDuration(durationSeconds)
     const shouldPrimeContinuation = !externalSubtitle && requestedDurationSeconds < SUBTITLE_WINDOW_SECONDS
     const windowStart = Math.max(0, Math.floor(currentPosition) - this.subtitleLookBehind(lookBehindSeconds, requestedDurationSeconds))
-    if (this.subtitleLoading && this.subtitleWindowStart === windowStart) return
+    const windowEnd = windowStart + requestedDurationSeconds
+    if (this.subtitleLoading && this.subtitlePendingWindowStart === windowStart && this.subtitlePendingWindowEnd === windowEnd) return
 
+    const hadLoadedWindow = this.subtitleWindowStart !== null && this.subtitleWindowEnd !== null
     const loadToken = this.subtitleLoadToken + 1
     this.subtitleLoadToken = loadToken
     this.subtitleLoading = true
-    this.subtitleWindowStart = windowStart
-    this.subtitleWindowEnd = windowStart + requestedDurationSeconds
+    this.subtitlePendingWindowStart = windowStart
+    this.subtitlePendingWindowEnd = windowEnd
     this.abortSubtitleLoad()
     const abortController = new AbortController()
     this.subtitleAbortController = abortController
@@ -2378,16 +2382,24 @@ export default class extends Controller {
       const prefetchedResponse = cachedPrefetch || (pendingPrefetch ? await pendingPrefetch : null)
       const response = prefetchedResponse || await this.fetchSubtitleResponse(url, abortController.signal)
       if (this.selectedSubtitleStream !== requestedSubtitleStream || this.subtitleLoadToken !== loadToken) return
-      this.applySubtitleResponse(response)
+      if (this.applySubtitleResponse(response)) {
+        this.rememberSubtitleWindow(windowStart, requestedDurationSeconds)
+      } else if (!hadLoadedWindow) {
+        this.resetSubtitleWindow()
+      }
     } catch (e) {
       if (e.name === "AbortError") return
 
       console.warn("Subtitle load failed:", e)
-      this.resetSubtitleWindow()
+      if (!hadLoadedWindow) this.resetSubtitleWindow()
       this.scheduleSubtitleRetry()
     } finally {
       const requestStillCurrent = this.subtitleLoadToken === loadToken
-      if (requestStillCurrent) this.subtitleLoading = false
+      if (requestStillCurrent) {
+        this.subtitleLoading = false
+        this.subtitlePendingWindowStart = null
+        this.subtitlePendingWindowEnd = null
+      }
       if (this.subtitleAbortController === abortController) this.subtitleAbortController = null
       this.finishSubtitlePlaybackHold(loadToken)
       if (requestStillCurrent && shouldPrimeContinuation) this.primeSubtitleContinuation(requestedSubtitleStream)
@@ -2430,19 +2442,19 @@ export default class extends Controller {
       this.subtitleRetryAfter = 0
       this.subtitleCues = this.pruneSubtitleCues(this.subtitleCues, this.currentPlaybackPosition())
       this.updateSubtitleOverlay(this.currentPlaybackPosition())
-      return
+      return true
     }
 
     if (!response.ok) {
-      this.resetSubtitleWindow()
       this.scheduleSubtitleRetry()
-      return
+      return false
     }
 
     const incomingCues = this.parseWebVtt(response.text)
     this.subtitleCues = this.mergeSubtitleCues(this.subtitleCues, incomingCues, this.currentPlaybackPosition())
     this.subtitleRetryAfter = 0
     this.updateSubtitleOverlay(this.currentPlaybackPosition())
+    return true
   }
 
   beginSubtitlePlaybackHold(holdPlayback, loadToken) {
@@ -2475,6 +2487,23 @@ export default class extends Controller {
   resetSubtitleWindow() {
     this.subtitleWindowStart = null
     this.subtitleWindowEnd = null
+    this.subtitlePendingWindowStart = null
+    this.subtitlePendingWindowEnd = null
+  }
+
+  rememberSubtitleWindow(windowStart, durationSeconds) {
+    const windowEnd = windowStart + durationSeconds
+    const missingWindow = this.subtitleWindowStart === null || this.subtitleWindowEnd === null
+    const disjointWindow = !missingWindow && (windowStart > this.subtitleWindowEnd || windowEnd < this.subtitleWindowStart)
+
+    if (missingWindow || disjointWindow) {
+      this.subtitleWindowStart = windowStart
+      this.subtitleWindowEnd = windowEnd
+      return
+    }
+
+    this.subtitleWindowStart = Math.min(this.subtitleWindowStart, windowStart)
+    this.subtitleWindowEnd = Math.max(this.subtitleWindowEnd, windowEnd)
   }
 
   subtitleWindowDuration(value) {
@@ -2635,15 +2664,16 @@ export default class extends Controller {
     if (!this.textSubtitleSelected() || this.subtitleLoading) return
     if (this.subtitleRetryAfter && Date.now() < this.subtitleRetryAfter) return
 
-    // Skip if we already have a window covering the current position
-    if (this.subtitleWindowStart !== null && this.subtitleWindowEnd !== null &&
-        currentPos >= this.subtitleWindowStart - 2 && currentPos < this.subtitleWindowEnd) return
-
     const missingWindow = this.subtitleWindowStart === null || this.subtitleWindowEnd === null
     const beforeWindow = !missingWindow && currentPos < this.subtitleWindowStart
     const windowLength = missingWindow ? SUBTITLE_WINDOW_SECONDS : this.subtitleWindowEnd - this.subtitleWindowStart
     const prefetchSeconds = Math.min(SUBTITLE_PREFETCH_SECONDS, Math.max(1, windowLength / 2))
     const nearWindowEnd = !missingWindow && currentPos >= this.subtitleWindowEnd - prefetchSeconds
+    const insideWindow = !missingWindow && currentPos >= this.subtitleWindowStart - 2 && currentPos < this.subtitleWindowEnd
+
+    // Keep playback covered by the current cues, but begin the next fetch
+    // before this range expires. Remote subtitle extraction can take 10–20s.
+    if (insideWindow && !nearWindowEnd) return
 
     if (missingWindow || beforeWindow) {
       this.loadSubtitleTrack(currentPos, {
