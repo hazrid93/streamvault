@@ -94,6 +94,8 @@ test("clearing cues cancels stale loads and invalidates the remembered window", 
   player.subtitleLoading = true
   player.subtitleWindowStart = 100
   player.subtitleWindowEnd = 115
+  player.subtitlePendingWindowStart = 115
+  player.subtitlePendingWindowEnd = 175
   player.subtitleCues = [{ start: 101, end: 103, text: "Hello" }]
   player.hasSubtitleOverlayTarget = false
 
@@ -104,7 +106,60 @@ test("clearing cues cancels stale loads and invalidates the remembered window", 
   assert.equal(player.subtitleLoading, false)
   assert.equal(player.subtitleWindowStart, null)
   assert.equal(player.subtitleWindowEnd, null)
+  assert.equal(player.subtitlePendingWindowStart, null)
+  assert.equal(player.subtitlePendingWindowEnd, null)
   assert.equal(player.subtitleCues.length, 0)
+})
+
+test("subtitle windows cover a full minute even for short startup requests", () => {
+  const player = new VideoPlayerController()
+
+  assert.equal(player.subtitleWindowDuration(5), 60)
+  assert.equal(player.subtitleWindowDuration(15), 60)
+  assert.equal(player.subtitleWindowDuration(60), 60)
+})
+
+test("subtitle continuation starts before the loaded window expires", () => {
+  const player = new VideoPlayerController()
+  const loads = []
+  player.subtitleLoading = false
+  player.subtitleRetryAfter = 0
+  player.subtitleWindowStart = 100
+  player.subtitleWindowEnd = 160
+  player.textSubtitleSelected = () => true
+  player.loadSubtitleTrack = (position, options) => loads.push({ position, options })
+
+  player.ensureSubtitleWindow(139)
+  assert.equal(loads.length, 0)
+
+  player.ensureSubtitleWindow(140)
+  assert.equal(loads.length, 1)
+  assert.equal(loads[0].position, 160)
+  assert.equal(loads[0].options.durationSeconds, 60)
+})
+
+test("completed continuation windows extend rather than replace current coverage", () => {
+  const player = new VideoPlayerController()
+  player.subtitleWindowStart = 100
+  player.subtitleWindowEnd = 160
+
+  player.rememberSubtitleWindow(160, 60)
+
+  assert.equal(player.subtitleWindowStart, 100)
+  assert.equal(player.subtitleWindowEnd, 220)
+})
+
+test("failed continuation keeps the subtitle range already loaded", () => {
+  const player = new VideoPlayerController()
+  player.subtitleWindowStart = 100
+  player.subtitleWindowEnd = 160
+  player.scheduleSubtitleRetry = () => {}
+
+  const applied = player.applySubtitleResponse({ ok: false, status: 502, text: "" })
+
+  assert.equal(applied, false)
+  assert.equal(player.subtitleWindowStart, 100)
+  assert.equal(player.subtitleWindowEnd, 160)
 })
 
 test("subtitle parser never guesses a timeline offset after seeking", () => {
