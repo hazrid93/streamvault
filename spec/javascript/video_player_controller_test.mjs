@@ -107,6 +107,18 @@ test("clearing cues cancels stale loads and invalidates the remembered window", 
   assert.equal(player.subtitleCues.length, 0)
 })
 
+test("subtitle parser never guesses a timeline offset after seeking", () => {
+  const player = new VideoPlayerController()
+  const serverVtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nServer timestamp\n"
+
+  for (const seekPosition of [5, 20, 30, 40, 120]) {
+    const [cue] = player.parseWebVtt(serverVtt, seekPosition)
+
+    assert.equal(cue.start, 1, `seek ${seekPosition}s must not rebase the server timestamp`)
+    assert.equal(cue.end, 2, `seek ${seekPosition}s must not rebase the server timestamp`)
+  }
+})
+
 test("subtitle text renders inside the centered caption box", () => {
   const player = new VideoPlayerController()
   const classes = new Set(["hidden"])

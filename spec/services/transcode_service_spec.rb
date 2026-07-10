@@ -490,12 +490,19 @@ RSpec.describe TranscodeService do
       expect(output).to include("Hello packet")
     end
 
-    it "extracts the selected text subtitle stream from the requested start position" do
+    it "makes FFmpeg emit absolute fallback timestamps at every seek boundary" do
       track_output = {
         "streams" => [
           { "index" => 3, "codec_type" => "subtitle", "codec_name" => "subrip", "tags" => { "language" => "eng" }, "disposition" => { "default" => 0 } }
         ]
       }.to_json
+      expected_timing_by_seek = {
+        "5.0" => "00:00:06.000 --> 00:00:07.000",
+        "20.0" => "00:00:21.000 --> 00:00:22.000",
+        "30.0" => "00:00:31.000 --> 00:00:32.000",
+        "40.0" => "00:00:41.000 --> 00:00:42.000",
+        "120.0" => "00:02:01.000 --> 00:02:02.000"
+      }
 
       allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
         if cmd.include?("-show_data")
@@ -505,27 +512,31 @@ RSpec.describe TranscodeService do
         end
       end
       allow(described_class).to receive(:capture_subtitle_stdout_result) do |cmd|
-        expect(cmd).to include("-ss", "120.0")
+        offset = cmd.fetch(cmd.index("-output_ts_offset") + 1)
+        timing = expected_timing_by_seek.fetch(offset)
+        expect(cmd).to include("-ss", offset)
         expect(argument_pairs(cmd)).to include([ "-t", "5" ])
         expect(cmd).to include("-vn", "-an", "-dn")
         expect(argument_pairs(cmd)).to include([ "-map", "0:3" ])
         expect(argument_pairs(cmd)).to include([ "-c:s", "webvtt" ])
         described_class::SubtitleExtractionResult.new(
           status: :ok,
-          vtt: "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n",
+          vtt: "WEBVTT\n\n#{timing}\nHello\n",
           cue_count: 1,
           source: :ffmpeg
         )
       end
 
-      output = described_class.extract_subtitles_to_vtt(
-        "https://example.test/video-subtitles.mkv",
-        subtitle_stream: "3",
-        start_seconds: 120,
-        duration_seconds: 3
-      )
+      expected_timing_by_seek.each do |seek, timing|
+        output = described_class.extract_subtitles_to_vtt(
+          "https://example.test/video-subtitles.mkv",
+          subtitle_stream: "3",
+          start_seconds: seek,
+          duration_seconds: 3
+        )
 
-      expect(output).to start_with("WEBVTT")
+        expect(output).to include(timing), "expected absolute fallback timing after seeking to #{seek}s"
+      end
     end
 
     it "clamps large subtitle windows before extracting packets" do

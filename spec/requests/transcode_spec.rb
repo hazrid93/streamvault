@@ -203,6 +203,36 @@ RSpec.describe "Transcode", type: :request do
       )
     end
 
+    it "returns absolute fallback cues unchanged across seek boundaries" do
+      expected_timing_by_seek = {
+        "5.0" => "00:00:06.000 --> 00:00:07.000",
+        "20.0" => "00:00:21.000 --> 00:00:22.000",
+        "30.0" => "00:00:31.000 --> 00:00:32.000",
+        "40.0" => "00:00:41.000 --> 00:00:42.000",
+        "120.0" => "00:02:01.000 --> 00:02:02.000"
+      }
+      allow(TranscodeService).to receive(:extract_subtitles) do |_url, **kwargs|
+        timing = expected_timing_by_seek.fetch(kwargs.fetch(:start_seconds).to_s)
+        TranscodeService::SubtitleExtractionResult.new(
+          status: :ok,
+          vtt: "WEBVTT\n\n#{timing}\nFallback\n",
+          cue_count: 1,
+          source: :ffmpeg
+        )
+      end
+
+      expected_timing_by_seek.each do |seek, timing|
+        get transcode_subtitles_path, params: {
+          url: "https://download.real-debrid.com/d/file123/Inception.mkv",
+          subtitle_stream: "2",
+          start_seconds: seek
+        }
+
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include(timing)
+      end
+    end
+
     it "returns external subtitles as WebVTT" do
       allow(ExternalSubtitleService).to receive(:extract_subtitles).and_return(
         TranscodeService::SubtitleExtractionResult.new(

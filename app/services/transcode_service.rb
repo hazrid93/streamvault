@@ -497,7 +497,13 @@ class TranscodeService
       "-an",
       "-dn",
       "-map", "0:#{stream_index}",
-      "-c:s", "webvtt",
+      "-c:s", "webvtt"
+    ]
+    # Input seeking makes FFmpeg's fallback VTT timestamps relative to the
+    # seek point. Shift the muxed output back onto the video's absolute
+    # timeline so every subtitle source has the same timestamp contract.
+    cmd += [ "-output_ts_offset", seek_start_seconds.to_s ] if seek_start_seconds.positive?
+    cmd += [
       "-f", "webvtt",
       "pipe:1"
     ]
