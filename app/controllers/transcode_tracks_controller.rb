@@ -27,8 +27,15 @@ class TranscodeTracksController < ApplicationController
       default_language: current_user.default_stream_language
     )
 
-    subtitles = TranscodeService.selectable_subtitle_tracks(tracks[:subtitles] + external_subtitles)
     video_stream = probe_video_stream(input_url)
+    embedded_subtitles = tracks[:subtitles]
+    if bitmap_burn_too_expensive?(video_stream)
+      # Burning PGS/VobSub forces a full video re-encode. On 4K sources the
+      # software encoder cannot emit data before the playback timeout, so
+      # offer text/external tracks instead of a choice that stalls the movie.
+      embedded_subtitles = embedded_subtitles.select { |track| track[:text_supported] }
+    end
+    subtitles = TranscodeService.selectable_subtitle_tracks(embedded_subtitles + external_subtitles)
     render json: tracks.merge(
       subtitles: subtitles,
       video_codec: video_stream[:codec_name].to_s.downcase,
@@ -49,6 +56,12 @@ class TranscodeTracksController < ApplicationController
 
   def probe_video_stream(input_url)
     TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+  end
+
+  def bitmap_burn_too_expensive?(video_stream)
+    width = video_stream[:width].to_i
+    height = video_stream[:height].to_i
+    width > TranscodeService::MAX_COPY_VIDEO_WIDTH || height > TranscodeService::MAX_COPY_VIDEO_HEIGHT
   end
 
   # Can the file be played directly by the browser via <video src>?

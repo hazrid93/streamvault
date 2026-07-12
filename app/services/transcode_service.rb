@@ -676,7 +676,12 @@ class TranscodeService
       default_language: default_language,
       preferred_languages: preferred_languages
     )
-    selected_burn_subtitle_track = selected_burn_subtitle_track(input_url, headers: headers, subtitle_stream: subtitle_stream)
+    selected_burn_subtitle_track = selected_burn_subtitle_track(
+      input_url,
+      headers: headers,
+      subtitle_stream: subtitle_stream,
+      video_stream: video_stream
+    )
     seek_start_seconds = normalized_start_seconds(start_seconds)
     # Remux mode: copy video stream verbatim (-c:v copy) with no decode,
     # scale, or re-encode.  Runs at near network speed.  Only used when
@@ -848,9 +853,18 @@ class TranscodeService
   end
   private_class_method :hwaccel_args
 
-  def self.selected_burn_subtitle_track(input_url, headers:, subtitle_stream:)
+  def self.selected_burn_subtitle_track(input_url, headers:, subtitle_stream:, video_stream:)
     explicit_stream_index = normalized_stream_index(subtitle_stream)
     return nil unless explicit_stream_index
+
+    # Bitmap subtitles require compositing every decoded frame. Software
+    # burning a 4K source is slower than the first-data timeout and makes
+    # selecting subtitles stall playback. Ignore stale-client requests for
+    # those tracks; the tracks endpoint omits them and offers text/external
+    # alternatives instead.
+    width = video_stream[:width].to_i
+    height = video_stream[:height].to_i
+    return nil if width > MAX_COPY_VIDEO_WIDTH || height > MAX_COPY_VIDEO_HEIGHT
 
     track = probe_media_tracks(input_url, headers: headers)[:subtitles].find do |track|
       track[:index] == explicit_stream_index

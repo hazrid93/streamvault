@@ -114,6 +114,28 @@ RSpec.describe "Transcode", type: :request do
       expect(response.parsed_body["subtitles"].pluck("index")).to eq([ 2 ])
     end
 
+    it "omits embedded bitmap subtitles that would stall a 4K transcode" do
+      tracks = {
+        audio: [],
+        subtitles: [
+          { index: 24, language: "ENGLISH", label: "English · PGS", text_supported: false }
+        ]
+      }
+      external_subtitles = [
+        { index: "external:subdl:abc", language: "ENGLISH", label: "English · SubDL", text_supported: true, external: true }
+      ]
+      allow(TranscodeService).to receive(:probe_media_tracks).and_return(tracks)
+      allow(TranscodeService).to receive(:probe_video_stream).and_return(
+        codec_name: "hevc", width: 3840, height: 2160, pix_fmt: "yuv420p10le"
+      )
+      allow(ExternalSubtitleService).to receive(:search).and_return(external_subtitles)
+
+      get transcode_tracks_path, params: { url: "https://download.real-debrid.com/d/file123/movie.mkv" }
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["subtitles"].pluck("index")).to eq([ "external:subdl:abc" ])
+    end
+
     it "adds external subtitle tracks using content metadata" do
       tracks = { audio: [], subtitles: [] }
       external_subtitles = [

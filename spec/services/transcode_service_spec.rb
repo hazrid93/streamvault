@@ -270,6 +270,38 @@ RSpec.describe TranscodeService do
       expect(argument_pairs(command)).not_to include([ "-c:v", "copy" ])
     end
 
+    it "does not burn bitmap subtitles into a 4K software transcode" do
+      video_output = {
+        "streams" => [
+          { "codec_name" => "hevc", "width" => 3840, "height" => 2160, "pix_fmt" => "yuv420p10le" }
+        ]
+      }.to_json
+      track_output = {
+        "streams" => [
+          { "index" => 1, "codec_type" => "audio", "codec_name" => "aac", "tags" => { "language" => "eng" }, "disposition" => { "default" => 1 } },
+          { "index" => 24, "codec_type" => "subtitle", "codec_name" => "hdmv_pgs_subtitle", "tags" => { "language" => "eng" }, "disposition" => { "default" => 0 } }
+        ]
+      }.to_json
+
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        if cmd.include?("-select_streams")
+          capture_result(video_output)
+        else
+          capture_result(track_output)
+        end
+      end
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video-4k-pgs.mkv",
+        headers: {},
+        start_seconds: 120,
+        subtitle_stream: "24"
+      )
+
+      expect(command).not_to include("-filter_complex")
+      expect(argument_pairs(command)).to include([ "-map", "0:v:0" ])
+    end
+
     it "does not use the bitmap overlay filter for text subtitle streams" do
       video_output = {
         "streams" => [
