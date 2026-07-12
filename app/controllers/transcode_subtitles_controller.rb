@@ -41,14 +41,12 @@ class TranscodeSubtitlesController < ApplicationController
     seconds.finite? && seconds.positive? ? seconds : 0
   end
 
-  def normalized_duration_seconds(value)
-    seconds = value.to_i
-    return TranscodeService::SUBTITLE_EXTRACTION_WINDOW_SECONDS unless seconds.positive?
-
-    seconds.clamp(
-      TranscodeService::MIN_SUBTITLE_EXTRACTION_WINDOW_SECONDS,
-      TranscodeService::MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS
-    )
+  def normalized_duration_seconds(_value)
+    # Always return a full playback window, even for older cached players
+    # that request the former 5/15-second ranges. Remote extraction commonly
+    # takes 10–20 seconds, so those short ranges expire before the next cues
+    # arrive and captions appear to stop.
+    TranscodeService::MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS
   end
 
   def subtitle_result(input_url)

@@ -199,7 +199,7 @@ RSpec.describe "Transcode", type: :request do
         headers: { "Authorization" => "Bearer test_key" },
         subtitle_stream: "2",
         start_seconds: 30.0,
-        duration_seconds: 5
+        duration_seconds: TranscodeService::MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS
       )
     end
 
@@ -282,7 +282,7 @@ RSpec.describe "Transcode", type: :request do
         headers: { "Authorization" => "Bearer test_key" },
         subtitle_stream: "2",
         start_seconds: 30.0,
-        duration_seconds: TranscodeService::SUBTITLE_EXTRACTION_WINDOW_SECONDS
+        duration_seconds: TranscodeService::MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS
       )
     end
 
