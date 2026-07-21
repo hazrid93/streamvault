@@ -57,6 +57,16 @@ class TranscodeService
   SUBTITLE_FALLBACK_DURATION_SECONDS = 4
   MAX_COPY_VIDEO_WIDTH = 1920
   MAX_COPY_VIDEO_HEIGHT = 1080
+  # Ceiling for the "veryfast" x264 preset.  Independent of
+  # MAX_COPY_VIDEO_* on purpose: those mean "max size we will stream-
+  # copy", which could later widen (e.g. to allow 4K passthrough).  The
+  # veryfast preset must stay gated at 1080p regardless, because the
+  # encode-preset rationale (ample realtime headroom) is about source
+  # class, not about whether we're allowed to copy the stream.  Keeping
+  # these separate prevents a future copy-limit widening from silently
+  # pushing 4K transcodes onto veryfast.
+  MAX_VERYFAST_VIDEO_WIDTH = 1920
+  MAX_VERYFAST_VIDEO_HEIGHT = 1080
   SAFE_VIDEO_FILTER =
     "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
   # Keep the audio clock locked to its timestamps.  Values greater than 1
@@ -843,7 +853,9 @@ class TranscodeService
 
   # H.264 sources at <=1080p decode cheaply and have ample realtime
   # headroom at the "veryfast" preset.  HEVC/4K/unknown stay on
-  # "ultrafast" -- they are decode-bound and the safer bar.
+  # "ultrafast" -- they are decode-bound and the safer bar.  Uses the
+  # dedicated MAX_VERYFAST_* bounds (not MAX_COPY_VIDEO_*) so a future
+  # widening of the copy limit can't silently enable veryfast for 4K.
   def self.veryfast_eligible?(video_stream)
     return false unless video_stream.is_a?(Hash)
     codec = video_stream[:codec_name].to_s.downcase
@@ -851,7 +863,7 @@ class TranscodeService
     height = video_stream[:height].to_i
     codec == "h264" &&
       width.positive? && height.positive? &&
-      width <= MAX_COPY_VIDEO_WIDTH && height <= MAX_COPY_VIDEO_HEIGHT
+      width <= MAX_VERYFAST_VIDEO_WIDTH && height <= MAX_VERYFAST_VIDEO_HEIGHT
   end
   private_class_method :veryfast_eligible?
 
