@@ -457,7 +457,7 @@ RSpec.describe TranscodeService do
 
       pairs = argument_pairs(command)
       expect(pairs).to include([ "-c:a", "aac" ])
-      expect(pairs).to include([ "-b:a", "192k" ])
+      expect(pairs).to include([ "-b:a", "160k" ])
       expect(pairs).to include([ "-af", "aresample=async=1000:first_pts=0" ])
       expect(pairs).not_to include([ "-c:a", "copy" ])
     end
