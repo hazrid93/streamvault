@@ -35,6 +35,14 @@ const REBUFFER_STALL_TIMEOUT_MS = 20000
 // a slow source; the stall watchdog handles a genuinely dead source.
 const REBUFFER_MAX_WAIT_MS = 12000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
+// The subtitle overlay is pinned just above the controls bar while the
+// controls are visible, then dropped toward the bottom of the screen
+// when the controls auto-hide, so it doesn't float above an invisible
+// menu (most visible on mobile, where the controls fade out during
+// playback).  The lowered position respects the iOS safe-area inset so
+// the subtitle clears the home-indicator on modern iPhones.
+const SUBTITLE_BOTTOM_RAISED = "6.5rem"
+const SUBTITLE_BOTTOM_LOWERED = "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)"
 
 export default class extends Controller {
   static get targets() {
@@ -45,7 +53,7 @@ export default class extends Controller {
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
-      "speedButton", "speedMenu", "nextEpisodeCard"
+      "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton"
     ]
   }
   static get values() {
@@ -2742,20 +2750,15 @@ export default class extends Controller {
   // ── Fullscreen ────────────────────────────────────────────────────
 
   toggleFullscreen() {
-    // Standard Fullscreen API — works on desktop and Android.
+    // Browser fullscreen via the standard Fullscreen API.  Takes the
+    // whole player container (custom controls + subtitle overlay) into
+    // fullscreen as a single unit, so the custom UI — including the
+    // subtitle overlay — keeps rendering.  Cross-platform on Chrome
+    // (android + desktop), which is the only target here.
     if (document.fullscreenElement) {
       document.exitFullscreen()
-    } else if (this.element.requestFullscreen) {
-      this.element.requestFullscreen()
     } else {
-      // iOS Safari (including PWA standalone mode) doesn't support
-      // the Fullscreen API on arbitrary elements.  Use the video
-      // element's native webkitEnterFullscreen instead — it enters
-      // iOS's built-in fullscreen video player.
-      const video = this.videoTarget
-      if (video.webkitEnterFullscreen) {
-        video.webkitEnterFullscreen()
-      }
+      this.element.requestFullscreen().catch(() => {})
     }
   }
 
@@ -3102,6 +3105,7 @@ export default class extends Controller {
     this.sourceInfoTarget.style.pointerEvents = "auto"
     this.controlsTarget.style.opacity = "1"
     this.controlsTarget.style.pointerEvents = "auto"
+    this.positionSubtitleOverlay(true)
     this.scheduleUiHide()
   }
 
@@ -3113,7 +3117,16 @@ export default class extends Controller {
       this.sourceInfoTarget.style.pointerEvents = "none"
       this.controlsTarget.style.opacity = "0"
       this.controlsTarget.style.pointerEvents = "none"
+      this.positionSubtitleOverlay(false)
     }
+  }
+
+  // Pin the subtitle overlay above the controls bar while the controls
+  // are visible, or drop it toward the bottom of the screen when the
+  // controls auto-hide so it doesn't float above an invisible menu.
+  positionSubtitleOverlay(raised) {
+    if (!this.hasSubtitleOverlayTarget) return
+    this.subtitleOverlayTarget.style.bottom = raised ? SUBTITLE_BOTTOM_RAISED : SUBTITLE_BOTTOM_LOWERED
   }
 
   scheduleUiHide() {
@@ -3139,6 +3152,7 @@ export default class extends Controller {
       this.backButtonTarget.style.opacity = "1"
       this.sourceInfoTarget.style.opacity = "1"
       this.controlsTarget.style.opacity = "1"
+      this.positionSubtitleOverlay(true)
     } else {
       this.scheduleUiHide()
     }

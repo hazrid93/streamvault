@@ -53,7 +53,7 @@
 
   <div data-video-player-target="subtitleOverlay"
        class="hidden pointer-events-none absolute inset-x-0 z-20 px-6 text-center"
-       style="bottom: 6.5rem; padding-left: calc(env(safe-area-inset-left, 0px) + 1.5rem); padding-right: calc(env(safe-area-inset-right, 0px) + 1.5rem);">
+       style="bottom: 6.5rem; transition: bottom 0.3s ease; padding-left: calc(env(safe-area-inset-left, 0px) + 1.5rem); padding-right: calc(env(safe-area-inset-right, 0px) + 1.5rem);">
     <span data-video-player-target="subtitleText"
           class="inline-block max-w-3xl px-4 py-2 rounded-lg bg-black/60 text-center text-lg font-semibold text-white"
           style="white-space: pre-line; text-shadow: 0 2px 8px rgba(0,0,0,0.95);"></span>
@@ -154,8 +154,11 @@
         </div>
       </div>
 
-      <%# Fullscreen %>
-      <button data-action="click->video-player#toggleFullscreen" class="hover:text-indigo-400 transition-colors">
+      <%# Fullscreen — browser fullscreen via the standard Fullscreen API.
+           Takes the whole player container (controls + subtitle overlay)
+           into fullscreen as a single unit, so subtitles keep working. %>
+      <button data-video-player-target="fullscreenButton"
+              data-action="click->video-player#toggleFullscreen" class="hover:text-indigo-400 transition-colors">
         <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
       </button>
 
