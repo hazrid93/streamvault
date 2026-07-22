@@ -152,6 +152,73 @@ test("fullscreen reports unsupported native APIs instead of throwing", () => {
   assert.equal(player.videoTarget.controls, false)
 })
 
+test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
+  const player = new VideoPlayerController()
+  let bufferingHidden = 0
+  let watchdogStarted = 0
+  player.videoTarget = { paused: false, currentTime: 42, buffered: { length: 0 } }
+  player.hlsSessionId = "ios-session"
+  player.directPlayActive = false
+  player.isSeeking = false
+  player.isStalled = true
+  player.userPaused = false
+  player.subtitlePlaybackHoldToken = null
+  player.pendingSeekSeconds = null
+  player.hideStartupOverlay = () => {}
+  player.hideSeekingOverlay = () => { bufferingHidden += 1; player.isStalled = false }
+  player.resetProgressBaseline = () => {}
+  player.startProgressWatchdog = () => { watchdogStarted += 1 }
+
+  player.onVideoReady()
+
+  assert.equal(player.playbackStarted, true)
+  assert.equal(bufferingHidden, 1)
+  assert.equal(watchdogStarted, 1)
+  assert.equal(player.isStalled, false)
+})
+
+test("native fullscreen subtitle refresh keeps the selected track showing", () => {
+  let addedCues = 0
+  const modeChanges = []
+  const nativeTrack = {
+    cues: [new TestVTTCue(1, 2, "Old caption")],
+    _mode: "showing",
+    get mode() { return this._mode },
+    set mode(value) { this._mode = value; modeChanges.push(value) },
+    addCue(cue) { addedCues += 1; this.cues.push(cue) },
+    removeCue(cue) { this.cues = this.cues.filter((candidate) => candidate !== cue) }
+  }
+  const player = new VideoPlayerController()
+  player.nativeFullscreenActive = true
+  player.nativeFullscreenControls = false
+  player.nativeFullscreenTextTrack = nativeTrack
+  player.nativeFullscreenCueSignature = null
+  player.videoTarget = { controls: true, addTextTrack: () => nativeTrack }
+  player.selectedSubtitleStream = "4"
+  player.subtitleTracks = [{ index: 4, label: "English", language: "en", text_supported: true }]
+  player.subtitleCues = [{ start: 121, end: 123, text: "Fresh caption" }]
+  player.subtitleOffset = 0
+  player.startSecondsValue = 120
+  player.directPlayActive = false
+  player.remuxDirectPlay = false
+
+  player.syncNativeFullscreenSubtitles()
+
+  assert.equal(nativeTrack.mode, "showing")
+  assert.equal(modeChanges.includes("disabled"), false)
+  assert.equal(nativeTrack.cues.length, 1)
+  assert.equal(nativeTrack.cues[0].text, "Fresh caption")
+
+  player.syncNativeFullscreenSubtitles()
+  assert.equal(addedCues, 1)
+  assert.equal(nativeTrack.mode, "showing")
+
+  modeChanges.length = 0
+  player.finishNativeFullscreen()
+  assert.equal(modeChanges.includes("disabled"), true)
+})
+
+
 test("direct-play errors preserve the absolute playhead when falling back", () => {
   const player = new VideoPlayerController()
   player.videoTarget = {
@@ -379,4 +446,32 @@ test("iOS loads track metadata before starting HLS playback", async () => {
   await player.ensureVideoSource()
 
   assert.deepEqual(calls, ["tracks", "hls"])
+})
+
+test("stale HLS playlist polls stop before touching the current session", async () => {
+  const player = new VideoPlayerController()
+  player.hlsPlaybackToken = 3
+
+  const ready = await player.waitForPlaylist("/hls/stale/playlist.m3u8", 2)
+
+  assert.equal(ready, false)
+})
+
+test("HLS restart updates the subtitle media timeline before loading", async () => {
+  const player = new VideoPlayerController()
+  player.videoTarget = { pause() {} }
+  player.element = { dataset: {} }
+  player.startSecondsValue = 100
+  player.isSeeking = true
+  player.directUrlValue = ""
+  player.extractRawUrl = () => null
+  player.clearSubtitleCues = () => {}
+  player.reloadTextSubtitlesAt = () => {}
+  player.stopHlsSession = () => {}
+  player.hideSeekingOverlay = () => {}
+
+  await player.restartHlsSession(420)
+
+  assert.equal(player.startSecondsValue, 420)
+  assert.equal(player.element.dataset.videoPlayerStartSecondsValue, "420")
 })

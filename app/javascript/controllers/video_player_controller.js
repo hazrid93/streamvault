@@ -133,8 +133,10 @@ export default class extends Controller {
     this.rebufferDeadline = null
     this.mseSupported = window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"')
     this.hlsSessionId = null
+    this.hlsPlaybackToken = 0
     this.nativeFullscreenActive = false
     this.nativeFullscreenControls = null
+    this.nativeFullscreenCueSignature = null
     this.nativeFullscreenTextTrack = null
     this.nativeFullscreenBeginHandler = () => this.onNativeFullscreenBegin()
     this.nativeFullscreenEndHandler = () => this.onNativeFullscreenEnd()
@@ -582,6 +584,7 @@ export default class extends Controller {
   }
 
   async startHlsPlayback() {
+    const playbackToken = ++this.hlsPlaybackToken
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
       console.warn('HLS: no direct URL available')
@@ -608,6 +611,10 @@ export default class extends Controller {
       }
 
       const data = await response.json()
+      if (playbackToken !== this.hlsPlaybackToken) {
+        if (data?.session_id) this.stopHlsSessionById(data.session_id)
+        return
+      }
       this.hlsSessionId = data.session_id
 
       // Poll the playlist URL until ffmpeg has produced the first
@@ -615,8 +622,13 @@ export default class extends Controller {
       // (Accepted) while the playlist isn't ready yet.  This avoids
       // setting a video src that points to a non-existent playlist,
       // which would cause iOS Safari to fail silently.
-      const playlistReady = await this.waitForPlaylist(data.playlist_url)
+      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken)
+      if (playbackToken !== this.hlsPlaybackToken || this.hlsSessionId !== data.session_id) {
+        if (this.hlsSessionId !== data.session_id && data?.session_id) this.stopHlsSessionById(data.session_id)
+        return
+      }
       if (!playlistReady) {
+        this.stopHlsSession()
         console.warn('HLS: playlist not ready or ffmpeg failed')
         if (this.hasStartupOverlayTarget) {
           const label = this.startupOverlayTarget.querySelector("span.text-white")
@@ -685,7 +697,8 @@ export default class extends Controller {
   // playback starts with a single segment buffer and the transcode
   // throughput dips.  Falls back to 1 segment if the timeout is nearly
   // reached, so a slow source doesn't fail entirely.
-  async waitForPlaylist(playlistUrl) {
+  async waitForPlaylist(playlistUrl, playbackToken = this.hlsPlaybackToken) {
+    if (playbackToken !== this.hlsPlaybackToken) return false
     const maxAttempts = 150  // 150 × 200ms = 30s max wait
     const pollInterval = 200
     const minSegments = 2
@@ -696,6 +709,7 @@ export default class extends Controller {
         // GET (not HEAD) so we can count segments in the playlist body.
         // The playlist is small (a few KB), so fetching it is cheap.
         const res = await fetch(playlistUrl)
+        if (playbackToken !== this.hlsPlaybackToken) return false
         if (res.status === 424) {
           try {
             const body = await res.json()
@@ -723,6 +737,8 @@ export default class extends Controller {
   // Stops the current session, starts a new one with the updated
   // start_seconds, and swaps the video source to the new playlist.
   async restartHlsSession(startSeconds) {
+    this.startSecondsValue = startSeconds
+    this.element.dataset.videoPlayerStartSecondsValue = startSeconds.toString()
     // Pause the video immediately so it doesn't keep playing the
     // old stream behind the seeking overlay.
     this.videoTarget.pause()
@@ -734,6 +750,7 @@ export default class extends Controller {
     // server-side; we don't need to wait for that before starting
     // the new transcode.
     this.stopHlsSession()
+    const playbackToken = ++this.hlsPlaybackToken
 
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
@@ -765,12 +782,21 @@ export default class extends Controller {
       }
 
       const data = await response.json()
+      if (playbackToken !== this.hlsPlaybackToken) {
+        if (data?.session_id) this.stopHlsSessionById(data.session_id)
+        return
+      }
       this.hlsSessionId = data.session_id
 
       // Wait for the playlist to be ready before swapping the video
       // source — same as initial playback.
-      const playlistReady = await this.waitForPlaylist(data.playlist_url)
+      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken)
+      if (playbackToken !== this.hlsPlaybackToken || this.hlsSessionId !== data.session_id) {
+        if (this.hlsSessionId !== data.session_id && data?.session_id) this.stopHlsSessionById(data.session_id)
+        return
+      }
       if (!playlistReady) {
+        this.stopHlsSession()
         console.warn('HLS seek: playlist not ready or ffmpeg failed')
         this.isSeeking = false
         this.hideSeekingOverlay()
@@ -788,6 +814,7 @@ export default class extends Controller {
 
       // Hide the seeking overlay once playback actually starts.
       const onPlaying = () => {
+        if (playbackToken !== this.hlsPlaybackToken) return
         this.isSeeking = false
         this.hideSeekingOverlay()
         this.videoTarget.removeEventListener('playing', onPlaying)
@@ -796,12 +823,14 @@ export default class extends Controller {
 
       // Safety: hide overlay after 30s even if 'playing' never fires
       setTimeout(() => {
+        if (playbackToken !== this.hlsPlaybackToken) return
         if (this.isSeeking) {
           this.isSeeking = false
           this.hideSeekingOverlay()
         }
       }, 30000)
     } catch (e) {
+      if (playbackToken !== this.hlsPlaybackToken) return
       console.warn('HLS seek: error', e)
       this.isSeeking = false
       this.hideSeekingOverlay()
@@ -812,9 +841,15 @@ export default class extends Controller {
   // the current session.  Fire-and-forget — disconnect must not block,
   // and the session TTL cleans up if the request never lands.
   async stopHlsSession() {
-    if (!this.hlsSessionId) return
     const sessionId = this.hlsSessionId
     this.hlsSessionId = null
+    this.hlsPlaybackToken += 1
+    if (!sessionId) return
+
+    await this.stopHlsSessionById(sessionId)
+  }
+
+  async stopHlsSessionById(sessionId) {
     try {
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
       await fetch(`/hls/${sessionId}/stop`, {
@@ -904,7 +939,13 @@ export default class extends Controller {
       this.bufferingOverlayTimer = setTimeout(() => {
         this.bufferingOverlayTimer = null
         // Re-check: if currentTime advanced, the stall resolved.
-        if (this.videoTarget.currentTime > waitPos + 0.1) return
+        if (this.videoTarget.currentTime > waitPos + 0.1) {
+          this.isStalled = false
+          this.resetProgressBaseline()
+          this.hideSeekingOverlay()
+          return
+        }
+        this.isStalled = true
         this.showBufferingOverlay()
         this.startProgressWatchdog()
       }, 200)
@@ -2010,6 +2051,21 @@ export default class extends Controller {
       return
     }
 
+    if (this.isHls()) {
+      this.playbackStarted = true
+      clearTimeout(this.bufferingOverlayTimer)
+      this.bufferingOverlayTimer = null
+      this.isStalled = false
+      this.rebufferDeadline = null
+      this.clearStallWatchdog()
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.resetProgressBaseline()
+      this.startProgressWatchdog()
+      this.hideSeekingOverlay()
+      return
+    }
+
     // For direct play (including remux), the browser manages its own
     // buffering.  If "playing" fires, the video is actually playing —
     // always hide the overlay.  The 2s buffer gate below is for MSE,
@@ -2902,11 +2958,25 @@ export default class extends Controller {
   }
 
   syncNativeFullscreenSubtitles() {
-    this.clearNativeFullscreenSubtitles()
-    if (!this.nativeFullscreenActive || !this.textSubtitleSelected() || this.subtitleCues.length === 0) return
+    if (!this.nativeFullscreenActive || !this.textSubtitleSelected() || this.subtitleCues.length === 0) {
+      if (this.nativeFullscreenCueSignature !== null) this.clearNativeFullscreenSubtitles()
+      return
+    }
 
     const Cue = window.VTTCue || window.WebKitVTTCue
-    if (typeof Cue !== "function" || typeof this.videoTarget.addTextTrack !== "function") return
+    if (typeof Cue !== "function") return
+    if (!this.nativeFullscreenTextTrack && typeof this.videoTarget.addTextTrack !== "function") return
+
+    const cueEntries = this.subtitleCues
+      .map((cue) => {
+        const times = this.nativeFullscreenCueTimes(cue)
+        return times ? { ...times, text: cue.text } : null
+      })
+      .filter(Boolean)
+    if (cueEntries.length === 0) {
+      if (this.nativeFullscreenCueSignature !== null) this.clearNativeFullscreenSubtitles()
+      return
+    }
 
     if (!this.nativeFullscreenTextTrack) {
       const selectedTrack = this.selectedSubtitleTrack()
@@ -2922,17 +2992,27 @@ export default class extends Controller {
       }
     }
 
-    this.subtitleCues.forEach((cue) => {
-      const cueTimes = this.nativeFullscreenCueTimes(cue)
-      if (!cueTimes) return
+    const signature = JSON.stringify(cueEntries)
+    if (this.nativeFullscreenCueSignature === signature) {
+      this.nativeFullscreenTextTrack.mode = "showing"
+      return
+    }
 
+    Array.from(this.nativeFullscreenTextTrack.cues || []).forEach((cue) => {
+      try { this.nativeFullscreenTextTrack.removeCue(cue) } catch {}
+    })
+
+    let allCuesAdded = true
+    cueEntries.forEach(({ start, end, text }) => {
       try {
-        this.nativeFullscreenTextTrack.addCue(new Cue(cueTimes.start, cueTimes.end, cue.text))
+        this.nativeFullscreenTextTrack.addCue(new Cue(start, end, text))
       } catch (error) {
+        allCuesAdded = false
         console.warn("Native subtitle cue setup failed:", error)
       }
     })
     this.nativeFullscreenTextTrack.mode = "showing"
+    this.nativeFullscreenCueSignature = allCuesAdded ? signature : null
   }
 
   nativeFullscreenCueTimes(cue) {
@@ -2951,6 +3031,7 @@ export default class extends Controller {
       try { track.removeCue(cue) } catch {}
     })
     track.mode = "disabled"
+    this.nativeFullscreenCueSignature = null
   }
 
   // ── Seek bar ──────────────────────────────────────────────────────
@@ -3150,7 +3231,7 @@ export default class extends Controller {
     // fires whenever currentTime changes, making it the most reliable
     // signal that playback is alive.  Clear the overlay if there's buffer
     // ahead — no point showing "Buffering..." when the video is moving.
-    if (this.isStalled && !this.videoTarget.paused && !this.userPaused && !this.isSeeking && this.hasBufferedAhead(2)) {
+    if (this.isStalled && !this.videoTarget.paused && !this.userPaused && !this.isSeeking && (this.isHls() || this.hasBufferedAhead(2))) {
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false
