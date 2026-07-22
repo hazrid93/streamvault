@@ -8,14 +8,30 @@ const source = fs
   .replace(/^import .*$/m, "class Controller {}")
   .replace("export default class", "globalThis.VideoPlayerController = class")
 
+class TestVTTCue {
+  constructor(startTime, endTime, text) {
+    this.startTime = startTime
+    this.endTime = endTime
+    this.text = text
+  }
+}
+
+const testDocument = {
+  fullscreenElement: null,
+  webkitFullscreenElement: null,
+  exitFullscreen() {}
+}
+
 const context = vm.createContext({
   AbortController,
   URL,
   URLSearchParams,
   clearTimeout,
   console,
+  document: testDocument,
+  navigator: { userAgent: "Mozilla/5.0 Chrome/138.0" },
   setTimeout,
-  window: { location: { origin: "https://streamvault.test" } }
+  window: { location: { origin: "https://streamvault.test" }, VTTCue: TestVTTCue }
 })
 vm.runInContext(source, context)
 const VideoPlayerController = context.VideoPlayerController
@@ -35,6 +51,105 @@ test("native direct play uses absolute media time while fragment streams add the
   player.directPlayActive = false
   player.remuxDirectPlay = false
   assert.equal(player.currentPlaybackPosition(), 600)
+})
+
+test("subtitle clock stays on media time when playback rate changes", () => {
+  const player = new VideoPlayerController()
+  player.videoTarget = { currentTime: 15, playbackRate: 2 }
+  player.startSecondsValue = 120
+  player.directPlayActive = false
+
+  assert.equal(player.currentPlaybackPosition(), 135)
+
+  player.videoTarget.playbackRate = 0.5
+  assert.equal(player.currentPlaybackPosition(), 135)
+})
+
+test("desktop fullscreen uses the player container and exits through the document API", () => {
+  testDocument.fullscreenElement = null
+  let entered = 0
+  let exited = 0
+  testDocument.exitFullscreen = () => { exited += 1; testDocument.fullscreenElement = null }
+
+  const player = new VideoPlayerController()
+  player.element = {
+    requestFullscreen: () => {
+      entered += 1
+      testDocument.fullscreenElement = player.element
+      return Promise.resolve()
+    }
+  }
+  player.videoTarget = { webkitDisplayingFullscreen: false }
+
+  player.toggleFullscreen()
+  assert.equal(entered, 1)
+
+  player.toggleFullscreen()
+  assert.equal(exited, 1)
+})
+
+test("iOS fullscreen uses native controls and keeps text subtitles on the media timeline", () => {
+  let entered = 0
+  let exited = 0
+  const nativeTrack = {
+    cues: [],
+    mode: "disabled",
+    addCue(cue) { this.cues.push(cue) },
+    removeCue(cue) { this.cues = this.cues.filter((candidate) => candidate !== cue) }
+  }
+  const player = new VideoPlayerController()
+  player.isIOS = () => true
+  player.element = {}
+  player.videoTarget = {
+    controls: false,
+    webkitDisplayingFullscreen: false,
+    webkitEnterFullscreen: () => { entered += 1 },
+    webkitExitFullscreen: () => { exited += 1 },
+    addTextTrack: () => nativeTrack
+  }
+  player.nativeFullscreenActive = false
+  player.nativeFullscreenControls = null
+  player.nativeFullscreenTextTrack = null
+  player.selectedSubtitleStream = "4"
+  player.subtitleTracks = [{ index: 4, label: "English", language: "en", text_supported: true }]
+  player.subtitleCues = [{ start: 121, end: 123, text: "Native caption" }]
+  player.subtitleOffset = 0
+  player.startSecondsValue = 120
+  player.directPlayActive = false
+  player.remuxDirectPlay = false
+
+  player.toggleFullscreen()
+
+  assert.equal(entered, 1)
+  assert.equal(player.nativeFullscreenActive, true)
+  assert.equal(player.videoTarget.controls, true)
+  assert.equal(nativeTrack.mode, "showing")
+  assert.equal(nativeTrack.cues.length, 1)
+  assert.equal(nativeTrack.cues[0].startTime, 1)
+  assert.equal(nativeTrack.cues[0].endTime, 3)
+  assert.equal(nativeTrack.cues[0].text, "Native caption")
+
+  player.toggleFullscreen()
+  assert.equal(exited, 1)
+  player.onNativeFullscreenEnd()
+  assert.equal(player.nativeFullscreenActive, false)
+  assert.equal(player.videoTarget.controls, false)
+  assert.equal(nativeTrack.mode, "disabled")
+  assert.equal(nativeTrack.cues.length, 0)
+})
+
+test("fullscreen reports unsupported native APIs instead of throwing", () => {
+  const player = new VideoPlayerController()
+  player.isIOS = () => true
+  player.element = {}
+  player.videoTarget = { controls: false, webkitDisplayingFullscreen: false }
+  player.nativeFullscreenActive = false
+  player.nativeFullscreenControls = null
+  player.nativeFullscreenTextTrack = null
+
+  assert.doesNotThrow(() => player.toggleFullscreen())
+  assert.equal(player.nativeFullscreenActive, false)
+  assert.equal(player.videoTarget.controls, false)
 })
 
 test("direct-play errors preserve the absolute playhead when falling back", () => {
@@ -162,16 +277,54 @@ test("failed continuation keeps the subtitle range already loaded", () => {
   assert.equal(player.subtitleWindowEnd, 160)
 })
 
-test("subtitle parser never guesses a timeline offset after seeking", () => {
+test("subtitle parser preserves absolute timestamps after seeking", () => {
   const player = new VideoPlayerController()
-  const serverVtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nServer timestamp\n"
+  const serverVtt = "WEBVTT\n\n00:02:01.000 --> 00:02:02.000\nServer timestamp\n"
 
-  for (const seekPosition of [5, 20, 30, 40, 120]) {
-    const [cue] = player.parseWebVtt(serverVtt, seekPosition)
+  const [cue] = player.normalizeSubtitleCueTimeline(player.parseWebVtt(serverVtt), 120, 180)
 
-    assert.equal(cue.start, 1, `seek ${seekPosition}s must not rebase the server timestamp`)
-    assert.equal(cue.end, 2, `seek ${seekPosition}s must not rebase the server timestamp`)
-  }
+  assert.equal(cue.start, 121, "absolute cues must not be shifted after seeking")
+  assert.equal(cue.end, 122, "absolute cues must not be shifted after seeking")
+})
+
+test("subtitle guard rebases unambiguous window-relative timestamps", () => {
+  const player = new VideoPlayerController()
+  const relativeVtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nWindow-relative timestamp\n"
+
+  const [cue] = player.normalizeSubtitleCueTimeline(player.parseWebVtt(relativeVtt), 120, 180)
+
+  assert.equal(cue.start, 121, "relative cues must follow the requested media window")
+  assert.equal(cue.end, 122, "relative cue duration must remain unchanged")
+})
+
+test("subtitle guard leaves ambiguous early absolute cues unchanged", () => {
+  const player = new VideoPlayerController()
+  const earlyVtt = "WEBVTT\n\n00:00:25.000 --> 00:00:27.000\nEarly absolute timestamp\n"
+
+  const [cue] = player.normalizeSubtitleCueTimeline(player.parseWebVtt(earlyVtt), 30, 90)
+
+  assert.equal(cue.start, 25, "ambiguous cues must not be guessed into another timeline")
+  assert.equal(cue.end, 27, "ambiguous cue end must remain unchanged")
+})
+
+test("subtitle responses use the guarded timeline before cue merging", () => {
+  const player = new VideoPlayerController()
+  player.subtitleCues = []
+  player.videoTarget = { currentTime: 121 }
+  player.currentPlaybackPosition = () => 121
+  player.hasSubtitleOverlayTarget = false
+
+  const applied = player.applySubtitleResponse({
+    ok: true,
+    status: 200,
+    text: "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nWindow-relative response\n"
+  }, 120, 180)
+
+  assert.equal(applied, true)
+  assert.equal(player.subtitleCues.length, 1)
+  assert.equal(player.subtitleCues[0].start, 121)
+  assert.equal(player.subtitleCues[0].end, 122)
+  assert.equal(player.subtitleCues[0].text, "Window-relative response")
 })
 
 test("subtitle text renders inside the centered caption box", () => {

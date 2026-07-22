@@ -47,6 +47,31 @@ RSpec.describe ExternalSubtitleService do
       expect(provider).to have_received(:download).once
     end
 
+    it "accepts WebVTT subtitle downloads before applying the media window" do
+      provider = instance_double(SubdlSubtitleProvider)
+      allow(provider).to receive(:download).and_return(
+        ServiceResult.success(<<~VTT)
+          WEBVTT
+
+          00:00:01.000 --> 00:00:02.000
+          Too early
+
+          00:00:31.000 --> 00:00:33.000
+          Already VTT
+        VTT
+      )
+      described_class.subdl_provider = provider
+      stream_id = described_class.stream_id("subdl", "/subtitle/987/654")
+
+      result = described_class.extract_subtitles(stream_id, start_seconds: 30, duration_seconds: 10)
+
+      expect(result.status).to eq(:ok)
+      expect(result.cue_count).to eq(1)
+      expect(result.vtt).to include("00:00:31.000 --> 00:00:33.000")
+      expect(result.vtt).to include("Already VTT")
+      expect(result.vtt).not_to include("Too early")
+    end
+
     it "returns an empty window when the external subtitle has no nearby cues" do
       provider = instance_double(SubdlSubtitleProvider)
       allow(provider).to receive(:download).and_return(

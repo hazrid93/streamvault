@@ -706,6 +706,60 @@ RSpec.describe TranscodeService do
       expect(result.vtt).to include("Fallback")
     end
 
+    it "aligns FFmpeg fallback timestamps with the subtitle stream start time" do
+      expected_offsets = {
+        0.0 => "-0.021",
+        120.0 => "119.979"
+      }
+
+      expected_offsets.each do |seek, expected_offset|
+        track_output = {
+          "streams" => [
+            {
+              "index" => 3,
+              "codec_type" => "subtitle",
+              "codec_name" => "subrip",
+              "start_time" => "-0.021000",
+              "tags" => { "language" => "eng" }
+            }
+          ]
+        }.to_json
+        packet_output = {
+          "packets" => [
+            { "pts_time" => "121.500000", "duration_time" => "2.500000", "data" => "" }
+          ]
+        }.to_json
+
+        allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+          if cmd.include?("-show_data")
+            capture_result(packet_output)
+          else
+            capture_result(track_output)
+          end
+        end
+        allow(described_class).to receive(:capture_subtitle_stdout_result) do |cmd|
+          expect(cmd.fetch(cmd.index("-output_ts_offset") + 1)).to eq(expected_offset)
+          expect(cmd).to include("-ss", seek.to_s) if seek.positive?
+          described_class::SubtitleExtractionResult.new(
+            status: :ok,
+            vtt: "WEBVTT\n\n00:02.000 --> 00:03.000\nFallback\n",
+            cue_count: 1,
+            source: :ffmpeg
+          )
+        end
+
+
+        result = described_class.extract_subtitles(
+          "https://example.test/video-subtitles-start-#{seek}.mkv",
+          subtitle_stream: "3",
+          start_seconds: seek
+        )
+
+        expect(result.status).to eq(:ok)
+        expect(result.source).to eq(:ffmpeg)
+      end
+    end
+
     it "falls back to ffmpeg when ffprobe packet JSON cannot be parsed" do
       track_output = {
         "streams" => [

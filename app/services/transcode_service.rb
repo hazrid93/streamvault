@@ -436,19 +436,48 @@ class TranscodeService
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     cmd += [
       "-show_entries",
-      "stream=index,codec_type,codec_name,channels:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke",
+      "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke",
       "-of",
       "json",
       input_url
     ]
 
     result = capture_command(cmd, timeout_seconds: 10)
-    tracks = result.status&.success? ? extract_media_tracks(result.stdout) : empty_media_tracks
-    cache_store(input_url, media_tracks: tracks)
+    if result.status&.success?
+      tracks = extract_media_tracks(result.stdout)
+      cache_store(
+        input_url,
+        media_tracks: tracks,
+        subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
+      )
+    else
+      tracks = empty_media_tracks
+      cache_store(input_url, media_tracks: tracks, subtitle_stream_start_times: {})
+    end
     tracks
   rescue StandardError
     empty_media_tracks
   end
+
+  def self.extract_subtitle_stream_start_times(output)
+    data = JSON.parse(output)
+    Array(data["streams"]).each_with_object({}) do |stream, starts|
+      next unless stream["codec_type"].to_s == "subtitle"
+
+      stream_index = non_negative_integer(stream["index"])
+      start_time = finite_float(stream["start_time"])
+      starts[stream_index] = start_time if stream_index && start_time
+    end
+  rescue JSON::ParserError
+    {}
+  end
+  private_class_method :extract_subtitle_stream_start_times
+
+  def self.cached_subtitle_stream_start_time(input_url, stream_index)
+    start_time = cache_get(input_url)&.dig(:subtitle_stream_start_times, stream_index)
+    start_time.is_a?(Numeric) && start_time.finite? ? start_time : 0
+  end
+  private_class_method :cached_subtitle_stream_start_time
 
   def self.extract_subtitles_to_vtt(input_url, headers: {}, subtitle_stream: nil, start_seconds: 0, duration_seconds: SUBTITLE_EXTRACTION_WINDOW_SECONDS)
     extract_subtitles(
@@ -471,6 +500,8 @@ class TranscodeService
     end
 
     track = probe_media_tracks(input_url, headers: headers)[:subtitles].find { |subtitle| subtitle[:index] == stream_index }
+    subtitle_stream_start_time = cached_subtitle_stream_start_time(input_url, stream_index)
+
     unless track
       result = subtitle_result(:unsupported_track, diagnostic: "subtitle stream was not found")
       log_subtitle_result(result, stream_index: stream_index, start_seconds: seek_start_seconds)
@@ -509,10 +540,11 @@ class TranscodeService
       "-map", "0:#{stream_index}",
       "-c:s", "webvtt"
     ]
-    # Input seeking makes FFmpeg's fallback VTT timestamps relative to the
-    # seek point. Shift the muxed output back onto the video's absolute
-    # timeline so every subtitle source has the same timestamp contract.
-    cmd += [ "-output_ts_offset", seek_start_seconds.to_s ] if seek_start_seconds.positive?
+    # Input seeking and stream start timestamps can both make FFmpeg's
+    # fallback VTT timestamps relative to the subtitle stream. Shift the
+    # muxed output back onto the source timeline used by packet extraction.
+    output_timestamp_offset = seek_start_seconds + subtitle_stream_start_time
+    cmd += [ "-output_ts_offset", output_timestamp_offset.to_s ] unless output_timestamp_offset.zero?
     cmd += [
       "-f", "webvtt",
       "pipe:1"

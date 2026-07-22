@@ -133,6 +133,16 @@ export default class extends Controller {
     this.rebufferDeadline = null
     this.mseSupported = window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"')
     this.hlsSessionId = null
+    this.nativeFullscreenActive = false
+    this.nativeFullscreenControls = null
+    this.nativeFullscreenTextTrack = null
+    this.nativeFullscreenBeginHandler = () => this.onNativeFullscreenBegin()
+    this.nativeFullscreenEndHandler = () => this.onNativeFullscreenEnd()
+    this.fullscreenChangeHandler = () => this.onFullscreenChange()
+    this.videoTarget.addEventListener("webkitbeginfullscreen", this.nativeFullscreenBeginHandler)
+    this.videoTarget.addEventListener("webkitendfullscreen", this.nativeFullscreenEndHandler)
+    document.addEventListener("fullscreenchange", this.fullscreenChangeHandler)
+    document.addEventListener("webkitfullscreenchange", this.fullscreenChangeHandler)
 
     this.ensureVideoSource()
 
@@ -214,6 +224,11 @@ export default class extends Controller {
     this.videoTarget.removeEventListener("error", this.videoErrorHandler)
     window.removeEventListener("beforeunload", this.beforeUnloadHandler)
     this.removeTextSubtitleTrack()
+    this.videoTarget.removeEventListener("webkitbeginfullscreen", this.nativeFullscreenBeginHandler)
+    this.videoTarget.removeEventListener("webkitendfullscreen", this.nativeFullscreenEndHandler)
+    document.removeEventListener("fullscreenchange", this.fullscreenChangeHandler)
+    document.removeEventListener("webkitfullscreenchange", this.fullscreenChangeHandler)
+    this.finishNativeFullscreen()
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
     this.fmp4Buffer = null
@@ -2390,7 +2405,7 @@ export default class extends Controller {
       const prefetchedResponse = cachedPrefetch || (pendingPrefetch ? await pendingPrefetch : null)
       const response = prefetchedResponse || await this.fetchSubtitleResponse(url, abortController.signal)
       if (this.selectedSubtitleStream !== requestedSubtitleStream || this.subtitleLoadToken !== loadToken) return
-      if (this.applySubtitleResponse(response)) {
+      if (this.applySubtitleResponse(response, windowStart, windowEnd)) {
         this.rememberSubtitleWindow(windowStart, requestedDurationSeconds)
       } else if (!hadLoadedWindow) {
         this.resetSubtitleWindow()
@@ -2445,11 +2460,12 @@ export default class extends Controller {
     }
   }
 
-  applySubtitleResponse(response) {
+  applySubtitleResponse(response, windowStart = 0, windowEnd = 0) {
     if (response.status === 204) {
       this.subtitleRetryAfter = 0
       this.subtitleCues = this.pruneSubtitleCues(this.subtitleCues, this.currentPlaybackPosition())
       this.updateSubtitleOverlay(this.currentPlaybackPosition())
+      if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
       return true
     }
 
@@ -2458,10 +2474,11 @@ export default class extends Controller {
       return false
     }
 
-    const incomingCues = this.parseWebVtt(response.text)
+    const incomingCues = this.normalizeSubtitleCueTimeline(this.parseWebVtt(response.text), windowStart, windowEnd)
     this.subtitleCues = this.mergeSubtitleCues(this.subtitleCues, incomingCues, this.currentPlaybackPosition())
     this.subtitleRetryAfter = 0
     this.updateSubtitleOverlay(this.currentPlaybackPosition())
+    if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
     return true
   }
 
@@ -2557,6 +2574,7 @@ export default class extends Controller {
     this.subtitleLoading = false
     this.resetSubtitleWindow()
     this.subtitleCues = []
+    if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
     if (this.hasSubtitleOverlayTarget) {
       if (this.hasSubtitleTextTarget) this.subtitleTextTarget.textContent = ""
       this.subtitleOverlayTarget.classList.add("hidden")
@@ -2588,6 +2606,33 @@ export default class extends Controller {
       .filter((block) => block.includes("-->"))
       .map((block) => this.parseWebVttCue(block))
       .filter(Boolean)
+  }
+
+  normalizeSubtitleCueTimeline(cues, windowStart, windowEnd) {
+    if (!Array.isArray(cues) || cues.length === 0) return cues
+
+    const start = Number(windowStart)
+    const end = Number(windowEnd)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) return cues
+
+    const margin = Math.max(1, SUBTITLE_LOOK_BEHIND_SECONDS)
+    const duration = end - start
+    const windowRelative = cues.every((cue) => cue.start >= -margin && cue.end <= duration + margin)
+    if (!windowRelative) return cues
+
+    // The subtitle endpoint contract is absolute media time. A few demuxers
+    // still emit cues relative to the requested extraction window after a
+    // non-zero seek. Only rebase an unambiguous response: every cue fits in
+    // the window-relative range and none could belong to the requested
+    // absolute range. Legitimate absolute cues are left untouched.
+    const hasAbsoluteCue = cues.some((cue) => cue.end >= start - margin && cue.start <= end + margin)
+    if (hasAbsoluteCue) return cues
+
+    return cues.map((cue) => ({
+      ...cue,
+      start: cue.start + start,
+      end: cue.end + start
+    }))
   }
 
   parseWebVttCue(block) {
@@ -2646,6 +2691,7 @@ export default class extends Controller {
       const secs = (this.subtitleOffset >= 0 ? "+" : "") + this.subtitleOffset.toFixed(1)
       label.textContent = `${secs}s`
     }
+    if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
   }
 
   updateSubtitleOverlay(currentPos) {
@@ -2750,16 +2796,161 @@ export default class extends Controller {
   // ── Fullscreen ────────────────────────────────────────────────────
 
   toggleFullscreen() {
-    // Browser fullscreen via the standard Fullscreen API.  Takes the
-    // whole player container (custom controls + subtitle overlay) into
-    // fullscreen as a single unit, so the custom UI — including the
-    // subtitle overlay — keeps rendering.  Cross-platform on Chrome
-    // (android + desktop), which is the only target here.
-    if (document.fullscreenElement) {
-      document.exitFullscreen()
-    } else {
-      this.element.requestFullscreen().catch(() => {})
+    const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement
+    if (fullscreenElement) {
+      const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen
+      const exitPromise = exitFullscreen?.call(document)
+      if (exitPromise?.catch) exitPromise.catch((error) => console.warn("Fullscreen exit failed:", error))
+      return
     }
+
+    if (this.nativeFullscreenActive || this.videoTarget.webkitDisplayingFullscreen) {
+      this.exitNativeFullscreen()
+      return
+    }
+
+    if (this.isIOS()) {
+      if (!this.enterNativeFullscreen()) console.warn("Fullscreen is not supported by this browser")
+      return
+    }
+
+    const requestFullscreen = this.element.requestFullscreen || this.element.webkitRequestFullscreen
+    if (requestFullscreen) {
+      try {
+        const requestPromise = requestFullscreen.call(this.element)
+        if (requestPromise?.catch) requestPromise.catch((error) => console.warn("Fullscreen entry failed:", error))
+      } catch (error) {
+        console.warn("Fullscreen entry failed:", error)
+      }
+      return
+    }
+
+    if (!this.enterNativeFullscreen()) console.warn("Fullscreen is not supported by this browser")
+  }
+
+  enterNativeFullscreen() {
+    const requestFullscreen = this.videoTarget.webkitEnterFullscreen ||
+      this.videoTarget.webkitEnterFullScreen ||
+      this.videoTarget.requestFullscreen
+    if (!requestFullscreen) return false
+
+    if (this.nativeFullscreenControls === null) this.nativeFullscreenControls = this.videoTarget.controls
+    this.videoTarget.controls = true
+    this.nativeFullscreenActive = true
+    this.syncNativeFullscreenSubtitles()
+
+    try {
+      const requestPromise = requestFullscreen.call(this.videoTarget)
+      if (requestPromise?.catch) {
+        requestPromise.catch((error) => {
+          console.warn("Native fullscreen entry failed:", error)
+          this.finishNativeFullscreen()
+        })
+      }
+      return true
+    } catch (error) {
+      console.warn("Native fullscreen entry failed:", error)
+      this.finishNativeFullscreen()
+      return false
+    }
+  }
+
+  exitNativeFullscreen() {
+    const exitFullscreen = this.videoTarget.webkitExitFullscreen ||
+      this.videoTarget.webkitExitFullScreen ||
+      document.exitFullscreen
+    if (!exitFullscreen) {
+      this.finishNativeFullscreen()
+      return
+    }
+
+    try {
+      const target = exitFullscreen === document.exitFullscreen ? document : this.videoTarget
+      const exitPromise = exitFullscreen.call(target)
+      if (exitPromise?.catch) exitPromise.catch((error) => console.warn("Native fullscreen exit failed:", error))
+    } catch (error) {
+      console.warn("Native fullscreen exit failed:", error)
+      this.finishNativeFullscreen()
+    }
+  }
+
+  onNativeFullscreenBegin() {
+    this.nativeFullscreenActive = true
+    this.syncNativeFullscreenSubtitles()
+  }
+
+  onNativeFullscreenEnd() {
+    this.finishNativeFullscreen()
+  }
+
+  onFullscreenChange() {
+    if (!this.nativeFullscreenActive) return
+
+    const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement
+    if (fullscreenElement === this.videoTarget || this.videoTarget.webkitDisplayingFullscreen) return
+
+    this.finishNativeFullscreen()
+  }
+
+  finishNativeFullscreen() {
+    this.nativeFullscreenActive = false
+    this.clearNativeFullscreenSubtitles()
+    if (this.nativeFullscreenControls !== null) {
+      this.videoTarget.controls = this.nativeFullscreenControls
+      this.nativeFullscreenControls = null
+    }
+  }
+
+  syncNativeFullscreenSubtitles() {
+    this.clearNativeFullscreenSubtitles()
+    if (!this.nativeFullscreenActive || !this.textSubtitleSelected() || this.subtitleCues.length === 0) return
+
+    const Cue = window.VTTCue || window.WebKitVTTCue
+    if (typeof Cue !== "function" || typeof this.videoTarget.addTextTrack !== "function") return
+
+    if (!this.nativeFullscreenTextTrack) {
+      const selectedTrack = this.selectedSubtitleTrack()
+      try {
+        this.nativeFullscreenTextTrack = this.videoTarget.addTextTrack(
+          "subtitles",
+          selectedTrack?.label || "StreamVault Subtitles",
+          selectedTrack?.language?.toLowerCase() || ""
+        )
+      } catch (error) {
+        console.warn("Native subtitle track setup failed:", error)
+        return
+      }
+    }
+
+    this.subtitleCues.forEach((cue) => {
+      const cueTimes = this.nativeFullscreenCueTimes(cue)
+      if (!cueTimes) return
+
+      try {
+        this.nativeFullscreenTextTrack.addCue(new Cue(cueTimes.start, cueTimes.end, cue.text))
+      } catch (error) {
+        console.warn("Native subtitle cue setup failed:", error)
+      }
+    })
+    this.nativeFullscreenTextTrack.mode = "showing"
+  }
+
+  nativeFullscreenCueTimes(cue) {
+    const start = Number(cue?.start) + this.subtitleOffset - this.playbackTimelineOffset()
+    const end = Number(cue?.end) + this.subtitleOffset - this.playbackTimelineOffset()
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= 0 || end <= start) return null
+
+    return { start: Math.max(0, start), end }
+  }
+
+  clearNativeFullscreenSubtitles() {
+    const track = this.nativeFullscreenTextTrack
+    if (!track) return
+
+    Array.from(track.cues || []).forEach((cue) => {
+      try { track.removeCue(cue) } catch {}
+    })
+    track.mode = "disabled"
   }
 
   // ── Seek bar ──────────────────────────────────────────────────────
