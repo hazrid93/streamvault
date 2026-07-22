@@ -11,6 +11,14 @@ class SubdlSubtitleProvider
   SUPPORTED_FORMATS = %w[srt vtt].freeze
   FORCED_RELEASE_PATTERN = /\bforced\b/i
   PARTIAL_RELEASE_PATTERN = /\b(forced|signs?\s*(?:&|and)?\s*songs?|songs?\s*(?:&|and)?\s*signs?|lyrics?|karaoke|commentary|comment)\b/i
+  RELEASE_FAMILY_PATTERNS = {
+    bluray: /\b(?:bluray|blu ray|bdrip|brrip)\b/,
+    web: /\b(?:web dl|web rip|webrip|amzn|amazon|netflix|nf|hmax|atvp|dsnp)\b/,
+    hdtv: /\bhdtv\b/,
+    dvd: /\b(?:dvdrip|dvd)\b/,
+    remux: /\bremux\b/
+  }.freeze
+
   LANGUAGE_CODES = {
     "ENG" => "en",
     "FRENCH" => "fr",
@@ -63,7 +71,7 @@ class SubdlSubtitleProvider
       return []
     end
 
-    normalize_tracks(response.body, preferred_languages: preferred_languages, default_language: default_language)
+    normalize_tracks(response.body, filename: filename, preferred_languages: preferred_languages, default_language: default_language)
   rescue Faraday::TimeoutError, Faraday::ConnectionFailed => e
     Rails.logger.info("[SubDL] subtitle search unavailable: #{e.class.name}")
     []
@@ -139,11 +147,11 @@ class SubdlSubtitleProvider
     languages.presence || [ "en" ]
   end
 
-  def normalize_tracks(body, preferred_languages:, default_language:)
+  def normalize_tracks(body, filename:, preferred_languages:, default_language:)
     language_priority = language_codes(preferred_languages, default_language)
     tracks = subtitle_items(body).flat_map { |subtitle| normalize_subtitle(subtitle) }
     tracks
-      .sort_by { |track| track_score(track, language_priority) }
+      .sort_by { |track| track_score(track, language_priority, filename: filename) }
       .first(MAX_RESULTS)
   end
 
@@ -236,9 +244,34 @@ class SubdlSubtitleProvider
     parts.join(" · ")
   end
 
-  def track_score(track, language_priority)
+  def track_score(track, language_priority, filename: nil)
     language_index = language_priority.index(LANGUAGE_CODES[track[:language]]) || language_priority.length
-    [ language_index, track[:quality_score].to_i, track[:label].to_s.length ]
+    [ language_index, track[:quality_score].to_i, release_match_score(filename, track[:label]), track[:label].to_s.length ]
+  end
+
+  def track_score_value(partial:, hearing_impaired:)
+    score = 0
+    score += 100 if partial
+    score += 20 if hearing_impaired
+    score
+  end
+
+  def release_match_score(filename, label)
+    source_families = release_families(filename)
+    return 1 if source_families.empty?
+
+    subtitle_families = release_families(label)
+    return 0 if (source_families & subtitle_families).any?
+    return 1 if subtitle_families.empty?
+
+    2
+  end
+
+  def release_families(value)
+    normalized = value.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+    RELEASE_FAMILY_PATTERNS.filter_map do |family, pattern|
+      family if normalized.match?(pattern)
+    end
   end
 
   def track_score_value(partial:, hearing_impaired:)

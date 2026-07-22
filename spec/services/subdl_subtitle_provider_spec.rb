@@ -107,6 +107,45 @@ RSpec.describe SubdlSubtitleProvider do
       expect(request.headers["Authorization"]).to eq("Bearer subdl-key")
     end
 
+    it "prioritizes subtitle releases matching the selected video source" do
+      search_connection = instance_double(Faraday::Connection)
+      request = instance_double(Faraday::Request, headers: {})
+      response = instance_double(
+        Faraday::Response,
+        success?: true,
+        body: {
+          "results" => [
+            {
+              "n_id" => "subtitle-web",
+              "language" => "en",
+              "format" => "srt",
+              "release_name" => "Obsession.WEB-DL",
+              "url" => "/subtitle/subtitle-web/file-web"
+            },
+            {
+              "n_id" => "subtitle-bluray",
+              "language" => "en",
+              "format" => "srt",
+              "release_name" => "Obsession.1080p.BluRay.x265-GROUP",
+              "url" => "/subtitle/subtitle-bluray/file-bluray"
+            }
+          ]
+        }
+      )
+      expect(search_connection).to receive(:get).and_yield(request).and_return(response)
+
+      provider = described_class.new(api_key: "subdl-key", search_connection: search_connection)
+
+      tracks = provider.search(
+        imdb_id: "tt37287335",
+        type: "movie",
+        filename: "Obsession.2026.1080p.BluRay.x265-Ghost.mkv",
+        default_language: "ENG"
+      )
+
+      expect(tracks.first[:label]).to include("BluRay.x265")
+    end
+
     it "does not search without an API key" do
       search_connection = instance_double(Faraday::Connection)
       allow(Rails.logger).to receive(:info)
