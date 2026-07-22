@@ -131,6 +131,8 @@ export default class extends Controller {
     this.navigatingAway = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
+    this.bufferAheadTimer = null
+    this.rebufferTimer = null
     this.mseSupported = window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"')
     this.hlsSessionId = null
     this.hlsPlaybackToken = 0
@@ -206,6 +208,7 @@ export default class extends Controller {
     this.clearSuppressSeekClickTimer()
     this.clearStallWatchdog()
     if (this.bufferingOverlayTimer) clearTimeout(this.bufferingOverlayTimer)
+    this.clearPlaybackDeadlineTimers()
     this.stopProgressWatchdog()
     this.playbackStarted = false
     this.bufferAheadDeadline = null
@@ -311,6 +314,8 @@ export default class extends Controller {
   }
   setupMseSource(streamUrl) {
     // Abort current fetch and clear queue
+    this.stopProgressWatchdog()
+    this.clearPlaybackDeadlineTimers()
     if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
     this.bufferQueue = []
     this.fmp4Buffer = null
@@ -498,6 +503,10 @@ export default class extends Controller {
   startDirectPlay() {
     this.directPlayActive = true
     this.remuxDirectPlay = false
+    this.stopProgressWatchdog()
+    this.clearPlaybackDeadlineTimers()
+    this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     this.isSeeking = false
     this.subtitlePlaybackHoldToken = null
     this.streamRecoveryAttempts = 0
@@ -533,6 +542,10 @@ export default class extends Controller {
   startRemuxDirectPlay() {
     this.directPlayActive = true
     this.remuxDirectPlay = true
+    this.stopProgressWatchdog()
+    this.clearPlaybackDeadlineTimers()
+    this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     this.isSeeking = false
     this.subtitlePlaybackHoldToken = null
     this.streamRecoveryAttempts = 0
@@ -584,6 +597,13 @@ export default class extends Controller {
   }
 
   async startHlsPlayback() {
+    if (this.hlsSessionId) this.stopHlsSession()
+    this.stopProgressWatchdog()
+    this.clearStallWatchdog()
+    this.clearPlaybackDeadlineTimers()
+    this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
+    this.isStalled = false
     const playbackToken = ++this.hlsPlaybackToken
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
@@ -739,6 +759,11 @@ export default class extends Controller {
   async restartHlsSession(startSeconds) {
     this.startSecondsValue = startSeconds
     this.element.dataset.videoPlayerStartSecondsValue = startSeconds.toString()
+    this.stopProgressWatchdog()
+    this.clearStallWatchdog()
+    this.clearPlaybackDeadlineTimers()
+    this.bufferAheadDeadline = null
+    this.rebufferDeadline = null
     // Pause the video immediately so it doesn't keep playing the
     // old stream behind the seeking overlay.
     this.videoTarget.pause()
@@ -904,6 +929,7 @@ export default class extends Controller {
           // we have — better to play with a small buffer than stall on
           // a slow source forever.
           this.bufferAheadDeadline = Date.now() + BUFFER_AHEAD_MAX_WAIT_MS
+          this.armBufferAheadDeadline()
         }
         this.queueBufferChunk(value)
       }
@@ -1008,6 +1034,7 @@ export default class extends Controller {
       // forever because the rebuffer gate is never reached.
       if (!this.rebufferDeadline) {
         this.rebufferDeadline = Date.now() + REBUFFER_MAX_WAIT_MS
+        this.armRebufferDeadline()
       }
       // After a stall with playback already started, use a shorter
       // stall watchdog timeout — the 60s default is for initial
@@ -1056,6 +1083,43 @@ export default class extends Controller {
       clearTimeout(this.stallWatchdogTimer)
       this.stallWatchdogTimer = null
     }
+  }
+
+  armBufferAheadDeadline() {
+    this.clearBufferAheadTimer()
+    if (!this.bufferAheadDeadline) return
+
+    const delay = Math.max(0, this.bufferAheadDeadline - Date.now())
+    this.bufferAheadTimer = setTimeout(() => {
+      this.bufferAheadTimer = null
+      this.maybeStartPlayback()
+    }, delay)
+  }
+
+  armRebufferDeadline() {
+    this.clearRebufferTimer()
+    if (!this.rebufferDeadline) return
+
+    const delay = Math.max(0, this.rebufferDeadline - Date.now())
+    this.rebufferTimer = setTimeout(() => {
+      this.rebufferTimer = null
+      this.maybeStartPlayback()
+    }, delay)
+  }
+
+  clearBufferAheadTimer() {
+    clearTimeout(this.bufferAheadTimer)
+    this.bufferAheadTimer = null
+  }
+
+  clearRebufferTimer() {
+    clearTimeout(this.rebufferTimer)
+    this.rebufferTimer = null
+  }
+
+  clearPlaybackDeadlineTimers() {
+    this.clearBufferAheadTimer()
+    this.clearRebufferTimer()
   }
 
   // ── Progress watchdog (silent freeze detector) ──────────────────
@@ -1154,13 +1218,11 @@ export default class extends Controller {
       if (stalled) {
         const bufferAhead = this.bufferedAheadOfCurrent()
 
-        // For remux direct play (native <video>), the browser manages its
-        // own download.  When the browser's internal media buffer is full,
-        // it stops reading from the HTTP response — no 'progress' event
-        // fires.  This is NORMAL: the browser is playing from its buffer
-        // and will resume reading when it needs more data.  Only reconnect
-        // when the buffer is actually running dry (< 5s ahead).
-        if (this.isRemuxDirectPlay() && bufferAhead > 5) {
+        // For native direct and remux direct play, a full browser-managed
+        // buffer can legitimately stop emitting progress events. A true
+        // failure is handled when that buffer runs dry by waiting/freeze
+        // detection, so don't reconnect while there is useful runway.
+        if (bufferAhead > 5) {
           this.lastProgressEventTime = now
           this.lastBufferDataTime = now
           this.lastBufferEnd = bufEnd
@@ -1669,12 +1731,14 @@ export default class extends Controller {
     const bufferedAhead = this.bufferedAheadOfCurrent()
 
     // Initial start: wait for the buffer-ahead threshold (or deadline).
+    if (this.userPaused || this.isSeeking) return
     if (!this.playbackStarted) {
       const deadlineReached = this.bufferAheadDeadline && Date.now() >= this.bufferAheadDeadline
       if (bufferedAhead >= BUFFER_AHEAD_SECONDS || deadlineReached) {
         this.playbackStarted = true
         this.bufferAheadDeadline = null
         const p = this.videoTarget.play()
+        this.clearBufferAheadTimer()
         if (p?.catch) p.catch(() => {})
       }
       return
@@ -1704,6 +1768,7 @@ export default class extends Controller {
       const deadlineReached = this.rebufferDeadline && Date.now() >= this.rebufferDeadline
       if (bufferedAhead >= REBUFFER_AHEAD_SECONDS || deadlineReached) {
         this.rebufferDeadline = null
+        this.clearRebufferTimer()
         this.isStalled = false
         const p = this.videoTarget.play()
         if (p?.catch) p.catch(() => {})
@@ -2043,9 +2108,12 @@ export default class extends Controller {
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false
+      this.rebufferDeadline = null
+      this.clearRebufferTimer()
       this.clearStallWatchdog()
       this.streamRecoveryAttempts = 0
       this.streamRecoveryActive = false
+      this.stopProgressWatchdog()
       this.startProgressWatchdog()
       this.hideSeekingOverlay()
       return
@@ -2057,10 +2125,11 @@ export default class extends Controller {
       this.bufferingOverlayTimer = null
       this.isStalled = false
       this.rebufferDeadline = null
+      this.clearRebufferTimer()
       this.clearStallWatchdog()
       this.streamRecoveryAttempts = 0
       this.streamRecoveryActive = false
-      this.resetProgressBaseline()
+      this.stopProgressWatchdog()
       this.startProgressWatchdog()
       this.hideSeekingOverlay()
       return
@@ -2078,9 +2147,12 @@ export default class extends Controller {
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false
+      this.rebufferDeadline = null
+      this.clearRebufferTimer()
       this.clearStallWatchdog()
       this.streamRecoveryAttempts = 0
       this.streamRecoveryActive = false
+      this.stopProgressWatchdog()
       this.startProgressWatchdog()
       this.hideSeekingOverlay()
       return
@@ -2096,9 +2168,12 @@ export default class extends Controller {
     clearTimeout(this.bufferingOverlayTimer)
     this.bufferingOverlayTimer = null
     this.isStalled = false
+    this.rebufferDeadline = null
+    this.clearRebufferTimer()
     this.clearStallWatchdog()
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
+    this.stopProgressWatchdog()
     this.startProgressWatchdog()
     this.hideSeekingOverlay()
   }
@@ -2322,6 +2397,12 @@ export default class extends Controller {
         lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
         holdPlayback: true
       })
+    } else {
+      this.hideSeekingOverlay()
+      if (!this.userPaused && this.playbackStarted && this.videoTarget.paused) {
+        const playPromise = this.videoTarget.play()
+        if (playPromise?.catch) playPromise.catch(() => {})
+      }
     }
   }
 
@@ -2625,6 +2706,9 @@ export default class extends Controller {
     // A cleared cue buffer cannot keep claiming its old window is loaded.
     // Cancel stale responses and force the next overlay update to fetch the
     // new playback timeline.
+    // A newer seek or track change invalidates any subtitle hold owned by
+    // an older request. Its finally block must not resume old playback.
+    this.subtitlePlaybackHoldToken = null
     this.subtitleLoadToken += 1
     this.abortSubtitleLoad()
     this.subtitleLoading = false
@@ -3131,6 +3215,7 @@ export default class extends Controller {
     // the new position.  The browser downloads and plays it natively.
     if (this.isRemuxDirectPlay()) {
       this.isSeeking = true
+      this.stopProgressWatchdog()
       this.showSeekingOverlay("Seeking...")
       this.startSecondsValue = targetSeconds
       this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
@@ -3158,12 +3243,14 @@ export default class extends Controller {
     // Reset the progress watchdog so the freeze detector doesn't
     // fire during the seek (currentTime briefly stalls).
     if (this.isNativeDirectPlay()) {
+      this.stopProgressWatchdog()
       this.startSecondsValue = targetSeconds
       this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
       this.videoTarget.currentTime = targetSeconds
       this.clearSubtitleCues()
       this.reloadTextSubtitlesAt(targetSeconds)
       this.resetProgressBaseline()
+      this.startProgressWatchdog()
       return
     }
 
@@ -3287,6 +3374,8 @@ export default class extends Controller {
       this.streamRecoveryAttempts = 0
       this.streamRecoveryActive = false
       this.startProgressWatchdog()
+      this.rebufferDeadline = null
+      this.clearRebufferTimer()
       this.hideSeekingOverlay()
     }
 

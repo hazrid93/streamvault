@@ -475,3 +475,92 @@ test("HLS restart updates the subtitle media timeline before loading", async () 
   assert.equal(player.startSecondsValue, 420)
   assert.equal(player.element.dataset.videoPlayerStartSecondsValue, "420")
 })
+
+test("MSE startup deadline starts playback below the buffer target", () => {
+  const player = new VideoPlayerController()
+  let played = 0
+  player.videoTarget = {
+    currentTime: 0,
+    ended: false,
+    play: () => { played += 1; return Promise.resolve() }
+  }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 5 } }
+  player.playbackStarted = false
+  player.bufferAheadDeadline = Date.now() - 1
+  player.userPaused = false
+  player.isSeeking = false
+
+  player.maybeStartPlayback()
+
+  assert.equal(played, 1)
+  assert.equal(player.playbackStarted, true)
+  assert.equal(player.bufferAheadDeadline, null)
+  assert.equal(player.bufferAheadTimer, null)
+})
+
+test("MSE rebuffer deadline resumes playback without another append event", () => {
+  const player = new VideoPlayerController()
+  let played = 0
+  player.videoTarget = {
+    currentTime: 0,
+    ended: false,
+    play: () => { played += 1; return Promise.resolve() }
+  }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 2 } }
+  player.playbackStarted = true
+  player.isStalled = true
+  player.rebufferDeadline = Date.now() - 1
+  player.userPaused = false
+  player.isSeeking = false
+
+  player.maybeStartPlayback()
+
+  assert.equal(played, 1)
+  assert.equal(player.isStalled, false)
+  assert.equal(player.rebufferDeadline, null)
+  assert.equal(player.rebufferTimer, null)
+})
+
+test("direct playback does not reconnect while a full native buffer pauses progress events", () => {
+  const player = new VideoPlayerController()
+  let recoveries = 0
+  player.videoTarget = {
+    currentTime: 10,
+    paused: false,
+    ended: false,
+    buffered: { length: 1, start: () => 0, end: () => 30 }
+  }
+  player.isDirectPlay = () => true
+  player.isRemuxDirectPlay = () => false
+  player.playbackStarted = true
+  player.progressWatchdogArmed = true
+  player.lastProgressPosition = 10
+  player.lastProgressTime = Date.now() - 21000
+  player.lastProgressEventTime = Date.now() - 21000
+  player.lastBufferEnd = 30
+  player.lastBufferDataTime = Date.now() - 21000
+  player.handleStreamStall = () => { recoveries += 1 }
+
+  player.checkProgressStall()
+
+  assert.equal(recoveries, 0)
+  assert.equal(player.progressWatchdogArmed, true)
+})
+
+test("clearing subtitle cues invalidates an old playback hold", () => {
+  const player = new VideoPlayerController()
+  let played = 0
+  player.videoTarget = {
+    paused: true,
+    ended: false,
+    play: () => { played += 1; return Promise.resolve() }
+  }
+  player.subtitlePlaybackHoldToken = 7
+  player.subtitleLoadToken = 7
+
+  player.clearSubtitleCues()
+  player.finishSubtitlePlaybackHold(7)
+
+  assert.equal(player.subtitlePlaybackHoldToken, null)
+  assert.equal(played, 0)
+})
