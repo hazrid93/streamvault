@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "digest"
+
 # Rate limiting via rack-attack.  Limits are per-IP for unauthenticated
 # endpoints (login) and per-user-id for authenticated endpoints.  When a
 # limit is hit, rack-attack returns 429 Too Many Requests with a
@@ -12,10 +14,10 @@ class Rack::Attack
   Rack::Attack.cache.store = Rails.cache
 
   # --- Helpers ---------------------------------------------------------
-  # Authenticated requests are limited per-user; anonymous per-IP.
-  # Use req.ip (works across Rack versions) instead of req.remote_ip
-  # (which requires ActionDispatch::RemoteIp middleware and is not
-  # available in all test environments).
+  # Authenticated requests are limited per-user; anonymous requests use
+  # the client IP. Login attempts additionally use the normalized login
+  # identifier so one failed account cannot lock out every user behind a
+  # shared NAT address.
   def self.client_ip(req)
     req.respond_to?(:remote_ip) ? req.remote_ip : req.ip
   end
@@ -24,17 +26,44 @@ class Rack::Attack
     request.env["warden"]&.user(fetch: false)&.id&.to_s
   end
 
+  def self.sign_in_request?(request)
+    request.path == "/users/sign_in" && request.post?
+  end
+
+  def self.sign_in_identifier(request)
+    identifier = request.params["user"]&.[]("email") || request.params["email"]
+    normalized = identifier.to_s.strip.downcase
+    normalized.presence
+  end
+
+  def self.sign_in_key(request)
+    ip = client_ip(request)
+    identifier = sign_in_identifier(request)
+    return ip unless identifier
+
+    Digest::SHA256.hexdigest("#{ip}:#{identifier}")
+  end
+
   safe_list = if Rails.env.development? || Rails.env.test?
     %w[127.0.0.1 ::1].freeze
   else
     [].freeze
   end
-
   # --- Throttles -------------------------------------------------------
 
-  # Login attempts: 5 per 15 minutes per IP.
-  throttle("sessions/ip", limit: 5, period: 15.minutes) do |req|
-    next unless req.path == "/users/sign_in" && req.post?
+  # Login attempts: 5 per 15 minutes per normalized account/IP key.
+  throttle("sessions/account", limit: 5, period: 15.minutes) do |req|
+    next unless sign_in_request?(req)
+    ip = client_ip(req)
+    next if safe_list.include?(ip)
+
+    sign_in_key(req)
+  end
+
+  # Login backstop: 20 per 15 minutes per IP for credential stuffing
+  # across many account identifiers.
+  throttle("sessions/ip", limit: 20, period: 15.minutes) do |req|
+    next unless sign_in_request?(req)
     ip = client_ip(req)
     ip unless safe_list.include?(ip)
   end
