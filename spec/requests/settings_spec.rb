@@ -49,6 +49,19 @@ RSpec.describe "Settings", type: :request do
       expect(response).to redirect_to(settings_path)
       expect(user.reload.preferred_languages).to include("ENG", "FRENCH")
     end
+    it "changes the password and rejects the previous password" do
+      patch settings_path, params: {
+        user: {
+          current_password: "password123",
+          password: "newpassword123",
+          password_confirmation: "newpassword123"
+        }
+      }
+
+      expect(response).to redirect_to(settings_path)
+      expect(user.reload.valid_password?("newpassword123")).to be(true)
+      expect(user.valid_password?("password123")).to be(false)
+    end
   end
 
   describe "RD key exposure (SEC-08)" do

@@ -1,4 +1,5 @@
 # This file is copied to spec/ when you run 'rails generate rspec:install'
+require "uri"
 require 'spec_helper'
 
 # SimpleCov must be started BEFORE requiring application code
@@ -17,6 +18,10 @@ require_relative '../config/environment'
 
 # Prevent database truncation if the environment is production
 abort("The Rails environment is running in production mode!") if Rails.env.production?
+if Rails.env.test? && ENV["DATABASE_URL"].present?
+  test_database = URI.parse(ENV["DATABASE_URL"]).path.to_s.delete_prefix("/").end_with?("_test")
+  abort("Refusing to run tests against a non-test DATABASE_URL") unless test_database
+end
 
 require 'rspec/rails'
 require 'webmock/rspec'
