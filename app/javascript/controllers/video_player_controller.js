@@ -7,6 +7,8 @@ const SUBTITLE_WINDOW_SECONDS = 60
 const SUBTITLE_LOOK_BEHIND_SECONDS = 5
 const EXTERNAL_SUBTITLE_WINDOW_SECONDS = 60
 const SUBTITLE_PREFETCH_SECONDS = 20
+const SUBTITLE_OFFSET_MIN_SECONDS = -5
+const SUBTITLE_OFFSET_MAX_SECONDS = 5
 const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
@@ -2820,17 +2822,39 @@ export default class extends Controller {
 
   // ── Subtitle offset (sync adjustment) ────────────────────────────
 
-  // Adjust subtitle timing in tenths of a second.  A positive value
-  // delays subtitles (useful when subs arrive too early); negative
-  // advances them.
+  // Positive values delay subtitles; negative values show them earlier.
   setSubtitleOffset(event) {
-    const tenths = parseInt(event.currentTarget.value, 10)
-    this.subtitleOffset = tenths / 10
-    const label = event.currentTarget.closest("div")?.querySelector("[data-subtitle-offset-label]")
+    const tenths = Number.parseInt(event.currentTarget.value, 10)
+    if (!Number.isFinite(tenths)) return
+
+    this.applySubtitleOffset(tenths / 10, event.currentTarget.closest("[data-subtitle-offset-controls]"))
+  }
+
+  adjustSubtitleOffset(event) {
+    const delta = Number(event.currentTarget.dataset.subtitleOffsetDelta)
+    if (!Number.isFinite(delta)) return
+
+    this.applySubtitleOffset(this.subtitleOffset + delta, event.currentTarget.closest("[data-subtitle-offset-controls]"))
+  }
+
+  resetSubtitleOffset(event) {
+    this.applySubtitleOffset(0, event.currentTarget.closest("[data-subtitle-offset-controls]"))
+  }
+
+  applySubtitleOffset(value, controls) {
+    const seconds = Number(value)
+    if (!Number.isFinite(seconds)) return
+
+    this.subtitleOffset = Math.round(Math.max(SUBTITLE_OFFSET_MIN_SECONDS, Math.min(SUBTITLE_OFFSET_MAX_SECONDS, seconds)) * 10) / 10
+    const root = controls || this.element
+    const label = root?.querySelector("[data-subtitle-offset-label]")
+    const range = root?.querySelector("[data-subtitle-offset-range]")
     if (label) {
-      const secs = (this.subtitleOffset >= 0 ? "+" : "") + this.subtitleOffset.toFixed(1)
-      label.textContent = `${secs}s`
+      const formatted = (this.subtitleOffset >= 0 ? "+" : "") + this.subtitleOffset.toFixed(1)
+      label.textContent = `${formatted}s`
     }
+    if (range) range.value = Math.round(this.subtitleOffset * 10).toString()
+    if (this.videoTarget) this.updateSubtitleOverlay(this.currentPlaybackPosition())
     if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
   }
 

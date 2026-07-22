@@ -18,6 +18,18 @@ class SubdlSubtitleProvider
     dvd: /\b(?:dvdrip|dvd)\b/,
     remux: /\bremux\b/
   }.freeze
+  RELEASE_RESOLUTION_PATTERNS = [
+    [ 2160, /\b(?:2160p|2160|4k|uhd)\b/ ],
+    [ 1080, /\b(?:1080p|1080)\b/ ],
+    [ 720, /\b(?:720p|720)\b/ ],
+    [ 576, /\b(?:576p|576)\b/ ],
+    [ 480, /\b(?:480p|480)\b/ ]
+  ].freeze
+  RELEASE_CODEC_PATTERNS = {
+    hevc: /\b(?:x265|h265|hevc)\b/,
+    h264: /\b(?:x264|h264|avc)\b/,
+    xvid: /\b(?:xvid|divx)\b/
+  }.freeze
 
   LANGUAGE_CODES = {
     "ENG" => "en",
@@ -257,18 +269,60 @@ class SubdlSubtitleProvider
   end
 
   def release_match_score(filename, label)
-    source_families = release_families(filename)
-    return 1 if source_families.empty?
+    source = release_profile(filename)
+    subtitle = release_profile(label)
 
-    subtitle_families = release_families(label)
+    [
+      release_metadata_score(source[:resolution], subtitle[:resolution]),
+      release_metadata_score(source[:encode_type], subtitle[:encode_type]),
+      release_metadata_score(source[:codec], subtitle[:codec]),
+      release_family_score(source[:families], subtitle[:families]),
+      release_metadata_score(source[:group], subtitle[:group])
+    ]
+  end
+
+  def release_profile(value)
+    normalized = normalize_release_value(value)
+    {
+      families: release_families(normalized),
+      resolution: RELEASE_RESOLUTION_PATTERNS.find { |_, pattern| normalized.match?(pattern) }&.first,
+      encode_type: release_encode_type(normalized),
+      codec: RELEASE_CODEC_PATTERNS.find { |_, pattern| normalized.match?(pattern) }&.first,
+      group: release_group(value)
+    }
+  end
+
+  def release_family_score(source_families, subtitle_families)
+    return 1 if source_families.empty? || subtitle_families.empty?
     return 0 if (source_families & subtitle_families).any?
-    return 1 if subtitle_families.empty?
 
     2
   end
 
+  def release_metadata_score(source_value, subtitle_value)
+    return 0 if source_value.nil? || subtitle_value.nil?
+
+    source_value == subtitle_value ? 0 : 1
+  end
+
+  def normalize_release_value(value)
+    value.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+  end
+
+  def release_encode_type(normalized)
+    return :remux if normalized.match?(/\bremux\b/)
+    return :encoded if normalized.match?(/\b(?:bluray|blu ray|bdrip|brrip|web dl|web rip|webrip|hdtv|dvdrip|dvd)\b/)
+
+    nil
+  end
+
+  def release_group(value)
+    without_extension = value.to_s.sub(/\.[a-z0-9]{2,5}\z/i, "")
+    without_extension.match(/[-\[]([a-z0-9][a-z0-9._-]*)\]?\s*\z/i)&.captures&.first&.downcase
+  end
+
   def release_families(value)
-    normalized = value.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+    normalized = normalize_release_value(value)
     RELEASE_FAMILY_PATTERNS.filter_map do |family, pattern|
       family if normalized.match?(pattern)
     end

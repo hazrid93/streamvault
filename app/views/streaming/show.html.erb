@@ -141,14 +141,34 @@
              class="hidden absolute z-20 p-2 bg-black/80 rounded-lg text-xs text-sv-text-muted space-y-1 border border-white/20"
              style="right: 0; bottom: 2rem; min-width: 14rem; max-height: 14rem; overflow-y: auto;">
           <div data-video-player-target="subtitleOptions"></div>
-          <%# Subtitle sync (offset) — lives in the CC menu %>
-          <div class="mt-2 pt-2 border-t border-white/10">
-            <label class="block mb-1 text-white font-medium">Sync <span data-subtitle-offset-label class="text-sv-accent float-right">+0.0s</span></label>
+          <%# Subtitle sync adjustment — applies to overlay and native iOS cues. %>
+          <div class="mt-2 pt-2 border-t border-white/10" data-subtitle-offset-controls>
+            <div class="flex items-center justify-between gap-2 mb-2">
+              <span class="text-white font-medium">Subtitle delay</span>
+              <span data-subtitle-offset-label class="text-sv-accent tabular-nums">+0.0s</span>
+            </div>
+            <div class="grid grid-cols-3 gap-1 mb-2">
+              <button type="button"
+                      data-subtitle-offset-delta="-1"
+                      data-action="click->video-player#adjustSubtitleOffset"
+                      class="px-2 py-1.5 rounded bg-white/10 text-white hover:bg-white/20"
+                      title="Show subtitles one second earlier">Earlier −1s</button>
+              <button type="button"
+                      data-action="click->video-player#resetSubtitleOffset"
+                      class="px-2 py-1.5 rounded bg-white/10 text-white hover:bg-white/20">Reset</button>
+              <button type="button"
+                      data-subtitle-offset-delta="1"
+                      data-action="click->video-player#adjustSubtitleOffset"
+                      class="px-2 py-1.5 rounded bg-white/10 text-white hover:bg-white/20"
+                      title="Show subtitles one second later">Later +1s</button>
+            </div>
             <input type="range" min="-50" max="50" value="0" step="1"
+                   data-subtitle-offset-range
                    data-action="input->video-player#setSubtitleOffset"
-                   class="w-full accent-indigo-500">
+                   class="w-full accent-indigo-500"
+                   aria-label="Subtitle delay in tenths of a second">
             <div class="flex justify-between text-[10px] mt-0.5 text-sv-text-muted">
-              <span>-5.0s</span><span>0</span><span>+5.0s</span>
+              <span>5s earlier</span><span>0</span><span>5s later</span>
             </div>
           </div>
         </div>

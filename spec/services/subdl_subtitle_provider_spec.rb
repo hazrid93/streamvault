@@ -107,7 +107,7 @@ RSpec.describe SubdlSubtitleProvider do
       expect(request.headers["Authorization"]).to eq("Bearer subdl-key")
     end
 
-    it "prioritizes subtitle releases matching the selected video source" do
+    it "prioritizes the closest resolution encode and codec for the selected video source" do
       search_connection = instance_double(Faraday::Connection)
       request = instance_double(Faraday::Request, headers: {})
       response = instance_double(
@@ -116,17 +116,24 @@ RSpec.describe SubdlSubtitleProvider do
         body: {
           "results" => [
             {
+              "n_id" => "subtitle-remux",
+              "language" => "en",
+              "format" => "srt",
+              "release_name" => "Obsession.2025.2160p.UHD.Blu-ray.Remux.DV.HDR.HEVC.TrueHD.Atmos.7.1-CiNEPHiLES",
+              "url" => "/subtitle/subtitle-remux/file-remux"
+            },
+            {
               "n_id" => "subtitle-web",
               "language" => "en",
               "format" => "srt",
-              "release_name" => "Obsession.WEB-DL",
+              "release_name" => "Obsession.2025.1080p.MA.WEB-DL.DDP5.1.Atmos.H.264",
               "url" => "/subtitle/subtitle-web/file-web"
             },
             {
               "n_id" => "subtitle-bluray",
               "language" => "en",
               "format" => "srt",
-              "release_name" => "Obsession.1080p.BluRay.x265-GROUP",
+              "release_name" => "Obsession.2026.1080p.BluRay.x265-Ghost",
               "url" => "/subtitle/subtitle-bluray/file-bluray"
             }
           ]
@@ -143,7 +150,11 @@ RSpec.describe SubdlSubtitleProvider do
         default_language: "ENG"
       )
 
-      expect(tracks.first[:label]).to include("BluRay.x265")
+      expect(tracks.map { |track| track[:download_path] }).to eq([
+        "/subtitle/subtitle-bluray/file-bluray",
+        "/subtitle/subtitle-web/file-web",
+        "/subtitle/subtitle-remux/file-remux"
+      ])
     end
 
     it "does not search without an API key" do

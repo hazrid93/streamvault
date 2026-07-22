@@ -416,6 +416,96 @@ test("subtitle text renders inside the centered caption box", () => {
   assert.equal(classes.has("hidden"), false)
 })
 
+test("subtitle delay buttons update the overlay and stay within the supported range", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set(["hidden"])
+  const label = { textContent: "+0.0s" }
+  const range = { value: "0" }
+  const controls = {
+    querySelector(selector) {
+      if (selector === "[data-subtitle-offset-label]") return label
+      if (selector === "[data-subtitle-offset-range]") return range
+      return null
+    }
+  }
+  player.videoTarget = { currentTime: 15, playbackRate: 1 }
+  player.startSecondsValue = 0
+  player.directPlayActive = true
+  player.hasSubtitleOverlayTarget = true
+  player.subtitleOffset = 0
+  player.hasSubtitleTextTarget = true
+  player.subtitleOverlayTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name)
+    }
+  }
+  player.subtitleTextTarget = { textContent: "" }
+  player.subtitleCues = [{ start: 14, end: 16, text: "Delayed caption" }]
+  player.ensureSubtitleWindow = () => {}
+
+  player.adjustSubtitleOffset({
+    currentTarget: {
+      dataset: { subtitleOffsetDelta: "1" },
+      closest: () => controls
+    }
+  })
+
+  assert.equal(player.subtitleOffset, 1)
+  assert.equal(label.textContent, "+1.0s")
+  assert.equal(range.value, "10")
+  assert.equal(player.subtitleTextTarget.textContent, "Delayed caption")
+  assert.equal(classes.has("hidden"), false)
+
+  player.setSubtitleOffset({
+    currentTarget: {
+      value: "999",
+      closest: () => controls
+    }
+  })
+  assert.equal(player.subtitleOffset, 5)
+  assert.equal(label.textContent, "+5.0s")
+  assert.equal(range.value, "50")
+
+  player.resetSubtitleOffset({ currentTarget: { closest: () => controls } })
+  assert.equal(player.subtitleOffset, 0)
+  assert.equal(label.textContent, "+0.0s")
+  assert.equal(range.value, "0")
+})
+
+test("subtitle delay controls shift native fullscreen cue times", () => {
+  const player = new VideoPlayerController()
+  const label = { textContent: "+0.0s" }
+  const range = { value: "0" }
+  const controls = {
+    querySelector(selector) {
+      if (selector === "[data-subtitle-offset-label]") return label
+      if (selector === "[data-subtitle-offset-range]") return range
+      return null
+    }
+  }
+  let syncs = 0
+  player.subtitleOffset = 0
+  player.nativeFullscreenActive = true
+  player.syncNativeFullscreenSubtitles = () => { syncs += 1 }
+  player.playbackTimelineOffset = () => 120
+
+  player.setSubtitleOffset({
+    currentTarget: {
+      value: "25",
+      closest: () => controls
+    }
+  })
+
+  assert.equal(player.subtitleOffset, 2.5)
+  assert.equal(label.textContent, "+2.5s")
+  assert.equal(range.value, "25")
+  assert.equal(syncs, 1)
+  const cueTimes = player.nativeFullscreenCueTimes({ start: 121, end: 123 })
+  assert.equal(cueTimes.start, 3.5)
+  assert.equal(cueTimes.end, 5.5)
+})
+
 test("HLS receives selected audio and bitmap subtitle tracks but not text overlays", () => {
   const player = new VideoPlayerController()
   player.selectedAudioStream = "2"
