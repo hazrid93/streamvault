@@ -1,17 +1,25 @@
 <%# locals: item, link_path, variant (optional, "carousel" default) %>
 <% variant = local_assigns[:variant] || "carousel" %>
-<div class="poster-card group <%= variant == "grid" ? "w-full" : "shrink-0" %>" <%= "style=\"width: 160px\"" if variant != "grid" %>">
-  <%= link_to link_path, data: { page_loader: "link" } do %>
-    <% if item[:poster_url] %>
-      <img src="<%= item[:poster_url] %>" alt="<%= item[:title] %>" loading="lazy" class="w-full aspect-[2/3] object-cover">
-    <% else %>
-      <div class="w-full aspect-[2/3] bg-sv-surface flex items-center justify-center">
-        <svg class="w-12 h-12 text-sv-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/></svg>
-      </div>
-    <% end %>
-    <div class="p-2">
-      <h3 class="text-xs font-medium text-white truncate"><%= item[:title] %></h3>
-      <p class="text-xs text-sv-text-muted mt-0.5"><%= item[:year] %></p>
+<% item_type = item[:type].presence %>
+<div class="poster-card group <%= variant == "grid" ? "w-full" : "w-[9.5rem] sm:w-[10.5rem] shrink-0" %>">
+  <%= link_to link_path, data: { page_loader: "link" }, class: "block", aria: { label: [item[:title], item[:year]].compact.join(", ") } do %>
+    <div class="poster-card__image">
+      <% if item[:poster_url] %>
+        <img src="<%= item[:poster_url] %>" alt="" loading="lazy">
+      <% else %>
+        <div class="flex aspect-[2/3] w-full items-center justify-center bg-sv-surface">
+          <svg class="h-12 w-12 text-sv-text-muted/50" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/></svg>
+        </div>
+      <% end %>
+      <span class="poster-card__cue" aria-hidden="true">
+        <svg class="ml-0.5 h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </span>
+    </div>
+    <div class="poster-card__body">
+      <h3 class="poster-card__title"><%= item[:title] %></h3>
+      <p class="poster-card__meta">
+        <%= item[:year].presence || "Year unknown" %><% if item_type %><span aria-hidden="true"> · </span><%= item_type == "show" ? "Series" : item_type.capitalize %><% end %>
+      </p>
     </div>
   <% end %>
 </div>

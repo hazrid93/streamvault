@@ -1,5 +1,5 @@
-<div class="px-6 py-8">
-  <h1 class="text-3xl font-bold text-white mb-6">Wishlist</h1>
+<div class="page-shell">
+  <header class="mb-7"><p class="eyebrow mb-2">Save for later</p><h1 class="page-heading text-white">Wishlist</h1><p class="page-subtitle">Keep a shortlist for the next movie night.</p></header>
 
   <%# Type filter pills %>
   <div class="flex flex-wrap gap-2 mb-4">
@@ -27,9 +27,9 @@
   <% end %>
 
   <% if @entries.any? %>
-    <div class="grid gap-4" style="grid-template-columns: repeat(auto-fill, 160px)">
+    <div class="media-grid">
       <% @entries.each do |entry| %>
-        <div class="poster-card group shrink-0" style="width: 160px">
+        <div class="poster-card group w-full">
           <%= link_to content_path(type: entry.content_type, imdb_id: entry.imdb_id), data: { page_loader: "link" } do %>
             <% if entry.poster_url %>
               <img src="<%= entry.poster_url %>" alt="<%= entry.title %>" loading="lazy" class="w-full aspect-[2/3] object-cover">
@@ -81,9 +81,9 @@
       </nav>
     <% end %>
   <% else %>
-    <div class="text-center py-16">
+    <div class="empty-state">
       <svg class="w-16 h-16 text-sv-text-muted mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
-      <p class="text-sv-text-muted mb-4">Your wishlist is empty.</p>
+      <h2 class="text-lg font-semibold text-white">Nothing saved for later</h2><p class="mt-2 mb-5 text-sm text-sv-text-muted">Add anything that catches your eye while browsing.</p>
       <%= link_to "Search for content", search_index_path, class: "btn-primary" %>
     </div>
   <% end %>

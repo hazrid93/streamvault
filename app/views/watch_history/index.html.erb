@@ -1,14 +1,14 @@
-<div class="px-6 py-8">
-  <div class="flex items-center justify-between mb-6">
-    <h1 class="text-3xl font-bold text-white">Watch History</h1>
+<div class="page-shell">
+  <header class="page-intro">
+    <div><p class="eyebrow mb-2">Your viewing trail</p><h1 class="page-heading text-white">Watch history</h1><p class="page-subtitle">Resume unfinished titles or revisit what you watched.</p></div>
     <% if @entries.any? %>
       <%= button_to "Clear History", clear_all_watch_history_index_path, method: :delete, class: "btn-secondary text-sm", data: { turbo_confirm: "Clear all watch history?" } %>
     <% end %>
-  </div>
+  </header>
 
   <% if @entries.any? || params[:filter].present? || params[:sort].present? %>
     <%# Sort & filter bar %>
-    <div class="flex flex-wrap items-center gap-3 mb-4">
+    <div class="filter-panel flex flex-wrap items-center gap-3 mb-5">
       <div class="inline-flex flex-wrap gap-1">
         <% [["all", "All"], ["in_progress", "In Progress"], ["completed", "Completed"]].each do |val, label| %>
           <% active = @filter == val %>
@@ -93,9 +93,9 @@
       </nav>
     <% end %>
   <% else %>
-    <div class="text-center py-16">
+    <div class="empty-state">
       <svg class="w-16 h-16 text-sv-text-muted mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-      <p class="text-sv-text-muted">No watch history yet.</p>
+      <h2 class="text-lg font-semibold text-white">No watch history yet</h2><p class="mt-2 text-sm text-sv-text-muted">Your recently watched titles will appear here.</p>
     </div>
   <% end %>
 </div>

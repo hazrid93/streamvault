@@ -1,10 +1,14 @@
-<div class="px-6 py-8">
-  <h1 class="text-3xl font-bold text-white mb-6">Search</h1>
+<div class="page-shell">
+  <header class="mb-7">
+    <p class="eyebrow mb-2">Across your catalog</p>
+    <h1 class="page-heading text-white">Search</h1>
+    <p class="page-subtitle">Find a movie or series by title.</p>
+  </header>
 
-  <%= form_tag search_index_path, method: :get, class: "mb-8", data: { turbo_frame: "_top", page_loader: "search" } do %>
-    <div class="flex gap-3">
-      <%= text_field_tag :q, @query, class: "input-field flex-1", placeholder: "Search for movies, TV shows...", autofocus: true %>
-      <%= submit_tag "Search", class: "btn-primary cursor-pointer" %>
+  <%= form_tag search_index_path, method: :get, class: "filter-panel mb-8", data: { turbo_frame: "_top", page_loader: "search" }, role: "search" do %>
+    <div class="flex flex-col gap-3 sm:flex-row">
+      <%= text_field_tag :q, @query, class: "input-field flex-1", placeholder: "Try ‘The Bear’ or ‘Arrival’", autofocus: true, aria: { label: "Movie or series title" } %>
+      <%= submit_tag "Show results", class: "btn-primary cursor-pointer" %>
     </div>
   <% end %>
 
@@ -30,23 +34,9 @@
     </div>
 
     <%# Results grid %>
-    <div class="grid gap-4" style="grid-template-columns: repeat(auto-fill, 160px)">
+    <div class="media-grid">
       <% @results.each do |result| %>
-        <div class="poster-card group shrink-0" style="width: 160px">
-        <%= link_to content_path(type: result[:type], imdb_id: result[:imdb_id]), data: { page_loader: "link" } do %>
-            <% if result[:poster_url] %>
-              <img src="<%= result[:poster_url] %>" alt="<%= result[:title] %>" loading="lazy" class="w-full aspect-[2/3] object-cover">
-            <% else %>
-              <div class="w-full aspect-[2/3] bg-sv-surface flex items-center justify-center">
-                <svg class="w-12 h-12 text-sv-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/></svg>
-              </div>
-            <% end %>
-            <div class="p-2">
-              <h3 class="text-xs font-medium text-white truncate"><%= result[:title] %></h3>
-              <p class="text-xs text-sv-text-muted mt-0.5"><%= result[:year] %> · <%= result[:type].capitalize %></p>
-            </div>
-          <% end %>
-        </div>
+        <%= render "shared/poster_card", item: result, link_path: content_path(type: result[:type], imdb_id: result[:imdb_id]), variant: "grid" %>
       <% end %>
     </div>
 
@@ -92,6 +82,6 @@
     <% end %>
 
   <% elsif @query.present? %>
-    <p class="text-sv-text-muted">No results found for "<%= @query %>".</p>
+    <div class="empty-state"><p class="text-lg font-semibold text-white">No matches for “<%= @query %>”</p><p class="mt-2 text-sm text-sv-text-muted">Check the spelling or try a shorter title.</p></div>
   <% end %>
 </div>

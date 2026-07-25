@@ -3,16 +3,14 @@
 
 <main class="flex min-h-screen items-center justify-center px-4 py-8">
   <div class="w-full max-w-md">
-    <div class="mb-8 flex items-center justify-center gap-2" aria-label="StreamVault">
-      <svg class="h-10 w-10 text-sv-accent" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M8 5v14l11-7z"/>
-      </svg>
-      <span class="text-2xl font-bold tracking-tight text-sv-text">StreamVault</span>
+    <div class="mb-8 flex items-center justify-center gap-3" aria-label="StreamVault">
+      <span class="brand-mark"><svg class="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></span>
+      <span><span class="brand-kicker block">Your screening room</span><span class="brand-name block text-sv-text">StreamVault</span></span>
     </div>
 
-    <section class="rounded-xl border border-sv-border bg-sv-surface p-6 sm:p-8" aria-labelledby="pin-heading">
+    <section class="rounded-2xl border border-sv-border bg-sv-surface/90 p-6 shadow-2xl shadow-black/30 backdrop-blur-sm sm:p-8" aria-labelledby="pin-heading">
       <div class="mb-6 text-center">
-        <h1 id="pin-heading" class="text-2xl font-bold text-sv-text"><%= @setup ? "Set your PIN" : "Enter PIN" %></h1>
+        <p class="eyebrow mb-2"><%= @setup ? "One quick step" : "Welcome back" %></p><h1 id="pin-heading" class="page-heading !text-3xl text-sv-text"><%= @setup ? "Set your PIN" : "Unlock your vault" %></h1>
         <p class="mt-2 text-sm text-sv-text-muted">
           <%= @setup ? "Choose a PIN to protect this StreamVault." : "Enter your PIN to unlock StreamVault." %>
         </p>
