@@ -21,6 +21,12 @@ class User < ApplicationRecord
   # Language preferences
   serialize :preferred_languages, coder: JSON
 
+  STREAMING_PREFERENCES = {
+    "automatic" => "RealDebrid with local fallback",
+    "realdebrid" => "RealDebrid only",
+    "local" => "Our streaming server only"
+  }.freeze
+
   STREAM_LANGUAGE_OPTIONS = {
     "ENG" => "English", "FRENCH" => "French", "GERMAN" => "German",
     "SPANISH" => "Spanish", "ITALIAN" => "Italian", "JAPANESE" => "Japanese",
@@ -36,6 +42,7 @@ class User < ApplicationRecord
   validate :preferred_languages_must_be_array, on: :update
 
   validates :display_name, length: { maximum: 50 }
+  validates :streaming_preference, inclusion: { in: STREAMING_PREFERENCES.keys }
 
   def pin_configured?
     pin_digest.present?

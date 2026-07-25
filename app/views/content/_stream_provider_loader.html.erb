@@ -1,0 +1,28 @@
+<%# locals: provider, imdb_id, type, title, poster_url, duration, season (optional), episode (optional) %>
+<% season = local_assigns[:season] %>
+<% episode = local_assigns[:episode] %>
+<% frame_id = ["stream_provider", provider.fetch(:id), type, season, episode].compact.join("_") %>
+<%= turbo_frame_tag frame_id,
+      src: content_stream_results_path(
+        type: type,
+        imdb_id: imdb_id,
+        provider: provider.fetch(:id),
+        title: title,
+        poster_url: poster_url,
+        duration: duration,
+        season: season,
+        episode: episode
+      ),
+      loading: "eager" do %>
+  <section class="rounded-xl border border-sv-border/70 bg-sv-surface/60 p-3" aria-label="Loading <%= provider.fetch(:label) %> streams" aria-busy="true">
+    <div class="mb-3 flex items-center justify-between"><span class="text-xs font-semibold text-sv-text-muted"><%= provider.fetch(:label) %></span><span class="font-mono text-[0.65rem] text-sv-text-muted">SEARCHING</span></div>
+    <div class="space-y-2">
+      <% 3.times do %>
+        <div class="flex items-center gap-3 rounded-lg bg-sv-bg/35 p-2.5">
+          <div class="min-w-0 flex-1"><div class="skeleton h-3.5 w-2/3"></div><div class="skeleton mt-2 h-2.5 w-1/3"></div></div>
+          <div class="skeleton h-9 w-24"></div>
+        </div>
+      <% end %>
+    </div>
+  </section>
+<% end %>

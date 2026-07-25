@@ -25,13 +25,49 @@ services:
     environment:
       RAILS_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-streamvault}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-streamvault}
+      LOCAL_TORRENT_ENABLED: ${LOCAL_TORRENT_ENABLED:-true}
+      TORRSERVER_URL: http://torrserver:8090
+      LOCAL_TORRENT_CACHE_BYTES: ${LOCAL_TORRENT_CACHE_BYTES:-10737418240}
+      LOCAL_TORRENT_MIN_FREE_BYTES: ${LOCAL_TORRENT_MIN_FREE_BYTES:-5368709120}
+      LOCAL_TORRENT_CACHE_PATH: /rails/storage/local_torrents
+    volumes:
+      - ./storage/torrserver/cache:/rails/storage/local_torrents:ro
     depends_on:
       db:
         condition: service_healthy
+      torrserver:
+        condition: service_started
     restart: unless-stopped
     networks:
       - default
       - sv-shared
+      - torrent-control
+
+  torrserver:
+    # Release-pinned stream-first BitTorrent sidecar. It has no host port:
+    # only the authenticated Rails web container can reach its API/stream.
+    image: ghcr.io/yourok/torrserver:MatriX.142.2@sha256:e1fa821e375772d38bf39e65b50ca9bcff4851a08bf688d0e323951fcfd7729b
+    environment:
+      TORRSERVER_USERNAME: ${TORRSERVER_USERNAME:?set TORRSERVER_USERNAME in .env}
+      TORRSERVER_PASSWORD: ${TORRSERVER_PASSWORD:?set TORRSERVER_PASSWORD in .env}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /opt/ts/config /opt/ts/torrents /opt/ts/cache
+        printf '{"%s":"%s"}\n' "$$TORRSERVER_USERNAME" "$$TORRSERVER_PASSWORD" > /opt/ts/config/accs.db
+        chmod 600 /opt/ts/config/accs.db
+        exec torrserver --path /opt/ts/config --logpath /opt/ts/log --port 8090 --torrentsdir /opt/ts/torrents --dontkill --httpauth
+    volumes:
+      - ./storage/torrserver:/opt/ts
+    expose:
+      - "8090"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - torrent-control
+      - torrent-egress
 
   db:
     image: postgres:17
@@ -52,3 +88,8 @@ services:
 networks:
   sv-shared:
     external: true
+  # Private authenticated control plane shared only by Rails and TorrServer.
+  torrent-control:
+    internal: true
+  # Dedicated internet egress for tracker/DHT/peer traffic; no DB or app peers.
+  torrent-egress:

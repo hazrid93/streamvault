@@ -30,10 +30,7 @@ class HlsController < ApplicationController
       return
     end
 
-    headers = {}
-    if current_user.has_realdebrid_key?
-      headers["Authorization"] = "Bearer #{current_user.realdebrid_api_key}"
-    end
+    headers = stream_upstream_headers(input_url, current_user)
 
     session = HlsSession.create(
       user_id: current_user.id,

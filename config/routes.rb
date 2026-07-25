@@ -23,6 +23,8 @@ Rails.application.routes.draw do
   get "content/:type/:imdb_id", to: "content#show", as: :content
   get "content/:type/:imdb_id/status", to: "content#status", as: :content_status
   get "content/:type/:imdb_id/episode_streams", to: "content#episode_streams", as: :episode_streams
+  get "content/:type/:imdb_id/stream_results/:provider", to: "content#stream_results", as: :content_stream_results
+  get "content/:type/:imdb_id/similar_results", to: "content#similar_results", as: :content_similar_results
 
   # Library
   resources :library, only: [:index, :create, :update, :destroy]
@@ -71,10 +73,12 @@ Rails.application.routes.draw do
   get "settings", to: "settings#show", as: :settings
   patch "settings", to: "settings#update"
   patch "settings/pin", to: "settings#update_pin", as: :settings_pin
+  delete "settings/local_torrents", to: "settings#clear_local_torrents", as: :settings_local_torrents
   get "cache_status", to: "cache_status#show", as: :cache_status
 
   # Direct stream proxy (bypass ffmpeg for browser-compatible content)
   get "direct_stream", to: "direct_stream#show", as: :direct_stream
+  get "local_torrent/status", to: "local_torrent_status#show", as: :local_torrent_status
 
   # Health check
   get "up" => "rails/health#show", as: :rails_health_check

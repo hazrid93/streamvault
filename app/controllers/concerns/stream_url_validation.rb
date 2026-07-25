@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "base64"
 require "ipaddr"
 require "socket"
 require "uri"
@@ -60,6 +61,20 @@ module StreamUrlValidation
     false
   end
 
+  # Credentials are scoped to their exact destination: RD bearer tokens only
+  # reach RD CDN hosts, while TorrServer Basic Auth only reaches the complete
+  # operator-configured sidecar origin.
+  def stream_upstream_headers(url, user)
+    if realdebrid_cdn_url?(url) && user.has_realdebrid_key?
+      { "Authorization" => "Bearer #{user.realdebrid_api_key}" }
+    elsif local_torrent_url?(url) && ENV["TORRSERVER_USERNAME"].present?
+      credentials = Base64.strict_encode64("#{ENV.fetch('TORRSERVER_USERNAME')}:#{ENV.fetch('TORRSERVER_PASSWORD', '')}")
+      { "Authorization" => "Basic #{credentials}" }
+    else
+      {}
+    end
+  end
+
   # Provider resolve origins (torrentio/comet) are allowlisted
   # dynamically from StreamProvider.resolve_base_urls so a custom
   # TORRENTIO_API_BASE_URL or COMET_URL is honoured.
@@ -70,6 +85,7 @@ module StreamUrlValidation
     return true if ALLOWED_STREAM_HOSTS.any? do |entry|
       entry.is_a?(Regexp) ? normalized.match?(entry) : normalized == entry || normalized.end_with?(".#{entry}")
     end
+    return true if LocalTorrentService.enabled? && normalized == LocalTorrentService.internal_host.to_s.downcase
 
     StreamProvider.resolve_base_urls.filter_map { |url| URI.parse(url).host }.any? do |allowed|
       normalized == allowed.downcase || normalized.end_with?(".#{allowed.downcase}")
@@ -103,6 +119,15 @@ module StreamUrlValidation
     return false unless uri.is_a?(URI::HTTP) && uri.host.present?
     return false unless allowed_stream_host?(uri.host)
 
+    # The local torrent engine is an operator-configured internal sidecar. Match
+    # its complete origin (scheme, host, and port), not just its hostname, so
+    # this exception cannot become a general private-network proxy.
+    if local_torrent_url?(uri)
+      @_validated_stream_url = value.to_s
+      @_validated_stream_addresses = nil
+      return true
+    end
+
     # Provider-hosted URLs (Comet on Tailscale) bypass the public-address check.
     # Only RealDebrid CDN URLs need DNS resolution to verify they're not private.
     if provider_host?(uri.host)
@@ -135,7 +160,7 @@ module StreamUrlValidation
     uri = URI.parse(@_validated_stream_url)
     # Provider hosts bypass re-resolution — they're user-configured fixed
     # addresses that can't be DNS-rebinding attacked.
-    return true if provider_host?(uri.host)
+    return true if local_torrent_url?(uri) || provider_host?(uri.host)
 
     current = resolve_public_addresses(uri.host)
     !current.empty?
@@ -157,6 +182,16 @@ module StreamUrlValidation
     addresses
   rescue SocketError
     []
+  end
+
+  def local_torrent_url?(value)
+    return false unless LocalTorrentService.enabled?
+
+    uri = value.is_a?(URI::HTTP) ? value : URI.parse(value.to_s)
+    origin = URI.parse(LocalTorrentService.base_url)
+    uri.scheme == origin.scheme && uri.host == origin.host && uri.port == origin.port
+  rescue URI::InvalidURIError
+    false
   end
 
   def private_stream_address?(address)

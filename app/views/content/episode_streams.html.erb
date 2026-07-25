@@ -1,31 +1,30 @@
-<% if @streams_error.present? %>
-  <p class="text-sm text-sv-warning"><%= @streams_error %></p>
-<% elsif @streams.present? %>
-  <div class="space-y-1.5">
-    <% @streams.each do |stream| %>
-      <div class="flex items-center justify-between gap-3 p-2 bg-sv-surface-hover rounded-lg">
-        <div class="min-w-0 flex-1 overflow-hidden">
-          <div class="flex items-center gap-1.5">
-            <% if stream[:rd_plus] %><span class="badge badge-success text-xs shrink-0">RD+</span><% end %>
-            <span class="text-xs text-white truncate"><%= stream[:title] || stream[:name] %></span>
-          </div>
-          <div class="flex items-center gap-1.5 mt-1">
-            <span class="badge badge-accent text-xs"><%= stream[:quality] %></span>
-            <% stream[:languages]&.each do |lang| %>
-              <span class="px-1.5 py-0.5 rounded text-xs font-medium bg-sv-surface text-sv-text-muted"><%= lang %></span>
-            <% end %>
-            <span class="text-xs text-sv-text-muted"><%= stream[:size] %></span>
-            <% unless stream[:seeders].nil? %>
-              <span class="text-xs text-sv-text-muted" title="Seeders">👤 <%= stream[:seeders] %></span>
-            <% end %>
-          </div>
-        </div>
-        <div class="flex items-center gap-3 shrink-0">
-          <%= button_to "Watch", streaming_index_path, params: { imdb_id: @imdb_id, type: "show", season: @season, episode: @episode, title: "#{@show_title} S#{@season.to_s.rjust(2,'0')}E#{@episode.to_s.rjust(2,'0')}", poster_url: @poster_url, duration: @episode_duration_seconds, resolve_url: stream[:resolve_url], filename: stream[:filename] }, class: "btn-primary text-xs px-2 py-1", data: { turbo: false } %>
-        </div>
-      </div>
-    <% end %>
+<div data-controller="stream-filter">
+  <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+    <div>
+      <p class="text-sm font-semibold text-white"><%= @episode_title.presence || "Episode #{@episode}" %></p>
+      <p class="mt-0.5 text-xs text-sv-text-muted">Providers load independently—choose any result as soon as it appears.</p>
+    </div>
+    <div class="flex items-center gap-1.5">
+      <% ["all", "4K", "1080p", "720p"].each do |quality| %>
+        <button type="button" data-action="click->stream-filter#filter" data-quality="<%= quality %>"
+              class="rounded-full border border-sv-border px-2 py-1 text-[0.65rem] font-medium text-sv-text-muted hover:text-white"><%= quality == "all" ? "All" : quality %></button>
+      <% end %>
+    </div>
   </div>
-<% else %>
-  <p class="text-sm text-sv-text-muted">No streams available for this episode.</p>
-<% end %>
+
+  <% if @stream_providers.any? %>
+    <div class="grid gap-3">
+      <% stream_title = "#{@show_title} S#{@season.to_s.rjust(2, '0')}E#{@episode.to_s.rjust(2, '0')}" %>
+      <% @stream_providers.each do |provider| %>
+        <%= render "content/stream_provider_loader",
+              provider: provider, imdb_id: @imdb_id, type: "show",
+              season: @season, episode: @episode, title: stream_title,
+              poster_url: @poster_url, duration: @episode_duration_seconds %>
+      <% end %>
+    </div>
+  <% else %>
+    <p class="rounded-lg bg-sv-surface px-3 py-3 text-sm text-sv-text-muted">No stream provider is configured.</p>
+  <% end %>
+
+  <p data-stream-filter-target="empty" class="hidden mt-3 text-sm text-sv-text-muted">No loaded streams match this quality.</p>
+</div>

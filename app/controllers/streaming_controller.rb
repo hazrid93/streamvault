@@ -12,7 +12,7 @@ class StreamingController < ApplicationController
   # the user hasn't configured an RD key yet (so we can see stalls from
   # the player regardless of auth state).  progress is excluded because
   # it's a fire-and-forget save that doesn't need the key.
-  before_action :verify_realdebrid_key!, except: [ :progress, :stall_telemetry ]
+  before_action :verify_streaming_available!, except: [ :progress, :stall_telemetry ]
 
   # POST /streaming — start stream, redirect to player page
   def create
@@ -26,21 +26,27 @@ class StreamingController < ApplicationController
     # receive its resolve_url and filename. Resolve that exact stream
     # instead of re-fetching all streams and racing — the user chose
     # this stream, respect the choice (e.g. a Direct Play MP4).
-    if params[:resolve_url].present?
+    if params[:resolve_url].present? || params[:source_mode] == "local"
       result = service.resolve_single(
         params[:resolve_url],
         filename: params[:filename],
         imdb_id: imdb_id,
         type: type,
         season: params[:season]&.to_i,
-        episode: params[:episode]&.to_i
+        episode: params[:episode]&.to_i,
+        source_mode: params[:source_mode],
+        info_hash: params[:info_hash],
+        file_idx: params[:file_idx],
+        title: params[:title],
+        poster_url: params[:poster_url]
       )
     else
       result = service.start_stream(
         imdb_id,
         type,
         season: params[:season]&.to_i,
-        episode: params[:episode]&.to_i
+        episode: params[:episode]&.to_i,
+        source_mode: params[:source_mode]
       )
     end
 
@@ -60,7 +66,9 @@ class StreamingController < ApplicationController
         title: params[:title],
         poster_url: params[:poster_url],
         resume_at: resume_at,
-        duration: duration
+        duration: duration,
+        source: result.data[:source],
+        local_torrent_hash: result.data[:info_hash]
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -75,6 +83,8 @@ class StreamingController < ApplicationController
     @episode = params[:episode]
     @title = params[:title] || "Now Playing"
     @poster_url = params[:poster_url]
+    @stream_source = params[:source]
+    @local_torrent_hash = params[:local_torrent_hash]
     @resume_at = params[:resume_at]
     @duration = normalized_duration_seconds(params[:duration])
     @default_language = current_user.default_stream_language
@@ -156,7 +166,9 @@ class StreamingController < ApplicationController
         title: target[:title],
         poster_url: target[:poster_url],
         resume_at: resume_at,
-        duration: target[:duration_seconds].to_i
+        duration: target[:duration_seconds].to_i,
+        source: result.data[:source],
+        local_torrent_hash: result.data[:info_hash]
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -202,10 +214,10 @@ class StreamingController < ApplicationController
 
   private
 
-  def verify_realdebrid_key!
-    unless current_user.has_realdebrid_key?
-      redirect_to settings_path, alert: "RealDebrid API key not configured. Please add it in Settings."
-    end
+  def verify_streaming_available!
+    return if current_user.has_realdebrid_key? || LocalTorrentService.enabled?
+
+    redirect_to settings_path, alert: "No streaming source is configured. Add a RealDebrid key or enable local torrent playback."
   end
 
   # Strip CR/LF/tab from log values to prevent log injection (forging

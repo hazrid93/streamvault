@@ -9,6 +9,14 @@ RSpec.describe "Streaming", type: :request do
     ENV.delete("STREAM_PROVIDER")
   end
 
+  before do
+    # Resolver calls run on separate DB connections, so bypass ApiCache in
+    # request examples to keep each WebMock fixture isolated.
+    allow_any_instance_of(TorrentioService).to receive(:cached_fetch) do |_service, _key, **_options, &block|
+      block.call
+    end
+  end
+
   describe "POST /streaming" do
     context "when not authenticated" do
       it "redirects to login" do
@@ -25,6 +33,43 @@ RSpec.describe "Streaming", type: :request do
       it "redirects to settings" do
         post streaming_index_path, params: { imdb_id: "tt1375666", type: "movie" }
         expect(response).to redirect_to(settings_path)
+      end
+    end
+
+    context "when local torrent playback is enabled without a RealDebrid key" do
+      let(:local_user) { create(:user, realdebrid_api_key: nil, streaming_preference: "local") }
+
+      around do |example|
+        previous = ENV["LOCAL_TORRENT_ENABLED"]
+        ENV["LOCAL_TORRENT_ENABLED"] = "true"
+        example.run
+      ensure
+        ENV["LOCAL_TORRENT_ENABLED"] = previous
+      end
+
+      it "starts an explicitly selected local torrent" do
+        sign_in local_user
+        service = instance_double(ContentStreamingService)
+        allow(ContentStreamingService).to receive(:new).with(local_user).and_return(service)
+        allow(service).to receive(:resolve_single).and_return(ServiceResult.success(
+          streaming_url: "http://torrserver:8090/stream/Inception.mkv?link=#{'a' * 40}&index=1&play=",
+          filename: "Inception.mkv",
+          source: "local",
+          info_hash: "a" * 40
+        ))
+
+        post streaming_index_path, params: {
+          imdb_id: "tt1375666", type: "movie", title: "Inception",
+          source_mode: "local", info_hash: "a" * 40, file_idx: 0,
+          filename: "Inception.mkv", duration: 8880
+        }
+
+        expect(response).to have_http_status(:found)
+        expect(response.location).to include("local_torrent_hash=#{'a' * 40}")
+        expect(service).to have_received(:resolve_single).with(
+          nil,
+          hash_including(source_mode: "local", info_hash: "a" * 40, file_idx: "0")
+        )
       end
     end
 

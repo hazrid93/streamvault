@@ -49,6 +49,20 @@ RSpec.describe "Settings", type: :request do
       expect(response).to redirect_to(settings_path)
       expect(user.reload.preferred_languages).to include("ENG", "FRENCH")
     end
+
+    it "updates the playback source policy" do
+      patch settings_path, params: { user: { streaming_preference: "local" } }
+
+      expect(response).to redirect_to(settings_path)
+      expect(user.reload.streaming_preference).to eq("local")
+    end
+
+    it "rejects an unknown playback source policy" do
+      patch settings_path, params: { user: { streaming_preference: "arbitrary_proxy" } }
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(user.reload.streaming_preference).to eq("automatic")
+    end
   end
 
   describe "PATCH /settings/pin" do

@@ -1,0 +1,18 @@
+<%= turbo_frame_tag "similar_titles_#{@imdb_id}" do %>
+  <% if @similar.present? %>
+    <section class="mb-2" data-controller="carousel">
+      <div class="mb-4 flex items-center justify-between">
+        <h2 class="section-heading text-white">More like this</h2>
+        <div class="flex items-center gap-2">
+          <button data-action="click->carousel#prev" data-carousel-target="prevBtn" class="invisible grid h-9 w-9 place-items-center rounded-xl border border-sv-border bg-sv-surface text-white" aria-label="Scroll backward"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg></button>
+          <button data-action="click->carousel#next" data-carousel-target="nextBtn" class="grid h-9 w-9 place-items-center rounded-xl border border-sv-border bg-sv-surface text-white" aria-label="Scroll forward"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></button>
+        </div>
+      </div>
+      <div data-carousel-target="track" class="scrollbar-hide flex gap-4 overflow-x-auto pb-3" tabindex="0">
+        <% @similar.each do |item| %>
+          <%= render "shared/poster_card", item: item, link_path: content_path(type: item[:type].presence || @type, imdb_id: item[:imdb_id]) %>
+        <% end %>
+      </div>
+    </section>
+  <% end %>
+<% end %>

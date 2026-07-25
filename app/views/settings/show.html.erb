@@ -98,6 +98,14 @@
           API key configured
         </div>
       <% end %>
+
+      <div class="mt-5 border-t border-sv-border/70 pt-5">
+        <%= f.label :streaming_preference, "Preferred source", class: "block text-sm font-medium text-sv-text-muted mb-1.5" %>
+        <%= f.select :streaming_preference,
+              options_for_select(User::STREAMING_PREFERENCES.map { |value, label| [label, value] }, @user.streaming_preference),
+              {}, class: "input-field" %>
+        <p class="mt-2 text-xs leading-5 text-sv-text-muted">Automatic uses RealDebrid when available and falls back to the private local torrent engine. You can still choose either source on an individual stream.</p>
+      </div>
     </div>
 
     <div class="rounded-2xl border border-sv-border bg-sv-surface/75 p-5 shadow-xl shadow-black/10 sm:p-6">
@@ -136,4 +144,56 @@
 
     <%= f.submit "Save settings", class: "btn-primary cursor-pointer" %>
   <% end %>
+
+  <section class="mt-6 rounded-2xl border border-sv-border bg-sv-surface/75 p-5 shadow-xl shadow-black/10 sm:p-6" aria-labelledby="local-storage-heading">
+    <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <p class="eyebrow mb-2">Temporary storage</p>
+        <h2 id="local-storage-heading" class="section-heading text-white">Local torrent cache</h2>
+        <p class="mt-2 max-w-xl text-xs leading-5 text-sv-text-muted">A rolling cache stores only the pieces needed around playback. It is removed automatically after playback disconnects and never becomes part of your permanent library.</p>
+      </div>
+      <% if @local_torrent_status[:reachable] %>
+        <span class="badge badge-success shrink-0">Engine online</span>
+      <% else %>
+        <span class="badge badge-warning shrink-0"><%= @local_torrent_status[:enabled] ? "Engine unavailable" : "Disabled" %></span>
+      <% end %>
+    </div>
+
+    <% used = @local_torrent_status[:used_bytes].to_i %>
+    <% quota = @local_torrent_status[:quota_bytes].to_i %>
+    <% percent = quota.positive? ? [(used.to_f / quota * 100).round(1), 100].min : 0 %>
+    <div class="mt-6">
+      <div class="mb-2 flex items-end justify-between gap-4">
+        <div><span class="text-2xl font-bold tracking-tight text-white"><%= number_to_human_size(used) %></span><span class="text-sm text-sv-text-muted"> of <%= number_to_human_size(quota) %></span></div>
+        <span class="font-mono text-xs text-sv-text-muted"><%= percent %>%</span>
+      </div>
+      <div class="h-2 overflow-hidden rounded-full bg-sv-bg" role="progressbar" aria-valuenow="<%= percent %>" aria-valuemin="0" aria-valuemax="100" aria-label="Local torrent cache usage">
+        <div class="h-full rounded-full bg-gradient-to-r from-sv-accent to-sv-highlight" style="width: <%= percent %>%"></div>
+      </div>
+      <div class="mt-3 grid gap-2 text-xs text-sv-text-muted sm:grid-cols-3">
+        <span>Free on server: <strong class="text-white"><%= @local_torrent_status[:free_bytes] ? number_to_human_size(@local_torrent_status[:free_bytes]) : "Unknown" %></strong></span>
+        <span>Safety reserve: <strong class="text-white"><%= number_to_human_size(@local_torrent_status[:minimum_free_bytes]) %></strong></span>
+        <span>Active streams: <strong class="text-white"><%= @local_torrent_status[:active_count] %></strong></span>
+      </div>
+    </div>
+
+    <% if @local_torrent_status[:torrents].any? %>
+      <div class="mt-5 space-y-2 border-t border-sv-border/70 pt-4">
+        <% @local_torrent_status[:torrents].each do |torrent| %>
+          <div class="flex items-center justify-between gap-3 rounded-xl bg-sv-bg/50 px-3 py-2">
+            <div class="min-w-0"><p class="truncate text-sm font-medium text-white"><%= torrent[:title] %></p><p class="mt-0.5 text-xs text-sv-text-muted"><%= torrent[:state] %> · <%= number_to_human_size(torrent[:used_bytes]) %> cached · <%= number_to_human_size(torrent[:download_speed]) %>/s</p></div>
+            <span class="text-xs text-sv-text-muted"><%= torrent[:seeders] %> seeders</span>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+
+    <div class="mt-5 flex flex-wrap items-center gap-3 border-t border-sv-border/70 pt-5">
+      <%= button_to "Clear temporary media", settings_local_torrents_path, method: :delete,
+            class: "btn-secondary cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
+            disabled: @local_torrent_status[:active_count].positive? || !@local_torrent_status[:reachable],
+            data: { turbo_confirm: "Delete all inactive local torrent data? This cannot be undone." } %>
+      <p class="text-xs text-sv-text-muted"><%= @local_torrent_status[:active_count].positive? ? "Stop playback and wait about one minute before clearing." : "Only temporary torrent pieces and metadata are removed." %></p>
+    </div>
+  </section>
 </div>

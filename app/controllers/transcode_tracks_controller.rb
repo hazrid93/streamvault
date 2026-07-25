@@ -10,6 +10,7 @@ class TranscodeTracksController < ApplicationController
 
   def show
     input_url = params[:url].to_s
+    @input_url = input_url
     unless valid_stream_url?(input_url) && verify_stream_url!
       render json: { audio: [], subtitles: [] }, status: :bad_request
       return
@@ -52,9 +53,7 @@ class TranscodeTracksController < ApplicationController
   private
 
   def transcode_headers
-    return {} unless current_user.has_realdebrid_key?
-
-    { "Authorization" => "Bearer #{current_user.realdebrid_api_key}" }
+    stream_upstream_headers(@input_url, current_user)
   end
 
   def probe_video_stream(input_url, headers: transcode_headers)

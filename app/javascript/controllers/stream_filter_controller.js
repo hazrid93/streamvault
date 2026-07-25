@@ -1,52 +1,80 @@
 import { Controller } from "@hotwired/stimulus"
 
-// Client-side filter + sort for the movie streams list on a content
-// detail page. Cached Real-Debrid rows always stay grouped first. The
-// default order then uses provider-reported seeder counts, while quality
-// and size remain available as optional secondary sort modes.
+// Filters independently-loaded provider results. Turbo frames connect rows as
+// each provider answers; target callbacks update the count and apply the active
+// quality without waiting for every provider.
 export default class extends Controller {
   static targets = ["row", "count", "empty"]
 
-  connect() {
+  initialize() {
     this.activeQuality = "all"
     this.sortMode = "seeders"
-    this.rowTargets.forEach((row, index) => { row.dataset.originalIndex = index })
-    this.apply()
+    this.nextOriginalIndex = 0
+  }
+
+  connect() {
+    this.scheduleApply()
+  }
+
+  rowTargetConnected(row) {
+    if (!row.dataset.originalIndex) {
+      row.dataset.originalIndex = this.nextOriginalIndex++
+    }
+    this.scheduleApply()
+  }
+
+  rowTargetDisconnected() {
+    this.scheduleApply()
   }
 
   filter(event) {
     this.activeQuality = event.currentTarget.dataset.quality
-    this.apply()
+    this.scheduleApply()
   }
 
   sort(event) {
     this.sortMode = event.currentTarget.dataset.sort
-    this.apply()
+    this.scheduleApply()
+  }
+
+  scheduleApply() {
+    if (this.applyScheduled) return
+    this.applyScheduled = true
+    queueMicrotask(() => {
+      this.applyScheduled = false
+      if (this.element.isConnected) this.apply()
+    })
   }
 
   apply() {
-    let rows = this.rowTargets.slice()
+    if (this.applying) return
+    this.applying = true
 
-    if (this.activeQuality !== "all") {
-      rows = rows.filter((row) => (row.dataset.quality || "") === this.activeQuality)
-    }
+    const rows = this.rowTargets.slice()
+    const groups = new Map()
+    rows.forEach((row) => {
+      const container = row.parentElement
+      if (!groups.has(container)) groups.set(container, [])
+      groups.get(container).push(row)
+    })
 
-    rows.sort((a, b) => this.compareRows(a, b))
+    let visibleCount = 0
+    groups.forEach((groupRows, container) => {
+      const visible = groupRows
+        .filter((row) => this.activeQuality === "all" || (row.dataset.quality || "") === this.activeQuality)
+        .sort((a, b) => this.compareRows(a, b))
 
-    // Hide everything first, then re-append in the new order. Appending
-    // existing DOM nodes moves them (no clone), so the Watch buttons and
-    // their CSRF tokens stay intact.
-    this.rowTargets.forEach((row) => { row.hidden = true })
-    const container = this.rowTargets[0]?.parentElement
-    if (container) {
-      rows.forEach((row) => {
+      groupRows.forEach((row) => { row.hidden = true })
+      visible.forEach((row) => {
         row.hidden = false
         container.appendChild(row)
       })
-    }
+      visibleCount += visible.length
+    })
 
-    if (this.hasCountTarget) this.countTarget.textContent = rows.length
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = rows.length > 0
+    if (this.hasCountTarget) this.countTarget.textContent = visibleCount
+    if (this.hasEmptyTarget) this.emptyTarget.hidden = visibleCount > 0 || rows.length === 0
+    this.applying = false
   }
 
   compareRows(a, b) {

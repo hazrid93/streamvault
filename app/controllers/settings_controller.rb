@@ -2,6 +2,7 @@
 
 class SettingsController < ApplicationController
   before_action :authenticate_user!
+  before_action :load_local_torrent_status, only: :show
 
   def show
     @user = current_user
@@ -18,7 +19,17 @@ class SettingsController < ApplicationController
     if @user.update(attributes)
       redirect_after_settings_update(verify_realdebrid_key)
     else
+      load_local_torrent_status
       render :show, status: :unprocessable_entity
+    end
+  end
+
+  def clear_local_torrents
+    result = LocalTorrentService.new.clear!
+    if result.success?
+      redirect_to settings_path, notice: "Temporary local media cleared."
+    else
+      redirect_to settings_path, alert: result.error_message
     end
   end
 
@@ -28,12 +39,14 @@ class SettingsController < ApplicationController
 
     unless @user.valid_pin?(attributes[:current_pin])
       @user.errors.add(:current_pin, "is incorrect")
+      load_local_torrent_status
       return render :show, status: :unprocessable_entity
     end
 
     if @user.set_pin(attributes[:pin], attributes[:pin_confirmation])
       redirect_to settings_path, notice: "PIN updated successfully."
     else
+      load_local_torrent_status
       render :show, status: :unprocessable_entity
     end
   end
@@ -54,10 +67,14 @@ class SettingsController < ApplicationController
   end
 
   def settings_params
-    params.require(:user).permit(:realdebrid_api_key, :default_language, preferred_languages: [])
+    params.require(:user).permit(:realdebrid_api_key, :streaming_preference, :default_language, preferred_languages: [])
   end
 
   def pin_params
     params.permit(:current_pin, :pin, :pin_confirmation)
+  end
+
+  def load_local_torrent_status
+    @local_torrent_status = LocalTorrentService.new.status
   end
 end

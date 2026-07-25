@@ -31,10 +31,7 @@ class DirectStreamController < ApplicationController
     http.read_timeout = 60
     http.open_timeout = 10
 
-    request_headers = {}
-    if current_user.has_realdebrid_key?
-      request_headers["Authorization"] = "Bearer #{current_user.realdebrid_api_key}"
-    end
+    request_headers = stream_upstream_headers(input_url, current_user)
     request_headers["Range"] = range if range
 
     begin

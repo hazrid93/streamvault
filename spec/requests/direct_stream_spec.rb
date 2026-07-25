@@ -42,18 +42,50 @@ RSpec.describe "DirectStream", type: :request do
       expect(response).to have_http_status(:bad_request)
     end
 
-    it "attaches the Authorization header for all allowlisted hosts" do
-      # The RD bearer token is attached to all allowlisted stream hosts,
-      # including provider hosts.  Provider hosts (Torrentio/Comet) are
-      # user-configured and trusted — the key is needed for some
-      # provider endpoints that proxy RD content.
+    it "never sends the RealDebrid key to a provider host" do
       stub_request(:get, "https://torrentio.strem.fun/stream/movie/tt123.json")
-        .to_return(status: 200, body: "data", headers: { 'Content-Type' => 'application/json' })
+        .to_return(status: 200, body: "data", headers: { "Content-Type" => "application/json" })
 
       get direct_stream_path, params: { url: "https://torrentio.strem.fun/stream/movie/tt123.json" }
 
       expect(WebMock).to have_requested(:get, "https://torrentio.strem.fun/stream/movie/tt123.json")
-        .with { |req| req.headers["Authorization"].present? }
+        .with { |request| request.headers["Authorization"].blank? }
+    end
+
+    it "allows only the configured TorrServer origin without leaking the RD key" do
+      previous = ENV["LOCAL_TORRENT_ENABLED"]
+      ENV["LOCAL_TORRENT_ENABLED"] = "true"
+      local_url = "http://torrserver:8090/stream/Movie.mkv?link=#{'a' * 40}&index=1&play="
+      stub_request(:get, local_url)
+        .to_return(status: 206, body: "data", headers: { "Content-Type" => "video/x-matroska" })
+
+      get direct_stream_path, params: { url: local_url }
+
+      expect(WebMock).to have_requested(:get, local_url)
+        .with { |request| request.headers["Authorization"].to_s.start_with?("Basic ") && !request.headers["Authorization"].include?("test_key") }
+    ensure
+      ENV["LOCAL_TORRENT_ENABLED"] = previous
+    end
+
+    it "rejects a different port on the local torrent hostname" do
+      previous = ENV["LOCAL_TORRENT_ENABLED"]
+      ENV["LOCAL_TORRENT_ENABLED"] = "true"
+
+      get direct_stream_path, params: { url: "http://torrserver:8080/private" }
+
+      expect(response).to have_http_status(:bad_request)
+    ensure
+      ENV["LOCAL_TORRENT_ENABLED"] = previous
+    end
+
+    it "sends the RealDebrid key only to a RealDebrid CDN" do
+      stub_request(:get, "https://download.real-debrid.com/d/test.mkv")
+        .to_return(status: 200, body: "data", headers: { "Content-Type" => "video/x-matroska" })
+
+      get direct_stream_path, params: { url: "https://download.real-debrid.com/d/test.mkv" }
+
+      expect(WebMock).to have_requested(:get, "https://download.real-debrid.com/d/test.mkv")
+        .with { |request| request.headers["Authorization"] == "Bearer test_key" }
     end
   end
 end

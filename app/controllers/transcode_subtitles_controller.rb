@@ -7,6 +7,7 @@ class TranscodeSubtitlesController < ApplicationController
 
   def show
     input_url = params[:url].to_s
+    @input_url = input_url
     unless valid_stream_url?(input_url) && verify_stream_url!
       head :bad_request
       return
@@ -31,9 +32,7 @@ class TranscodeSubtitlesController < ApplicationController
   private
 
   def transcode_headers
-    return {} unless current_user.has_realdebrid_key?
-
-    { "Authorization" => "Bearer #{current_user.realdebrid_api_key}" }
+    stream_upstream_headers(@input_url, current_user)
   end
 
   def normalized_start_seconds(value)

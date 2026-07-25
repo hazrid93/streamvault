@@ -15,12 +15,9 @@ class ContentController < ApplicationController
     meta_result = torrentio.metadata(@imdb_id, @type)
     @metadata = meta_result.success? ? meta_result.data : nil
 
-    if @type != "show"
-      content_title = @metadata&.dig(:title)
-      streams_result = fetch_provider_streams(@imdb_id, @type, title: content_title)
-      @streams = streams_result.success? ? streams_result.data : []
-      @streams_error = streams_result.failure? ? streams_result.error_message : nil
-    end
+    # Stream providers load independently in Turbo frames after the detail page
+    # renders, so a slow provider never blocks navigation or a faster result.
+    @stream_providers = StreamProvider.provider_entries(rd_api_key: current_user.realdebrid_api_key)
 
     @library_entry = current_user.library_entries.find_by(imdb_id: @imdb_id)
     @wishlist_entry = current_user.wishlist_entries.find_by(imdb_id: @imdb_id)
@@ -43,18 +40,8 @@ class ContentController < ApplicationController
         &.progress_percentage
     end
 
-    # Similar titles via TMDB recommendations.  Wrapped so a TMDB outage
-    # or missing token never breaks the detail page — the rail just
-    # doesn't render.
-    @similar = []
-    begin
-      tmdb = TmdbService.new
-      recs = tmdb.recommendations_for_imdb_id(@imdb_id)
-      @similar = recs.success? ? recs.data.first(20) : []
-    rescue StandardError => e
-      Rails.logger.error("[ContentController] similar titles error: #{e.message}")
-      @similar = []
-    end
+    # Recommendations also load after first paint through a lazy Turbo frame.
+    # They are optional and should never delay opening a title.
 
     # Prefetch stream listings in the background so the next title the
     # user opens is instant.  Triggers a full per-account warm (once per
@@ -99,18 +86,81 @@ class ContentController < ApplicationController
       @episode_duration_seconds = ep&.dig(:runtime_seconds)
     end
 
-    filter_title = "#{@show_title} #{@episode_title}"
-    streams_result = fetch_provider_streams(
-      @imdb_id,
-      "show",
-      season: @season,
-      episode: @episode,
-      title: filter_title
-    )
-    @streams = streams_result.success? ? streams_result.data : []
-    @streams_error = streams_result.failure? ? streams_result.error_message : nil
+    @stream_providers = StreamProvider.provider_entries(rd_api_key: current_user.realdebrid_api_key)
 
     render layout: false
+  end
+
+  def similar_results
+    @imdb_id = params[:imdb_id]
+    @type = params[:type]
+    return if reject_invalid_imdb_id!(@imdb_id) || reject_invalid_content_type!(@type)
+
+    @similar = begin
+      result = TmdbService.new.recommendations_for_imdb_id(@imdb_id)
+      result.success? ? result.data.first(20) : []
+    rescue StandardError => error
+      Rails.logger.warn("[ContentController] similar titles unavailable: #{error.message}")
+      []
+    end
+    render partial: "content/similar_results", layout: false
+  end
+
+  # One provider per request. The browser starts these frames concurrently and
+  # displays each result as soon as it arrives.
+  def stream_results
+    @imdb_id = params[:imdb_id]
+    @type = params[:type]
+    @season = params[:season]&.to_i
+    @episode = params[:episode]&.to_i
+    return if reject_invalid_imdb_id!(@imdb_id) || reject_invalid_content_type!(@type)
+
+    entry = StreamProvider.provider(params[:provider], rd_api_key: current_user.realdebrid_api_key)
+    unless entry
+      @provider_id = params[:provider].to_s.gsub(/[^a-z0-9_-]/i, "").first(30).presence || "unknown"
+      @provider_label = "Unknown provider"
+      @streams = []
+      @streams_error = "This stream provider is not configured."
+      render partial: "content/stream_provider_results", layout: false
+      return
+    end
+
+    @provider_id = entry.fetch(:id)
+    @provider_label = entry.fetch(:label)
+    result = entry.fetch(:service).streams(
+      @imdb_id,
+      @type,
+      season: @season,
+      episode: @episode,
+      title: params[:title],
+      preferred_languages: current_user.preferred_stream_languages,
+      default_language: current_user.default_stream_language
+    )
+
+    # An expired/unauthorized RD key can make an RD-configured provider return
+    # no list at all. Automatic/local mode retries that same provider without
+    # RD configuration so local playback choices still appear.
+    if (result.failure? || result.data.empty?) && LocalTorrentService.enabled? &&
+       current_user.streaming_preference != "realdebrid" && current_user.has_realdebrid_key?
+      local_entry = StreamProvider.provider(@provider_id, rd_api_key: nil)
+      result = local_entry.fetch(:service).streams(
+        @imdb_id,
+        @type,
+        season: @season,
+        episode: @episode,
+        title: params[:title],
+        preferred_languages: current_user.preferred_stream_languages,
+        default_language: current_user.default_stream_language
+      ) if local_entry
+    end
+
+    @streams = result.success? ? result.data : []
+    @streams_error = result.failure? ? result.error_message : nil
+    @stream_title = params[:title]
+    @poster_url = params[:poster_url]
+    @duration = params[:duration]
+
+    render partial: "content/stream_provider_results", layout: false
   end
 
   private

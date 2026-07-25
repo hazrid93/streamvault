@@ -18,10 +18,7 @@ class TranscodeController < ApplicationController
 
     start_seconds = normalized_start_seconds(params[:start_seconds])
 
-    headers = {}
-    if current_user.has_realdebrid_key?
-      headers["Authorization"] = "Bearer #{current_user.realdebrid_api_key}"
-    end
+    headers = stream_upstream_headers(input_url, current_user)
 
     # Set streaming headers — not committed until the first response.stream.write.
     # If TranscodeError fires before any data is written, we can still

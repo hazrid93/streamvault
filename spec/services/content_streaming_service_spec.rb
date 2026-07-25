@@ -10,6 +10,15 @@ RSpec.describe ContentStreamingService do
     ENV.delete("STREAM_PROVIDER")
   end
 
+  before do
+    # Provider work runs in threads with separate DB connections; bypass the
+    # integration cache here so one example cannot leak a committed ApiCache
+    # row into the next example's resolver fixtures.
+    allow_any_instance_of(TorrentioService).to receive(:cached_fetch) do |_service, _key, **_options, &block|
+      block.call
+    end
+  end
+
   let(:cinemeta_stub) {
     stub_request(:get, "https://v3-cinemeta.strem.io/meta/movie/tt1375666.json")
       .to_return(
@@ -226,6 +235,91 @@ RSpec.describe ContentStreamingService do
 
       expect(result).to be_failure
       expect(WebMock).not_to have_requested(:get, "https://torrentio.strem.fun/resolve/realdebrid/test_key/german/null/0/InceptionGerman.mkv")
+    end
+  end
+
+  describe "local torrent playback" do
+    it "enforces local-only even when a request asks for RealDebrid" do
+      local_user = create(:user, realdebrid_api_key: nil, streaming_preference: "local")
+      provider = instance_double(TorrentioService)
+      local_engine = instance_double(LocalTorrentService)
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(StreamProvider).to receive(:providers).and_return([provider])
+      allow(provider).to receive(:streams).and_return(ServiceResult.success([
+        { title: "Inception 1080p", info_hash: "a" * 40, file_idx: 0, filename: "Inception.mkv" }
+      ]))
+      allow(LocalTorrentService).to receive(:new).and_return(local_engine)
+      allow(local_engine).to receive(:start).and_return(ServiceResult.success(
+        streaming_url: "http://torrserver:8090/stream/Inception.mkv?link=#{'a' * 40}&index=1&play=",
+        filename: "Inception.mkv",
+        source: "local"
+      ))
+
+      result = described_class.new(local_user).start_stream("tt1375666", "movie", source_mode: "realdebrid")
+
+      expect(result).to be_success
+      expect(result.data[:source]).to eq("local")
+      expect(local_engine).to have_received(:start).with(hash_including(info_hash: "a" * 40))
+    end
+
+    it "falls back locally when RealDebrid resolution fails in automatic mode" do
+      user.update!(streaming_preference: "automatic")
+      local_engine = instance_double(LocalTorrentService)
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(LocalTorrentService).to receive(:new).and_return(local_engine)
+      allow(local_engine).to receive(:start).and_return(ServiceResult.success(
+        streaming_url: "http://torrserver:8090/stream/Movie.mkv?link=#{'c' * 40}&index=1&play=",
+        filename: "Movie.mkv",
+        source: "local",
+        info_hash: "c" * 40
+      ))
+      stream = { title: "Movie", info_hash: "c" * 40, file_idx: 0, filename: "Movie.mkv", resolve_url: "https://torrentio.strem.fun/resolve/fail" }
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([stream]), ServiceResult.success([stream]))
+      allow(service).to receive(:start_realdebrid_stream).and_return(ServiceResult.failure("Unauthorized RD key"))
+
+      result = service.start_stream("tt1375666", "movie")
+
+      expect(result).to be_success
+      expect(result.data[:source]).to eq("local")
+      expect(service).to have_received(:fetch_streams).twice
+    end
+
+    it "enforces RealDebrid-only even when a request asks for local" do
+      user.update!(streaming_preference: "realdebrid")
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(LocalTorrentService).to receive(:new).and_call_original
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([
+        { resolve_url: "https://torrentio.strem.fun/resolve/fail", info_hash: "d" * 40 }
+      ]))
+      allow(service).to receive(:start_realdebrid_stream).and_return(ServiceResult.failure("Unauthorized RD key"))
+
+      result = service.start_stream("tt1375666", "movie", source_mode: "local")
+
+      expect(result).to be_failure
+      expect(result.error_message).to eq("Unauthorized RD key")
+      expect(LocalTorrentService).not_to have_received(:new)
+    end
+
+    it "resolves an explicitly selected local source without an RD resolve URL" do
+      local_engine = instance_double(LocalTorrentService)
+      allow(LocalTorrentService).to receive(:new).and_return(local_engine)
+      allow(local_engine).to receive(:start).and_return(ServiceResult.success(
+        streaming_url: "http://torrserver:8090/stream/Movie.mkv?link=#{'b' * 40}&index=1&play=",
+        filename: "Movie.mkv"
+      ))
+
+      result = service.resolve_single(
+        nil,
+        filename: "Movie.mkv",
+        imdb_id: "tt1375666",
+        type: "movie",
+        source_mode: "local",
+        info_hash: "b" * 40,
+        file_idx: 0
+      )
+
+      expect(result).to be_success
+      expect(result.data[:streaming_url]).to start_with("http://torrserver:8090/")
     end
   end
 

@@ -55,6 +55,20 @@ class Rack::Attack
     authenticated_user_id(request)
   end
 
+  # Lazy provider frames are intentionally concurrent, but still bounded so an
+  # authenticated client cannot turn the app into an outbound provider flood.
+  throttle("stream_results/user", limit: 30, period: 1.minute) do |request|
+    next unless request.get? && request.path.match?(%r{\A/content/(movie|show)/tt\d+/stream_results/})
+
+    authenticated_user_id(request)
+  end
+
+  throttle("similar_results/user", limit: 20, period: 1.minute) do |request|
+    next unless request.get? && request.path.match?(%r{\A/content/(movie|show)/tt\d+/similar_results\z})
+
+    authenticated_user_id(request)
+  end
+
   # Unified discovery search: 10 title searches per minute per user. Keep the
   # legacy /search endpoint covered while old bookmarks redirect to /browse.
   throttle("search/user", limit: 10, period: 1.minute) do |request|

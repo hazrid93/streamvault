@@ -56,7 +56,7 @@ export default class extends Controller {
       "video", "controls", "seekBar", "seekFilled", "seekBuffered", "seekHandle",
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
-      "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "backButton",
+      "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton"
@@ -69,7 +69,8 @@ export default class extends Controller {
       title: String, duration: Number, posterUrl: String,
       defaultLanguage: String, preferredLanguages: String,
       tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
-      nextEpisodeTitle: String, hasNextEpisode: Boolean
+      nextEpisodeTitle: String, hasNextEpisode: Boolean,
+      localTorrentHash: String, localStatusUrl: String
     }
   }
 
@@ -169,6 +170,7 @@ export default class extends Controller {
     this.sourceInfoTarget.classList.remove("hidden")
     this.sourceUrlTarget.textContent = this.streamingUrlValue
     this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
+    this.startLocalTorrentStatus()
     this.showOverlayUi()
     this.element.addEventListener("mousemove", this.mouseMoveHandler)
     document.addEventListener("keydown", this.keydownHandler)
@@ -218,6 +220,8 @@ export default class extends Controller {
     this.invalidateMsePipeline()
     this.stopHlsSession()
     this.stopProgressTracking()
+    if (this.localStatusInterval) clearInterval(this.localStatusInterval)
+    this.localStatusInterval = null
     // Save progress only if navigateBack hasn't already done it.
     if (!this.navigatingAway) this.saveProgressSync()
     this.clearUiHideTimer()
@@ -262,6 +266,34 @@ export default class extends Controller {
     // main thread, delaying the new page from rendering.  The browser
     // tears down the video element during unload.
     if (!this.navigatingAway) this.pauseAndDetachVideo()
+  }
+
+  startLocalTorrentStatus() {
+    if (!this.hasLocalStatsTarget || !this.localTorrentHashValue || !this.localStatusUrlValue) return
+
+    const refresh = async () => {
+      try {
+        const query = new URLSearchParams({ info_hash: this.localTorrentHashValue })
+        const response = await fetch(`${this.localStatusUrlValue}?${query}`, { headers: { Accept: "application/json" } })
+        if (!response.ok) return
+        const status = await response.json()
+        const down = this.formatByteRate(status.download_speed)
+        const up = this.formatByteRate(status.upload_speed)
+        this.localStatsTarget.textContent = `${status.seeders || 0} seeders · ${status.peers || 0} peers · ↓ ${down} · ↑ ${up}`
+      } catch (error) {
+        console.warn("Local torrent status failed:", error)
+      }
+    }
+
+    refresh()
+    this.localStatusInterval = setInterval(refresh, 5000)
+  }
+
+  formatByteRate(value) {
+    const bytes = Number(value) || 0
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB/s`
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB/s`
+    return `${bytes.toFixed(0)} B/s`
   }
 
   async probeDuration() {

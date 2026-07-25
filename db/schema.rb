@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_25_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_26_000000) do
   create_table "api_caches", force: :cascade do |t|
     t.datetime "cached_at", null: false
     t.datetime "created_at", null: false
@@ -228,6 +228,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_25_000000) do
     t.datetime "remember_created_at"
     t.datetime "reset_password_sent_at"
     t.string "reset_password_token"
+    t.string "streaming_preference", default: "automatic", null: false
     t.datetime "streams_warmed_at"
     t.datetime "updated_at", null: false
     t.index ["email"], name: "index_users_on_email", unique: true

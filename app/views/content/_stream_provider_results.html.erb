@@ -1,0 +1,63 @@
+<% frame_id = ["stream_provider", @provider_id, @type, @season, @episode].compact.join("_") %>
+<%= turbo_frame_tag frame_id do %>
+  <section class="rounded-xl border border-sv-border/70 bg-sv-surface/60 p-3" aria-label="<%= @provider_label %> streams">
+    <div class="mb-3 flex items-center justify-between gap-3">
+      <div class="flex items-center gap-2"><span class="text-xs font-semibold text-white"><%= @provider_label %></span><span class="badge badge-accent"><%= @streams.size %></span></div>
+      <span class="font-mono text-[0.65rem] text-sv-success">READY</span>
+    </div>
+
+    <% if @streams_error.present? %>
+      <p class="rounded-lg bg-sv-warning/10 px-3 py-2 text-xs text-sv-warning"><%= @streams_error %></p>
+    <% elsif @streams.empty? %>
+      <p class="rounded-lg bg-sv-bg/35 px-3 py-3 text-xs text-sv-text-muted">No matching streams from this provider.</p>
+    <% else %>
+      <div class="space-y-1.5">
+        <% @streams.each do |stream| %>
+          <% size_bytes = stream[:raw_size].to_i %>
+          <article class="rounded-lg bg-sv-bg/35 px-3 py-2.5" data-stream-filter-target="row" data-quality="<%= stream[:quality] %>" data-size="<%= size_bytes %>" data-rd-plus="<%= stream[:rd_plus] ? 'true' : 'false' %>" data-seeders="<%= stream[:seeders] %>">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <% if stream[:rd_plus] %><span class="badge badge-success shrink-0">RD+</span><% end %>
+                  <span class="truncate text-xs font-medium text-white"><%= stream[:title] || stream[:name] %></span>
+                </div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] text-sv-text-muted">
+                  <span class="badge badge-accent"><%= stream[:quality] %></span>
+                  <span><%= stream[:size] %></span>
+                  <% unless stream[:seeders].nil? %><span title="Provider-reported seeders">👤 <%= stream[:seeders] %></span><% end %>
+                  <% stream[:languages]&.first(3)&.each do |language| %><span><%= language %></span><% end %>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-1.5 shrink-0">
+                <% common_params = { imdb_id: @imdb_id, type: @type, season: @season, episode: @episode, title: @stream_title, poster_url: @poster_url, duration: @duration, filename: stream[:filename], info_hash: stream[:info_hash], file_idx: stream[:file_idx] } %>
+                <% if current_user.streaming_preference != "local" && current_user.has_realdebrid_key? && stream[:resolve_url].present? %>
+                  <%= button_to "RD", streaming_index_path,
+                        params: common_params.merge(source_mode: (current_user.streaming_preference == "automatic" ? "automatic" : "realdebrid"), resolve_url: stream[:resolve_url]),
+                        class: "#{current_user.streaming_preference == 'local' ? 'btn-secondary' : 'btn-primary'} !min-h-11 !px-3 text-xs", data: { turbo: false }, title: (current_user.streaming_preference == "automatic" ? "Play through RealDebrid with local fallback" : "Play through RealDebrid") %>
+                <% end %>
+                <% if current_user.streaming_preference != "realdebrid" && LocalTorrentService.enabled? && stream[:info_hash].present? %>
+                  <%= button_to "Local", streaming_index_path,
+                        params: common_params.merge(source_mode: "local"),
+                        class: "#{!current_user.has_realdebrid_key? || current_user.streaming_preference == 'local' ? 'btn-primary' : 'btn-secondary'} !min-h-11 !px-3 text-xs", data: { turbo: false }, title: "Stream through this server's temporary cache" %>
+                <% end %>
+              </div>
+            </div>
+
+            <details class="mt-2 border-t border-sv-border/50 pt-1.5 text-[0.68rem] text-sv-text-muted">
+              <summary class="w-fit cursor-pointer select-none font-medium transition-colors hover:text-white">Stream info</summary>
+              <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+                <div><dt class="text-sv-text-muted">Reported seeders</dt><dd class="font-mono text-white"><%= stream[:seeders] || "Unknown" %></dd></div>
+                <div><dt class="text-sv-text-muted">Video</dt><dd class="font-mono text-white"><%= stream[:video_codec].presence || "Unknown" %></dd></div>
+                <div><dt class="text-sv-text-muted">Audio</dt><dd class="font-mono text-white"><%= stream[:audio_codec].presence || "Unknown" %></dd></div>
+                <div><dt class="text-sv-text-muted">Container</dt><dd class="font-mono text-white"><%= stream[:container].presence || File.extname(stream[:filename].to_s).delete_prefix(".").upcase.presence || "Unknown" %></dd></div>
+              </dl>
+              <% if stream[:info_hash].present? %><p class="mt-2 truncate font-mono text-[0.62rem]">Hash <%= stream[:info_hash] %></p><% end %>
+              <p class="mt-1 text-[0.62rem]">Connected peers and live transfer rates appear in the player after a local stream starts.</p>
+            </details>
+          </article>
+        <% end %>
+      </div>
+    <% end %>
+  </section>
+<% end %>

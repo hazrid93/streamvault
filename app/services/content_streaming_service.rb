@@ -10,30 +10,56 @@ class ContentStreamingService
     @providers = StreamProvider.providers(rd_api_key: user.realdebrid_api_key)
   end
 
-  def start_stream(imdb_id, type, season: nil, episode: nil)
+  def start_stream(imdb_id, type, season: nil, episode: nil, source_mode: nil)
+    mode = effective_source_mode(source_mode)
+    if !@user.has_realdebrid_key? && !LocalTorrentService.enabled?
+      return ServiceResult.failure("RealDebrid API key not configured and local torrent playback is unavailable")
+    end
+
+    if mode == "local"
+      return ServiceResult.failure("Local torrent playback is unavailable") unless LocalTorrentService.enabled?
+      local_result = fetch_local_streams(imdb_id, type, season: season, episode: episode)
+      return local_result if local_result.failure?
+      return ServiceResult.failure("No local torrent sources are available for this content") if local_result.data.empty?
+
+      return start_local_stream(local_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
+    end
+
     return ServiceResult.failure("RealDebrid API key not configured") unless @user.has_realdebrid_key?
 
     streams_result = fetch_streams(imdb_id, type, season: season, episode: episode)
-    return streams_result if streams_result.failure?
-
-    streams = streams_result.data
-    return ServiceResult.failure("No streams available for this content") if streams.empty?
-
-    candidates = stream_candidates(streams)
-    result = resolve_first_valid(candidates)
-
-    if result
-      stream_result(result, imdb_id: imdb_id, type: type, season: season, episode: episode)
+    rd_result = if streams_result.success? && streams_result.data.any?
+      start_realdebrid_stream(streams_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
     else
-      ServiceResult.failure("No instant streams available. All streams are blocked or unavailable.")
+      ServiceResult.failure(streams_result.failure? ? streams_result.error_message : "No streams available through RealDebrid")
     end
+
+    # Only Automatic mode falls back. RD-only never silently changes source.
+    return rd_result unless automatic_source?(source_mode) && LocalTorrentService.enabled? && rd_result.failure?
+
+    Rails.logger.warn("[ContentStreamingService] RealDebrid failed for #{imdb_id}; trying local torrent fallback")
+    local_result = fetch_local_streams(imdb_id, type, season: season, episode: episode)
+    return rd_result if local_result.failure? || local_result.data.empty?
+
+    start_local_stream(local_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
   end
 
   # Resolve a specific stream chosen by the user (via resolve_url).
   # The chosen stream is tried first so a Direct Play MP4 still wins over
   # a fallback MKV, but stale/blocked links are common enough that we
   # retry the current candidate list before failing the request.
-  def resolve_single(resolve_url, filename:, imdb_id:, type:, season: nil, episode: nil)
+  def resolve_single(resolve_url, filename:, imdb_id:, type:, season: nil, episode: nil,
+                     source_mode: nil, info_hash: nil, file_idx: nil, title: nil, poster_url: nil)
+    if effective_source_mode(source_mode) == "local"
+      return LocalTorrentService.new.start(
+        info_hash: info_hash,
+        file_idx: file_idx,
+        filename: filename,
+        title: title,
+        poster_url: poster_url
+      )
+    end
+
     return ServiceResult.failure("RealDebrid API key not configured") unless @user.has_realdebrid_key?
 
     selected_stream = { resolve_url: resolve_url, filename: filename }
@@ -53,6 +79,14 @@ class ContentStreamingService
 
     if result
       stream_result(result, imdb_id: imdb_id, type: type, season: season, episode: episode)
+    elsif automatic_source?(source_mode) && LocalTorrentService.enabled? && info_hash.present?
+      LocalTorrentService.new.start(
+        info_hash: info_hash,
+        file_idx: file_idx,
+        filename: filename,
+        title: title,
+        poster_url: poster_url
+      )
     else
       ServiceResult.failure("Could not resolve the selected stream. It may be blocked or unavailable.")
     end
@@ -60,18 +94,65 @@ class ContentStreamingService
 
   private
 
+  def automatic_source?(requested)
+    @user.streaming_preference == "automatic" && (requested.blank? || requested == "automatic")
+  end
+
+  def effective_source_mode(requested)
+    # Forced preferences are policy, not UI defaults: a crafted source_mode
+    # parameter must not bypass them. Automatic is the only mode that allows
+    # an explicit per-stream Local choice.
+    case @user.streaming_preference
+    when "local"
+      "local"
+    when "realdebrid"
+      "realdebrid"
+    else
+      requested == "local" ? "local" : (@user.has_realdebrid_key? ? "realdebrid" : "local")
+    end
+  end
+
+  def start_realdebrid_stream(streams, imdb_id:, type:, season:, episode:)
+    candidates = stream_candidates(streams)
+    result = resolve_first_valid(candidates)
+    return stream_result(result, imdb_id: imdb_id, type: type, season: season, episode: episode) if result
+
+    ServiceResult.failure("No instant RealDebrid streams are available; sources may be blocked or unavailable")
+  end
+
+  def start_local_stream(streams, imdb_id:, type:, season:, episode:)
+    stream = streams.find { |candidate| candidate[:info_hash].present? }
+    return ServiceResult.failure("No local torrent source is available for this title") unless stream
+
+    result = LocalTorrentService.new.start(
+      info_hash: stream[:info_hash],
+      file_idx: stream[:file_idx],
+      filename: stream[:filename],
+      title: stream[:title] || stream[:name]
+    )
+    return result if result.failure?
+
+    ServiceResult.success(result.data.merge(
+      stream: stream,
+      imdb_id: imdb_id,
+      type: type,
+      season: season,
+      episode: episode
+    ))
+  end
+
   BLOCKED_PATTERNS = /downloading|infringing|failed|removed|blocked/i
 
   # Fetch streams from all configured providers in parallel, merging results.
   # All providers are queried concurrently — a slow or failed Comet doesn't
   # block Torrentio. Results are combined so the best stream wins regardless
   # of which provider found it.
-  def fetch_streams(imdb_id, type, season: nil, episode: nil)
-    return ServiceResult.failure("No stream providers available") if @providers.empty?
+  def fetch_streams(imdb_id, type, season: nil, episode: nil, providers: @providers)
+    return ServiceResult.failure("No stream providers available") if providers.empty?
 
-    Rails.logger.info("[ContentStreamingService] fetch_streams: #{@providers.length} providers for #{imdb_id} (#{type})")
+    Rails.logger.info("[ContentStreamingService] fetch_streams: #{providers.length} providers for #{imdb_id} (#{type})")
 
-    threads = @providers.map do |provider|
+    threads = providers.map do |provider|
       Thread.new do
         name = provider.class.name
         start = Time.current
@@ -98,6 +179,11 @@ class ContentStreamingService
     end
 
     ServiceResult.success(StreamOrdering.sort(all_streams))
+  end
+
+  def fetch_local_streams(imdb_id, type, season:, episode:)
+    providers = StreamProvider.providers(rd_api_key: nil)
+    fetch_streams(imdb_id, type, season: season, episode: episode, providers: providers)
   end
 
   def stream_candidates(streams)
@@ -150,10 +236,15 @@ class ContentStreamingService
     completed = Queue.new
     threads = candidates.map do |stream|
       Thread.new(stream) do |candidate|
-        completed << resolve_stream(candidate)
-      rescue StandardError => error
-        Rails.logger.warn("[ContentStreamingService] Failed to resolve stream: #{error.class}: #{error.message}")
-        completed << nil
+        resolved = nil
+        begin
+          resolved = resolve_stream(candidate)
+        rescue Exception => error # Resolver isolation: always signal the queue, even for adapter-specific errors.
+          raise if error.is_a?(SystemExit) || error.is_a?(Interrupt) || error.is_a?(NoMemoryError)
+          Rails.logger.warn("[ContentStreamingService] Failed to resolve stream: #{error.class}: #{error.message}")
+        ensure
+          completed << resolved
+        end
       end
     end
 

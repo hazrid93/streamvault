@@ -19,19 +19,30 @@ module StreamProvider
   # The first provider is primary; subsequent ones are fallbacks used when
   # the primary returns no streams or fails to connect.
   def providers(rd_api_key:)
-    setting = ENV.fetch("STREAM_PROVIDER", "torrentio").to_s.downcase
+    provider_entries(rd_api_key: rd_api_key).map { |entry| entry.fetch(:service) }
+  end
 
-    case setting
-    when "comet"
-      [ CometService.new(rd_api_key: rd_api_key), TorrentioService.new(rd_api_key: rd_api_key) ]
-    when "auto"
-      list = []
-      list << CometService.new(rd_api_key: rd_api_key) if CometService.comet_url.present?
-      list << TorrentioService.new(rd_api_key: rd_api_key)
-      list
-    else
-      [ TorrentioService.new(rd_api_key: rd_api_key) ]
+  # Named entries let the UI request each provider independently. Those
+  # concurrent Turbo-frame requests render whichever provider answers first
+  # instead of making the detail page wait for the slowest provider.
+  def provider_entries(rd_api_key:)
+    setting = ENV.fetch("STREAM_PROVIDER", "torrentio").to_s.downcase
+    entries = []
+    if setting.in?(%w[comet auto]) && CometService.comet_url.present?
+      entries << { id: "comet", label: "Comet", service: CometService.new(rd_api_key: rd_api_key) }
     end
+    if entries.empty? || setting.in?(%w[comet auto torrentio])
+      entries << { id: "torrentio", label: "Torrentio", service: TorrentioService.new(rd_api_key: rd_api_key) }
+    end
+    entries
+  end
+
+  def provider_ids
+    provider_entries(rd_api_key: nil).map { |entry| entry.fetch(:id) }
+  end
+
+  def provider(id, rd_api_key:)
+    provider_entries(rd_api_key: rd_api_key).find { |entry| entry.fetch(:id) == id.to_s }
   end
 
   # All base URLs that resolve URLs may originate from — used by

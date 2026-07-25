@@ -35,6 +35,9 @@ RSpec.describe "Content", type: :request do
         expect(response.body).to include("stream-resolve-loading")
         expect(response.body).to include("Finding a working stream")
         expect(response.body).to include('data-controller="stream-loading"')
+        expect(response.body).to include("stream_provider_torrentio_movie")
+        expect(response.body).to include("SEARCHING")
+        expect(WebMock).not_to have_requested(:get, %r{torrentio\.strem\.fun/.*/stream/movie/tt1375666\.json})
       end
 
       it "rejects an invalid imdb_id format (SEC-09)" do
@@ -90,6 +93,35 @@ RSpec.describe "Content", type: :request do
       get content_status_path(type: "movie", imdb_id: "not_an_imdb_id"),
           headers: { "Accept" => "application/json" }
       expect(response).to have_http_status(:bad_request)
+    end
+  end
+
+  describe "GET /content/:type/:imdb_id/stream_results/:provider" do
+    before { sign_in user }
+
+    it "returns one provider's streams in its Turbo frame" do
+      stub_request(:get, %r{torrentio\.strem\.fun/stream/movie/tt1375666\.json})
+        .to_return(
+          status: 200,
+          body: { streams: [{ title: "Inception 1080p 👤 42", infoHash: "a" * 40, fileIdx: 0, behaviorHints: { filename: "Inception.mkv" } }] }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      get content_stream_results_path(type: "movie", imdb_id: "tt1375666", provider: "torrentio", title: "Inception")
+
+      expect(response).to have_http_status(:ok)
+      expect(response.body).to include('turbo-frame id="stream_provider_torrentio_movie"')
+      expect(response.body).to include("Inception 1080p")
+      expect(response.body).to include("Stream info")
+      expect(response.body).to include("Reported seeders")
+    end
+
+    it "replaces an unknown provider frame with a visible error" do
+      get content_stream_results_path(type: "movie", imdb_id: "tt1375666", provider: "unknown")
+
+      expect(response).to have_http_status(:ok)
+      expect(response.body).to include("This stream provider is not configured")
+      expect(response.body).to include('turbo-frame id="stream_provider_unknown_movie"')
     end
   end
 
