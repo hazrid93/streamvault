@@ -39,17 +39,27 @@ class Rack::Attack
     authenticated_user_id(request)
   end
 
-  # Transcode + HLS start: 2 per 10 seconds per user.
+  # Fresh stream resolution is expensive, so keep a tight per-user limit.
   throttle("stream_start/user", limit: 2, period: 10.seconds) do |request|
-    next unless (request.path == "/streaming" && request.post?) ||
-                (request.path == "/hls/start" && request.post?)
+    next unless request.path == "/streaming" && request.post?
 
     authenticated_user_id(request)
   end
 
-  # Search: 10 per minute per user.
+  # iOS HLS starts are also used for seeking and automatic stall recovery.
+  # Keep abuse protection without blocking a legitimate seek + three recovery
+  # attempts in the same ten-second window.
+  throttle("hls_start/user", limit: 6, period: 10.seconds) do |request|
+    next unless request.path == "/hls/start" && request.post?
+
+    authenticated_user_id(request)
+  end
+
+  # Unified discovery search: 10 title searches per minute per user. Keep the
+  # legacy /search endpoint covered while old bookmarks redirect to /browse.
   throttle("search/user", limit: 10, period: 1.minute) do |request|
-    next unless request.path == "/search" && request.get?
+    next unless request.get? &&
+                (request.path == "/search" || (request.path == "/browse" && request.params["q"].present?))
 
     authenticated_user_id(request) || client_ip(request)
   end

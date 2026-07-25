@@ -1,9 +1,9 @@
 <%# Back link — link to a known internal route instead of the raw
    Referer header, which is attacker-controlled and would otherwise
    render an off-site (open-redirect / phishing) link. %>
-<% if request.referer&.include?("/search") %>
+<% if request.referer&.match?(%r{/(search|browse)}) %>
   <div class="px-6 pt-4">
-    <%= link_to "← Back to search results", search_index_path, class: "text-sm text-sv-accent hover:underline" %>
+    <%= link_to "← Back to discovery", browse_path, class: "section-link" %>
   </div>
 <% elsif request.referer&.include?("/library") %>
   <div class="px-6 pt-4">
@@ -243,7 +243,7 @@
 
 <%# Similar titles (TMDB recommendations) %>
 <% if @similar.present? %>
-  <div class="px-4 sm:px-6 lg:px-8 pb-8 -mx-4 sm:-mx-6 lg:-mx-8">
+  <div class="mx-auto w-full max-w-[100rem] px-4 pb-8 sm:px-6 lg:px-8">
     <section class="mb-2" data-controller="carousel">
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-xl font-bold text-white">More Like This</h2>

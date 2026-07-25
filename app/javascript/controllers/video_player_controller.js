@@ -13,6 +13,8 @@ const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
+const HLS_MAX_RATE_LIMIT_RETRIES = 2
+const HLS_RETRY_AFTER_MAX_SECONDS = 10
 const BUFFER_AHEAD_SECONDS = 30
 const INITIAL_MSE_AHEAD_SECONDS = 10
 const MSE_APPEND_BACKLOG_HIGH_WATER = 8
@@ -722,11 +724,14 @@ export default class extends Controller {
         return
       }
       if (!response.ok) {
+        const retrying = await this.retryRateLimitedHlsStart(response, playbackToken, abortController, () => this.startHlsPlayback())
+        if (retrying) return
         this.hlsPlaybackActive = false
         console.warn('HLS: start failed', response.status)
         return
       }
 
+      this.hlsRateLimitRetries = 0
       const data = await response.json()
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
         if (data?.session_id) this.stopHlsSessionById(data.session_id)
@@ -808,6 +813,38 @@ export default class extends Controller {
       console.warn('HLS: start error', e)
       this.hlsPlaybackActive = false
     }
+  }
+
+  // Rack::Attack may briefly reject a burst of iOS seeks/recovery starts.
+  // Honor Retry-After instead of abandoning the stream on a frozen frame.
+  async retryRateLimitedHlsStart(response, playbackToken, abortController, retry) {
+    if (response.status !== 429) return false
+
+    this.hlsRateLimitRetries = (this.hlsRateLimitRetries || 0) + 1
+    if (this.hlsRateLimitRetries > HLS_MAX_RATE_LIMIT_RETRIES) {
+      console.warn('HLS: rate-limit retry budget exhausted')
+      this.hlsRateLimitRetries = 0
+      return false
+    }
+
+    const retryAfterHeader = Number.parseFloat(response.headers?.get?.('Retry-After'))
+    const retryAfterSeconds = Number.isFinite(retryAfterHeader)
+      ? Math.min(Math.max(retryAfterHeader, 1), HLS_RETRY_AFTER_MAX_SECONDS)
+      : 2
+
+    if (this.hasStartupOverlayTarget) {
+      const label = this.startupOverlayTarget.querySelector('span.text-white')
+      const sub = this.startupOverlayTarget.querySelector('span.text-sv-text-muted')
+      if (label) label.textContent = 'Stream is busy'
+      if (sub) sub.textContent = `Retrying in ${Math.ceil(retryAfterSeconds)} seconds...`
+    }
+
+    console.warn(`HLS: rate limited, retrying in ${retryAfterSeconds}s`)
+    const waited = await this.waitForHlsPollInterval(retryAfterSeconds * 1000, abortController.signal)
+    if (!waited || !this.isHlsOperationCurrent(playbackToken, abortController)) return true
+
+    await retry()
+    return true
   }
 
   // Poll the HLS playlist URL until enough segments are ready, ffmpeg
@@ -922,6 +959,8 @@ export default class extends Controller {
         return
       }
       if (!response.ok) {
+        const retrying = await this.retryRateLimitedHlsStart(response, playbackToken, abortController, () => this.restartHlsSession(startSeconds))
+        if (retrying) return
         console.warn('HLS seek: start failed', response.status)
         this.hlsPlaybackActive = false
         this.isSeeking = false
@@ -929,6 +968,7 @@ export default class extends Controller {
         return
       }
 
+      this.hlsRateLimitRetries = 0
       const data = await response.json()
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
         if (data?.session_id) this.stopHlsSessionById(data.session_id)

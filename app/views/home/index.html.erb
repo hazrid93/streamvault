@@ -4,8 +4,9 @@
       <p class="eyebrow mb-3">Tonight in your vault</p>
       <h1 id="home-heading" class="page-heading text-white">Find the next story worth your time.</h1>
       <p class="page-subtitle max-w-xl">Resume a title, explore what’s popular, or search your entire catalog.</p>
-      <%= form_tag search_index_path, method: :get, class: "mt-6 max-w-xl", data: { turbo_frame: "_top", page_loader: "search" }, role: "search" do %>
+      <%= form_tag browse_path, method: :get, class: "mt-6 max-w-xl", data: { turbo_frame: "_top", page_loader: "search" }, role: "search" do %>
         <div class="flex flex-col gap-2 sm:flex-row">
+          <%= hidden_field_tag :type, "all" %>
           <%= text_field_tag :q, params[:q], class: "input-field flex-1", placeholder: "Search a movie or series", aria: { label: "Search a movie or series" } %>
           <%= submit_tag "Find something", class: "btn-primary cursor-pointer" %>
         </div>

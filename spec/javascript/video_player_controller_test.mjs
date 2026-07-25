@@ -893,6 +893,53 @@ test("MSE recovery budget survives raw network data and resets only when playbac
   }
 })
 
+test("HLS rate limits honor Retry-After and retry the current operation", async () => {
+  const player = new VideoPlayerController()
+  const abortController = new AbortController()
+  const delays = []
+  let retries = 0
+
+  player.hlsPlaybackToken = 7
+  player.hlsStartAbortController = abortController
+  player.hlsRateLimitRetries = 0
+  player.waitForHlsPollInterval = async (delay, signal) => {
+    delays.push(delay)
+    assert.equal(signal, abortController.signal)
+    return true
+  }
+
+  const response = {
+    status: 429,
+    headers: { get: (name) => name === "Retry-After" ? "3" : null }
+  }
+  const handled = await player.retryRateLimitedHlsStart(
+    response,
+    7,
+    abortController,
+    async () => { retries += 1 }
+  )
+
+  assert.equal(handled, true)
+  assert.deepEqual(delays, [3000])
+  assert.equal(retries, 1)
+})
+
+test("non-rate-limit HLS errors are not retried", async () => {
+  const player = new VideoPlayerController()
+  const abortController = new AbortController()
+  let retries = 0
+
+  const handled = await player.retryRateLimitedHlsStart(
+    { status: 500 },
+    1,
+    abortController,
+    async () => { retries += 1 }
+  )
+
+  assert.equal(handled, false)
+  assert.equal(retries, 0)
+})
+
 test("a newer HLS seek aborts stale bootstrap work and stops its late session", async () => {
   const player = new VideoPlayerController()
   const previousFetch = context.fetch

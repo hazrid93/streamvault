@@ -1,95 +1,142 @@
 <div class="page-shell">
   <header class="page-intro">
-    <div><p class="eyebrow mb-2">Explore the catalog</p><h1 class="page-heading text-white">Browse</h1><p class="page-subtitle">Filter by format, mood, and release year.</p></div>
-    <p class="text-sm text-sv-text-muted"><span class="font-semibold text-white"><%= @items.size %></span> <%= "title".pluralize(@items.size) %><%= " on this page" unless @post_filtering %></p>
+    <div>
+      <p class="eyebrow mb-2">Search and explore</p>
+      <h1 class="page-heading text-white">Discover</h1>
+      <p class="page-subtitle">Find a title by name or browse by format, mood, and release year.</p>
+    </div>
+    <% if @search_mode %>
+      <p class="text-sm text-sv-text-muted"><span class="font-semibold text-white"><%= @total %></span> <%= "match".pluralize(@total) %></p>
+    <% else %>
+      <p class="text-sm text-sv-text-muted"><span class="font-semibold text-white"><%= @items.size %></span> <%= "title".pluralize(@items.size) %><%= " on this page" unless @post_filtering %></p>
+    <% end %>
   </header>
 
-  <%# Filter bar %>
   <div class="filter-panel mb-8 space-y-5">
-    <%# Row 1: content type toggle + sort mode %>
-    <div class="flex flex-wrap items-center gap-3 justify-between">
-      <%# Content type toggle %>
-      <div class="inline-flex rounded-lg bg-sv-surface p-1 border border-sv-border">
-        <% [["movie", "Movies"], ["show", "Series"]].each do |val, label| %>
-          <% active_type = @type == val %>
-          <%= link_to browse_path(type: val, catalog: @catalog),
-                class: "px-4 py-1.5 rounded-md text-sm font-medium transition-colors #{active_type ? 'bg-sv-accent text-white' : 'text-sv-text-muted hover:text-white'}" do %>
-            <%= label %>
+    <%# Search is the primary discovery control in both modes. %>
+    <%= form_tag browse_path, method: :get, class: "flex flex-col gap-2 sm:flex-row", data: { turbo_frame: "_top", page_loader: "search" }, role: "search" do %>
+      <%= hidden_field_tag :type, (@search_mode ? @type : "all") %>
+      <%= text_field_tag :q, @query, class: "input-field flex-1", placeholder: "Search movies and series by title", autocomplete: "off", aria: { label: "Search movies and series by title" } %>
+      <%= submit_tag "Search", class: "btn-primary cursor-pointer" %>
+      <% if @search_mode %>
+        <%= link_to "Clear", browse_path, class: "btn-secondary" %>
+      <% end %>
+    <% end %>
+
+    <% if @search_mode %>
+      <%# Search type filter. All is intentionally available for mixed results. %>
+      <div class="flex flex-wrap items-center justify-between gap-3 border-t border-sv-border/70 pt-4">
+        <div class="inline-flex rounded-lg border border-sv-border bg-sv-surface p-1" aria-label="Filter search results by type">
+          <% [["all", "All"], ["movie", "Movies"], ["show", "Series"]].each do |value, label| %>
+            <%= link_to label,
+                  browse_path(q: @query, type: value, per_page: @per_page),
+                  class: "px-4 py-1.5 rounded-md text-sm font-medium transition-colors #{@type == value ? 'bg-sv-accent text-white' : 'text-sv-text-muted hover:text-white'}" %>
           <% end %>
+        </div>
+        <%= link_to "Browse the full catalog", browse_path(type: "movie"), class: "section-link" %>
+      </div>
+    <% else %>
+      <%# Catalog type and sort controls. %>
+      <div class="flex flex-wrap items-center gap-3 justify-between border-t border-sv-border/70 pt-4">
+        <div class="inline-flex rounded-lg bg-sv-surface p-1 border border-sv-border">
+          <% [["movie", "Movies"], ["show", "Series"]].each do |value, label| %>
+            <%= link_to label, browse_path(type: value, catalog: @catalog),
+                  class: "px-4 py-1.5 rounded-md text-sm font-medium transition-colors #{@type == value ? 'bg-sv-accent text-white' : 'text-sv-text-muted hover:text-white'}" %>
+          <% end %>
+        </div>
+
+        <div class="inline-flex flex-wrap gap-1">
+          <% TorrentioService::CATALOGS.each do |id, label| %>
+            <%= link_to label, browse_path(type: @type, catalog: id, genre: @genre.presence, year: @year.presence),
+                  class: "px-3 py-1.5 rounded-md text-sm font-medium transition-colors border #{@catalog == id ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+          <% end %>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <% chip_base = "px-3 py-1.5 rounded-full text-sm font-medium transition-colors border" %>
+        <%= link_to "All", browse_path(type: @type, catalog: @catalog, year: @year.presence),
+              class: "#{chip_base} #{@genre.blank? ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+        <% @genres.each do |genre| %>
+          <%= link_to genre, browse_path(type: @type, catalog: @catalog, genre: genre, year: @year.presence),
+                class: "#{chip_base} #{@genre == genre ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
         <% end %>
       </div>
 
-      <%# Sort mode tabs %>
-      <div class="inline-flex flex-wrap gap-1">
-        <% TorrentioService::CATALOGS.each do |id, label| %>
-          <% active_sort = @catalog == id %>
-          <%= link_to label, browse_path(type: @type, catalog: id, genre: @genre.presence, year: @year.presence),
-                class: "px-3 py-1.5 rounded-md text-sm font-medium transition-colors border #{active_sort ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-sm text-sv-text-muted mr-1">Release year</span>
+        <%= form_tag browse_path, method: :get, class: "inline-block",
+              data: { controller: "autosubmit", action: "change->autosubmit#submit" } do %>
+          <%= hidden_field_tag :type, @type %>
+          <%= hidden_field_tag :catalog, @catalog %>
+          <%= hidden_field_tag :genre, @genre %>
+          <%= select_tag :year,
+                options_for_select([["All years", ""]] + @years.map { |year| [year.to_s, year.to_s] }, selected: @year),
+                class: "input-field py-1.5 pr-8", aria: { label: "Release year" } %>
         <% end %>
       </div>
-    </div>
 
-    <%# Row 2: genre chips (always available) %>
-    <div class="flex flex-wrap items-center gap-2">
-      <% chip_base = "px-3 py-1.5 rounded-full text-sm font-medium transition-colors border" %>
-      <%= link_to "All", browse_path(type: @type, catalog: @catalog, year: @year.presence),
-            class: "#{chip_base} #{@genre.blank? ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
-      <% @genres.each do |g| %>
-        <% active = @genre == g %>
-        <%= link_to g, browse_path(type: @type, catalog: @catalog, genre: g, year: @year.presence),
-              class: "#{chip_base} #{active ? 'border-sv-accent text-sv-accent bg-sv-accent/10' : 'border-sv-border text-sv-text-muted hover:text-white hover:border-sv-text-muted'}" %>
+      <% if @post_filtering %>
+        <p class="text-xs text-sv-text-muted">
+          Filtering by <%= @catalog == "year" ? "genre" : "year" %> across the latest <%= BrowseController::FILTER_FETCH_PAGES * TorrentioService::CATALOG_PAGE_SIZE %> titles.
+        </p>
       <% end %>
-    </div>
-
-    <%# Row 3: year selector (always available) %>
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="text-sm text-sv-text-muted mr-1">Year:</span>
-      <%# Autosubmits on change via Stimulus (CSP-safe — no inline onchange). %>
-      <%= form_tag browse_path, method: :get, class: "inline-block",
-            data: { controller: "autosubmit", action: "change->autosubmit#submit" } do %>
-        <%= hidden_field_tag :type, @type %>
-        <%= hidden_field_tag :catalog, @catalog %>
-        <%= hidden_field_tag :genre, @genre %>
-        <%= select_tag :year,
-              options_for_select([["All years", ""]] + @years.map { |y| [y.to_s, y.to_s] }, selected: @year),
-              class: "input-field py-1.5 pr-8" %>
-      <% end %>
-    </div>
-
-    <%# Filter context note %>
-    <% if @post_filtering %>
-      <p class="text-xs text-sv-text-muted">
-        Filtering by <%= @catalog == "year" ? "genre" : "year" %> across the latest <%= BrowseController::FILTER_FETCH_PAGES * TorrentioService::CATALOG_PAGE_SIZE %> titles.
-      </p>
     <% end %>
   </div>
 
-  <%# Error %>
-  <% if @error %>
-    <div class="flash-alert mb-6">Couldn't load titles right now. Please try again shortly.</div>
+  <% if @error.present? %>
+    <div class="flash-alert mb-6">Couldn’t load titles right now. Please try again shortly.</div>
   <% end %>
 
-  <%# Results grid %>
   <% if @items.any? %>
+    <% if @search_mode %>
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p class="text-sm text-sv-text-muted">
+          Showing <%= (@page - 1) * @per_page + 1 %>–<%= [@page * @per_page, @total].min %> of <%= @total %> results
+        </p>
+        <div class="flex items-center gap-1 text-sm" aria-label="Results per page">
+          <% [25, 50, 100, 200].each do |size| %>
+            <% if size == @per_page %>
+              <span class="rounded bg-sv-accent px-2 py-1 text-xs font-medium text-white"><%= size %></span>
+            <% else %>
+              <%= link_to size, browse_path(q: @query, type: @type, per_page: size), class: "rounded bg-sv-surface px-2 py-1 text-xs text-sv-text-muted transition-colors hover:text-white" %>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
     <div id="browse_grid" class="media-grid">
       <% @items.each do |item| %>
-        <%= render "browse/poster", item: item, type: @type %>
+        <% if @search_mode %>
+          <%= render "shared/poster_card", item: item, link_path: content_path(type: item[:type], imdb_id: item[:imdb_id]), variant: "grid" %>
+        <% else %>
+          <%= render "browse/poster", item: item, type: @type %>
+        <% end %>
       <% end %>
     </div>
   <% elsif @error.blank? %>
     <div class="empty-state text-sv-text-muted">
-      <svg class="w-12 h-12 mx-auto mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
-      <p class="text-lg">No titles found</p>
-      <p class="text-sm mt-1">Try a different genre, year, or sort mode.</p>
+      <svg class="w-12 h-12 mx-auto mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+      <p class="text-lg font-semibold text-white"><%= @search_mode ? "No matches for “#{@query}”" : "No titles found" %></p>
+      <p class="text-sm mt-1"><%= @search_mode ? "Check the spelling or try a shorter title." : "Try a different genre, year, or sort mode." %></p>
     </div>
   <% end %>
 
-  <%# Load more (infinite scroll via Turbo Stream) %>
-  <% if !@post_filtering && @has_next %>
+  <% if @search_mode && @total_pages > 1 %>
+    <nav class="mt-8 flex items-center justify-center gap-2" aria-label="Search results pages">
+      <% if @page > 1 %>
+        <%= link_to "← Previous", browse_path(q: @query, type: @type, page: @page - 1, per_page: @per_page), class: "btn-secondary" %>
+      <% end %>
+      <span class="px-3 text-sm text-sv-text-muted">Page <strong class="text-white"><%= @page %></strong> of <%= @total_pages %></span>
+      <% if @page < @total_pages %>
+        <%= link_to "Next →", browse_path(q: @query, type: @type, page: @page + 1, per_page: @per_page), class: "btn-secondary" %>
+      <% end %>
+    </nav>
+  <% elsif !@search_mode && !@post_filtering && @has_next %>
     <div id="browse_pagination" class="flex items-center justify-center mt-10">
       <%= link_to "Load more", browse_path(type: @type, catalog: @catalog, genre: @genre.presence, year: @year.presence, page: @page + 1),
-            data: { turbo_stream: true },
-            class: "btn-secondary" %>
+            data: { turbo_stream: true }, class: "btn-secondary" %>
     </div>
   <% end %>
 </div>
