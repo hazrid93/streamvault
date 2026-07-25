@@ -12,7 +12,11 @@ class CreateApiCaches < ActiveRecord::Migration[7.2]
   def change
     create_table :api_caches do |t|
       t.string :key, null: false
-      t.jsonb :payload, null: false, default: {}
+      if connection.adapter_name == "PostgreSQL"
+        t.jsonb :payload, null: false, default: {}
+      else
+        t.json :payload, null: false, default: {}
+      end
       t.datetime :cached_at, null: false
       t.boolean :fetching, default: false, null: false
       t.string :fetch_error

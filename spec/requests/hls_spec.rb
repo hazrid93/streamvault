@@ -27,12 +27,55 @@ RSpec.describe "HLS streaming", type: :request do
         expect(response).to have_http_status(:bad_gateway)
       end
     end
+    it "clamps start_seconds to 24 hours before creating the session" do
+      captured_kwargs = nil
+      session = instance_double(HlsSession, id: "hls-start-clamped")
+      allow(HlsSession).to receive(:create) do |**kwargs|
+        captured_kwargs = kwargs
+        session
+      end
+
+      post "/hls/start", params: {
+        url: "https://real-debrid.com/test.mp4",
+        start_seconds: "999999"
+      }
+
+      expect(response).to have_http_status(:ok)
+      expect(captured_kwargs[:start_seconds]).to eq(86_400)
+    end
+
+    it "clamps invalid and negative start_seconds to zero before creating the session" do
+      captured_kwargs = nil
+      session = instance_double(HlsSession, id: "hls-start-zero")
+      allow(HlsSession).to receive(:create) do |**kwargs|
+        captured_kwargs = kwargs
+        session
+      end
+
+      post "/hls/start", params: {
+        url: "https://real-debrid.com/test.mp4",
+        start_seconds: "-100"
+      }
+
+      expect(response).to have_http_status(:ok)
+      expect(captured_kwargs[:start_seconds]).to eq(0)
+    end
   end
 
   describe "GET /hls/:id/playlist.m3u8" do
     it "returns 404 for unknown session" do
       get "/hls/nonexistent/playlist.m3u8"
       expect(response).to have_http_status(:not_found)
+    end
+    it "returns a cached startup diagnostic after failed session cleanup" do
+      cache = ActiveSupport::Cache::MemoryStore.new
+      allow(Rails).to receive(:cache).and_return(cache)
+      HlsSession.set_error("failed-session", "FFmpeg exited before producing a segment.")
+
+      get "/hls/failed-session/playlist.m3u8"
+
+      expect(response).to have_http_status(:failed_dependency)
+      expect(response.parsed_body).to eq("error" => "FFmpeg exited before producing a segment.")
     end
 
     context "with a valid session" do
@@ -129,6 +172,18 @@ RSpec.describe "HLS streaming", type: :request do
       get "/hls/#{session_id}/99.ts"
       expect(response).to have_http_status(:service_unavailable)
       expect(response.headers["Retry-After"]).to eq("1")
+    end
+    it "bounds the wait for a missing live segment before asking Safari to retry" do
+      stub_const("HlsController::SEGMENT_WAIT_SECONDS", 0.02)
+      stub_const("HlsController::SEGMENT_POLL_INTERVAL_SECONDS", 0.005)
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      get "/hls/#{session_id}/99.ts"
+
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+      expect(response).to have_http_status(:service_unavailable)
+      expect(response.headers["Retry-After"]).to eq("1")
+      expect(elapsed).to be < 0.5
     end
 
     it "returns 404 for non-existent segment when ffmpeg has finished" do

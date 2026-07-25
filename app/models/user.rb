@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
 class User < ApplicationRecord
-  devise :database_authenticatable, :registerable,
-         :recoverable, :rememberable, :validatable
+  devise :database_authenticatable, :validatable
+
+  has_secure_password :pin, validations: false
+
+  PIN_FORMAT = /\A[0-9]{4}\z/.freeze
 
   # Encryption
   encrypts :realdebrid_api_key, deterministic: false
@@ -33,6 +36,40 @@ class User < ApplicationRecord
   validate :preferred_languages_must_be_array, on: :update
 
   validates :display_name, length: { maximum: 50 }
+
+  def pin_configured?
+    pin_digest.present?
+  end
+
+  def valid_pin?(candidate)
+    return false unless pin_configured?
+    return false unless candidate.is_a?(String) && PIN_FORMAT.match?(candidate)
+
+    !!authenticate_pin(candidate)
+  rescue BCrypt::Errors::InvalidHash
+    false
+  end
+
+  def set_pin(pin, confirmation)
+    errors.delete(:pin)
+    errors.delete(:pin_confirmation)
+
+    valid_format = pin.is_a?(String) && PIN_FORMAT.match?(pin)
+    confirmation_matches = confirmation == pin
+
+    errors.add(:pin, "must be exactly four digits") unless valid_format
+    errors.add(:pin_confirmation, "does not match PIN") unless confirmation_matches
+    return false unless valid_format && confirmation_matches
+
+    previous_digest = pin_digest
+    self.pin = pin
+    return true if save
+
+    self.pin_digest = previous_digest
+    false
+  ensure
+    remove_instance_variable(:@pin) if instance_variable_defined?(:@pin)
+  end
 
   def has_realdebrid_key?
     realdebrid_api_key.present?
@@ -89,4 +126,8 @@ class User < ApplicationRecord
     return if preferred_languages.nil?
     errors.add(:preferred_languages, "must be an array") unless preferred_languages.is_a?(Array)
   end
+  def password_required?
+    false
+  end
+
 end

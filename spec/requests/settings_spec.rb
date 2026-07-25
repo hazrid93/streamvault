@@ -49,18 +49,46 @@ RSpec.describe "Settings", type: :request do
       expect(response).to redirect_to(settings_path)
       expect(user.reload.preferred_languages).to include("ENG", "FRENCH")
     end
-    it "changes the password and rejects the previous password" do
-      patch settings_path, params: {
-        user: {
-          current_password: "password123",
-          password: "newpassword123",
-          password_confirmation: "newpassword123"
-        }
+  end
+
+  describe "PATCH /settings/pin" do
+    before do
+      user.set_pin("1234", "1234")
+      sign_in user
+    end
+
+    it "changes the PIN when the current PIN is correct" do
+      patch settings_pin_path, params: {
+        current_pin: "1234",
+        pin: "5678",
+        pin_confirmation: "5678"
       }
 
       expect(response).to redirect_to(settings_path)
-      expect(user.reload.valid_password?("newpassword123")).to be(true)
-      expect(user.valid_password?("password123")).to be(false)
+      expect(user.reload.valid_pin?("5678")).to be(true)
+      expect(user.valid_pin?("1234")).to be(false)
+    end
+
+    it "rejects an incorrect current PIN" do
+      patch settings_pin_path, params: {
+        current_pin: "9999",
+        pin: "5678",
+        pin_confirmation: "5678"
+      }
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(user.reload.valid_pin?("1234")).to be(true)
+    end
+
+    it "rejects a malformed or nonmatching new PIN" do
+      patch settings_pin_path, params: {
+        current_pin: "1234",
+        pin: "12ab",
+        pin_confirmation: "9999"
+      }
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(user.reload.valid_pin?("1234")).to be(true)
     end
   end
 

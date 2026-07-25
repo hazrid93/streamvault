@@ -9,58 +9,55 @@ class SettingsController < ApplicationController
 
   def update
     @user = current_user
+    attributes = settings_params
+    verify_realdebrid_key = attributes[:realdebrid_api_key].present?
 
-    # Preserve existing RD key if not provided
-    if params[:user][:realdebrid_api_key].blank?
-      params[:user].delete(:realdebrid_api_key)
+    # Preserve the existing RealDebrid key when the field is left blank.
+    attributes.delete(:realdebrid_api_key) unless verify_realdebrid_key
+
+    if @user.update(attributes)
+      redirect_after_settings_update(verify_realdebrid_key)
+    else
+      render :show, status: :unprocessable_entity
+    end
+  end
+
+  def update_pin
+    @user = current_user
+    attributes = pin_params
+
+    unless @user.valid_pin?(attributes[:current_pin])
+      @user.errors.add(:current_pin, "is incorrect")
+      return render :show, status: :unprocessable_entity
     end
 
-    if params[:user][:password].present?
-      update_with_password
+    if @user.set_pin(attributes[:pin], attributes[:pin_confirmation])
+      redirect_to settings_path, notice: "PIN updated successfully."
     else
-      update_without_password
+      render :show, status: :unprocessable_entity
     end
   end
 
   private
 
-  def update_with_password
-    if @user.update_with_password(settings_params_with_password)
-      bypass_sign_in @user
-      redirect_to settings_path, notice: "Password updated successfully."
+  def redirect_after_settings_update(verify_realdebrid_key)
+    unless verify_realdebrid_key
+      return redirect_to settings_path, notice: "Settings updated."
+    end
+
+    result = RealDebridService.new(@user.realdebrid_api_key).verify_key
+    if result.success?
+      redirect_to settings_path, notice: "Settings updated. RealDebrid connection verified."
     else
-      # Strip password values so they don't render in the form on error
-      @user.password = nil
-      @user.password_confirmation = nil
-      @user.current_password = nil
-      render :show, status: :unprocessable_entity
+      redirect_to settings_path, alert: "Settings saved, but RealDebrid key could not be verified: #{result.error_message}"
     end
   end
-
-  def update_without_password
-    if @user.update(settings_params)
-      if params[:user][:realdebrid_api_key].present?
-        rd = RealDebridService.new(@user.realdebrid_api_key)
-        result = rd.verify_key
-        if result.success?
-          redirect_to settings_path, notice: "Settings updated. RealDebrid connection verified."
-        else
-          redirect_to settings_path, alert: "Settings saved, but RealDebrid key could not be verified: #{result.error_message}"
-        end
-      else
-        redirect_to settings_path, notice: "Settings updated."
-      end
-    else
-      render :show, status: :unprocessable_entity
-    end
-  end
-
-  def settings_params_with_password
-    params.require(:user).permit(:realdebrid_api_key, :default_language, :password, :password_confirmation, :current_password, preferred_languages: [])
-  end
-
 
   def settings_params
     params.require(:user).permit(:realdebrid_api_key, :default_language, preferred_languages: [])
+  end
+
+  def pin_params
+    params.permit(:current_pin, :pin, :pin_confirmation)
   end
 end

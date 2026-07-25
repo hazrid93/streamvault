@@ -1,5 +1,11 @@
 Rails.application.routes.draw do
-  devise_for :users, controllers: { registrations: "users/registrations" }
+  devise_for :users, skip: :all
+
+  devise_scope :user do
+    get "pin", to: "pin_access#new", as: :new_user_session
+    post "pin", to: "pin_access#create", as: :user_session
+    delete "pin", to: "pin_access#destroy", as: :destroy_user_session
+  end
 
   # Root
   root "home#index"
@@ -64,6 +70,7 @@ Rails.application.routes.draw do
   # Settings
   get "settings", to: "settings#show", as: :settings
   patch "settings", to: "settings#update"
+  patch "settings/pin", to: "settings#update_pin", as: :settings_pin
   get "cache_status", to: "cache_status#show", as: :cache_status
 
   # Direct stream proxy (bypass ffmpeg for browser-compatible content)

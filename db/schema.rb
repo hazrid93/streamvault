@@ -10,7 +10,19 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_26_102104) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_25_000000) do
+  create_table "api_caches", force: :cascade do |t|
+    t.datetime "cached_at", null: false
+    t.datetime "created_at", null: false
+    t.string "fetch_error"
+    t.boolean "fetching", default: false, null: false
+    t.string "key", null: false
+    t.json "payload", default: {}, null: false
+    t.datetime "updated_at", null: false
+    t.index ["cached_at"], name: "index_api_caches_on_cached_at"
+    t.index ["key"], name: "index_api_caches_on_key", unique: true
+  end
+
   create_table "episode_progresses", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.integer "duration_seconds", default: 0, null: false
@@ -210,11 +222,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_26_102104) do
     t.string "display_name"
     t.string "email", default: "", null: false
     t.string "encrypted_password", default: "", null: false
+    t.string "pin_digest"
     t.text "preferred_languages"
     t.text "realdebrid_api_key"
     t.datetime "remember_created_at"
     t.datetime "reset_password_sent_at"
     t.string "reset_password_token"
+    t.datetime "streams_warmed_at"
     t.datetime "updated_at", null: false
     t.index ["email"], name: "index_users_on_email", unique: true
     t.index ["reset_password_token"], name: "index_users_on_reset_password_token", unique: true

@@ -1,8 +1,10 @@
 require 'rails_helper'
+require "timeout"
 
 RSpec.describe TranscodeService do
   before do
     described_class.instance_variable_set(:@probe_cache, {})
+    described_class.instance_variable_set(:@probe_inflight, {})
     # Tests run against the software fallback (libx264) so the specs
     # don't depend on VideoToolbox being available on the CI machine.
     described_class.instance_variable_set(:@videotoolbox_available, false)
@@ -114,6 +116,80 @@ RSpec.describe TranscodeService do
       expect(described_class.instance_variable_get(:@probe_cache).size).to eq(described_class::PROBE_CACHE_MAX_SIZE)
     end
   end
+  describe "metadata probe cache" do
+    it "single-flights concurrent command construction for the same authenticated input" do
+      video_output = {
+        "streams" => [
+          { "codec_name" => "h264", "width" => 1920, "height" => 1080, "pix_fmt" => "yuv420p" }
+        ]
+      }.to_json
+      track_output = { "streams" => [] }.to_json
+      calls = Hash.new(0)
+      calls_mutex = Mutex.new
+      started = Queue.new
+      release = Queue.new
+
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        kind = cmd.include?("-select_streams") ? :video : :tracks
+        calls_mutex.synchronize { calls[kind] += 1 }
+        started << kind
+        release.pop
+        capture_result(kind == :video ? video_output : track_output)
+      end
+
+      builders = 2.times.map do
+        Thread.new do
+          described_class.send(:build_ffmpeg_command,
+            "https://example.test/single-flight.mkv",
+            headers: { "Authorization" => "Bearer shared-token" },
+            start_seconds: 0
+          )
+        end
+      end
+
+      2.times { Timeout.timeout(2) { started.pop } }
+      sleep 0.05
+      expect(calls).to eq(video: 1, tracks: 1)
+    ensure
+      4.times { release << true }
+      commands = builders.map(&:value)
+      expect(commands).to all(include("-c:v", "copy"))
+    end
+
+    it "does not share a cached video probe across authorization headers" do
+      alpha_output = {
+        "streams" => [
+          { "codec_name" => "h264", "width" => 1280, "height" => 720, "pix_fmt" => "yuv420p" }
+        ]
+      }.to_json
+      beta_output = {
+        "streams" => [
+          { "codec_name" => "hevc", "width" => 3840, "height" => 2160, "pix_fmt" => "yuv420p10le" }
+        ]
+      }.to_json
+      headers_seen = []
+
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        header = cmd.fetch(cmd.index("-headers") + 1)
+        headers_seen << header
+        capture_result(header.include?("alpha-token") ? alpha_output : beta_output)
+      end
+
+      url = "https://example.test/auth-isolated.mkv"
+      alpha = described_class.probe_video_stream(url, headers: { "Authorization" => "Bearer alpha-token" })
+      beta = described_class.probe_video_stream(url, headers: { "Authorization" => "Bearer beta-token" })
+      alpha_again = described_class.probe_video_stream(url, headers: { "Authorization" => "Bearer alpha-token" })
+
+      expect(headers_seen).to eq([
+        "Authorization: Bearer alpha-token\r\n",
+        "Authorization: Bearer beta-token\r\n"
+      ])
+      expect(alpha).to include(codec_name: "h264", width: 1280, height: 720)
+      expect(beta).to include(codec_name: "hevc", width: 3840, height: 2160)
+      expect(alpha_again).to eq(alpha)
+    end
+  end
+
 
   describe "ffmpeg command selection" do
     it "copies browser-safe H.264 video" do
@@ -918,6 +994,87 @@ RSpec.describe TranscodeService do
       end
     end
   end
+  describe ".transcode_to_fmp4 bounded spool" do
+    it "holds producer output at the high-water mark until the response consumes it" do
+      stub_const("TranscodeService::FMP4_SPOOL_HIGH_WATER_BYTES", 1024)
+      spool = nil
+      allow(Tempfile).to receive(:create).and_wrap_original do |original, *args, **kwargs|
+        spool = original.call(*args, **kwargs)
+        spool
+      end
+
+      script = <<~RUBY
+        $stdout.sync = true
+        $stdout.write("a" * 1024)
+        $stdout.write("b" * 8192)
+      RUBY
+      command = [ RbConfig.ruby, "-e", script ]
+      delivered = Queue.new
+      continue = Queue.new
+      chunks = []
+      first_chunk = true
+      worker = Thread.new do
+        described_class.send(:transcode_to_fmp4_internal, command) do |chunk|
+          chunks << chunk
+          if first_chunk
+            first_chunk = false
+            delivered << true
+            continue.pop
+          end
+        end
+      end
+
+      Timeout.timeout(2) { delivered.pop }
+      expect do
+        Timeout.timeout(0.25) do
+          sleep 0.01 until spool.size > described_class::FMP4_SPOOL_HIGH_WATER_BYTES
+        end
+      end.to raise_error(Timeout::Error)
+      expect(spool.size).to eq(described_class::FMP4_SPOOL_HIGH_WATER_BYTES)
+
+      continue << true
+      Timeout.timeout(5) { worker.value }
+      expect(chunks.join).to eq("a" * 1024 + "b" * 8192)
+    ensure
+      continue << true if defined?(continue)
+      worker&.join(3)
+      worker&.kill if worker&.alive?
+      worker&.join
+    end
+
+    it "cancels a full spool without leaving its ffmpeg process alive" do
+      stub_const("TranscodeService::FMP4_SPOOL_HIGH_WATER_BYTES", 1024)
+      spool_path = nil
+      allow(Tempfile).to receive(:create).and_wrap_original do |original, *args, **kwargs|
+        spool = original.call(*args, **kwargs)
+        spool_path = spool.path
+        spool
+      end
+      pid_path = File.join(Dir.tmpdir, "streamvault-spool-#{Process.pid}-#{object_id}")
+      File.delete(pid_path) if File.exist?(pid_path)
+      script = <<~RUBY
+        $stdout.sync = true
+        File.write(#{pid_path.dump}, Process.pid.to_s)
+        $stdout.write("a" * 1024)
+        sleep 30
+      RUBY
+      command = [ RbConfig.ruby, "-e", script ]
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      expect {
+        described_class.send(:transcode_to_fmp4_internal, command) do |_chunk|
+          raise IOError, "client disconnected"
+        end
+      }.to raise_error(IOError, "client disconnected")
+
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 3
+      expect(process_alive?(File.read(pid_path).to_i)).to be(false)
+      expect(File.exist?(spool_path)).to be(false)
+    ensure
+      File.delete(pid_path) if pid_path && File.exist?(pid_path)
+    end
+  end
+
 
   describe ".transcode_to_fmp4 stall detection" do
     it "raises TranscodeError when ffmpeg produces no data before the first-data timeout" do

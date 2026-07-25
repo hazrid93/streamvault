@@ -229,6 +229,32 @@ RSpec.describe ContentStreamingService do
     end
   end
 
+  describe "#resolve_first_valid_batch" do
+    it "returns a later valid resolver without waiting for an earlier slow resolver" do
+      slow_candidate = { resolve_url: "https://resolver.example/slow" }
+      fast_candidate = { resolve_url: "https://resolver.example/fast" }
+      slow_started = Queue.new
+
+      allow(service).to receive(:resolve_stream) do |candidate|
+        if candidate == slow_candidate
+          slow_started << true
+          sleep 0.5
+          nil
+        else
+          slow_started.pop
+          { streaming_url: "https://download.real-debrid.com/d/fast.mp4", filename: "fast.mp4", stream: candidate }
+        end
+      end
+
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = service.send(:resolve_first_valid_batch, [ slow_candidate, fast_candidate ])
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+      expect(result).to include(filename: "fast.mp4")
+      expect(elapsed).to be < 0.25
+    end
+  end
+
   describe "#resolve_single" do
     it "resolves the selected stream when it is available" do
       stub_request(:get, "https://torrentio.strem.fun/resolve/realdebrid/test_key/abc123/null/0/Inception.mp4")

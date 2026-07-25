@@ -4,6 +4,7 @@ require "json"
 require "fileutils"
 require "tempfile"
 require "shellwords"
+require "digest"
 
 # Remuxes/transcodes streams via FFmpeg for browser playback.
 # Browser-safe H.264 video is copied when possible; risky/unsupported
@@ -39,6 +40,11 @@ class TranscodeService
   FIRST_SEGMENT_TIMEOUT_SECONDS = 30
   SHUTDOWN_GRACE_SECONDS = 1
   FIRST_DATA_TIMEOUT_SECONDS = 30
+  # Keep the on-disk fMP4 producer/consumer spool deliberately small. The
+  # reader stops draining ffmpeg before this many bytes are pending, letting
+  # the pipe apply backpressure instead of accumulating an unbounded file.
+  FMP4_SPOOL_HIGH_WATER_BYTES = 4 * 1024 * 1024
+  FMP4_SPOOL_CHUNK_BYTES = 128 * 1024
   # No mid-stream idle timeout: ffmpeg produces data in bursts, and
   # pausing between bursts is normal. The frontend watchdog detects
   # true playback stalls (video element buffer ran dry) — the backend
@@ -118,12 +124,14 @@ class TranscodeService
     "TURKISH" => %w[tur tr turkish],
     "SWEDISH" => %w[swe sv swedish]
   }.freeze
-  # Cache probe results to avoid repeated ffprobe round-trips for the same URL.
-  # Key: input_url, Value: { duration:, video_stream:, expires_at: }
+  # Cache probes per URL and sanitized request credentials. The short lifetime
+  # avoids repeat ffprobe work across concurrent seeks without sharing media
+  # metadata between users authenticated to the same URL.
   @probe_cache = {}
-  PROBE_CACHE_TTL = 600 # 10 minutes — repeated seeks to the same URL
-  # (common during a viewing session) should hit cache, not re-probe.
-  PROBE_CACHE_MAX_SIZE = 500 # 500 entries across all users/content
+  @probe_cache_mutex = Mutex.new
+  @probe_inflight = {}
+  PROBE_CACHE_TTL = 60
+  PROBE_CACHE_MAX_SIZE = 500
 
   class TranscodeError < StandardError; end
 
@@ -272,20 +280,13 @@ class TranscodeService
   end
 
   # Spawns a subprocess from the given command array, streams its stdout
-  # to the block, and enforces first-data timeout.  Raises TranscodeError
-  # if the process exits without producing data.
+  # to the block, and enforces first-data timeout. Raises TranscodeError if
+  # the process exits without producing data.
   #
-  # Uses a Tempfile on disk as an unlimited buffer between ffmpeg's stdout
-  # and the HTTP response.  A reader thread reads from ffmpeg and writes
-  # to the file; the main thread reads from the file and yields to the
-  # block (response.stream.write).
-  #
-  # This prevents backpressure from killing the upstream connection.
-  # When the browser pauses reading (its internal media buffer is full),
-  # response.stream.write blocks, but the reader thread keeps reading
-  # from ffmpeg and writing to the file.  ffmpeg never blocks on stdout,
-  # so it keeps reading from the upstream — the connection stays alive.
-  # The file grows on disk (unlimited buffer) until the browser resumes.
+  # A bounded Tempfile ring sits between ffmpeg and the HTTP response. The
+  # reader only drains ffmpeg while less than FMP4_SPOOL_HIGH_WATER_BYTES are
+  # pending; a blocked response writer therefore backpressures the pipe rather
+  # than allowing the spool to grow without limit.
   def self.transcode_to_fmp4_internal(cmd, &block)
     rd, wr = IO.pipe
     err_rd, err_wr = IO.pipe
@@ -299,78 +300,94 @@ class TranscodeService
     rescue EOFError, IOError, Errno::EBADF
     end
 
-    # Disk-based buffer: reader thread writes ffmpeg output to a Tempfile,
-    # main thread reads from it.  File position is managed explicitly
-    # (write_pos / read_pos) under a mutex so concurrent read/write don't
-    # corrupt each other's file position.
+    # write_pos/read_pos are monotonic logical positions. Their modulo high
+    # water mark is the physical offset in the Tempfile, making the file a
+    # disk-backed ring that never grows past the configured limit.
     buffer = Tempfile.create("streamvault")
     buffer.binmode
+    buffer_path = buffer.path
     write_pos = 0
     read_pos = 0
     eof = false
+    cancelled = false
     mutex = Mutex.new
     cv = ConditionVariable.new
 
     reader_thread = Thread.new do
       begin
         loop do
-          chunk = rd.readpartial(131_072)
-          mutex.synchronize do
-            buffer.pos = write_pos
-            buffer.write(chunk)
-            write_pos += chunk.bytesize
-            cv.signal
+          read_size = mutex.synchronize do
+            while !cancelled && write_pos - read_pos >= FMP4_SPOOL_HIGH_WATER_BYTES
+              cv.wait(mutex)
+            end
+
+            unless cancelled
+              available_capacity = FMP4_SPOOL_HIGH_WATER_BYTES - (write_pos - read_pos)
+              physical_capacity = FMP4_SPOOL_HIGH_WATER_BYTES - (write_pos % FMP4_SPOOL_HIGH_WATER_BYTES)
+              [ FMP4_SPOOL_CHUNK_BYTES, available_capacity, physical_capacity ].min
+            end
           end
+          break unless read_size
+
+          chunk = rd.readpartial(read_size)
+          discard_chunk = mutex.synchronize do
+            if cancelled
+              true
+            else
+              buffer.pos = write_pos % FMP4_SPOOL_HIGH_WATER_BYTES
+              buffer.write(chunk)
+              write_pos += chunk.bytesize
+              cv.signal
+              false
+            end
+          end
+          break if discard_chunk
         end
       rescue EOFError, IOError, Errno::EBADF
+      ensure
         mutex.synchronize do
           eof = true
-          cv.signal
+          cv.broadcast
         end
       end
     end
 
     begin
-      produced_output = false
       total_bytes = 0
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      # Wait for first data with timeout.  Poll the write_pos instead of
-      # using cv.wait — avoids a race where cv.wait returns spuriously and
-      # the timeout fires before the reader thread has a chance to read.
       deadline = start_time + FIRST_DATA_TIMEOUT_SECONDS
       loop do
-        done = false
-        mutex.synchronize { done = (write_pos > 0 || eof) }
-        break if done
+        first_data_or_eof = mutex.synchronize { write_pos.positive? || eof }
+        break if first_data_or_eof
         if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
           raise TranscodeError, "FFmpeg timed out after #{FIRST_DATA_TIMEOUT_SECONDS}s waiting for first data. #{stderr_summary(stderr_buf)}"
         end
         sleep 0.05
       end
 
-      if eof && write_pos == 0
+      exited_without_output = mutex.synchronize { eof && write_pos.zero? }
+      if exited_without_output
         raise TranscodeError, "FFmpeg exited without producing output. #{stderr_summary(stderr_buf)}"
       end
 
-      # Read from the file and yield to the block.  When the reader
-      # catches up to the writer, wait for more data.  The yield
-      # (response.stream.write) may block when the browser pauses —
-      # that's fine, the reader thread keeps buffering to the file.
       loop do
         chunk = nil
+        chunk_end = nil
         done = false
         mutex.synchronize do
-          while read_pos >= write_pos && !eof
+          while read_pos >= write_pos && !eof && !cancelled
             cv.wait(mutex)
           end
+
           if read_pos < write_pos
             available = write_pos - read_pos
-            read_size = [ available, 131_072 ].min
-            buffer.pos = read_pos
+            physical_available = FMP4_SPOOL_HIGH_WATER_BYTES - (read_pos % FMP4_SPOOL_HIGH_WATER_BYTES)
+            read_size = [ available, FMP4_SPOOL_CHUNK_BYTES, physical_available ].min
+            buffer.pos = read_pos % FMP4_SPOOL_HIGH_WATER_BYTES
             chunk = buffer.read(read_size)
-            read_pos += read_size
-          elsif eof
+            chunk_end = read_pos + chunk.bytesize if chunk
+          else
             done = true
           end
         end
@@ -378,24 +395,38 @@ class TranscodeService
         break if done
         next if chunk.nil? || chunk.empty?
 
+        # Do not release the ring slot until the response write completes.
+        # A blocked consumer must keep ffmpeg backpressured at the high-water
+        # mark, rather than letting a pre-yield read hide unconsumed bytes.
         yield chunk
+        mutex.synchronize do
+          read_pos = chunk_end
+          cv.broadcast
+        end
         total_bytes += chunk.bytesize
-        produced_output = true
       end
 
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
       rate_kbps = elapsed.positive? ? (total_bytes * 8 / 1000.0 / elapsed).round : 0
       Rails.logger.info("[Transcode] ffmpeg finished: #{total_bytes} bytes in #{elapsed.round(1)}s (#{rate_kbps} kbps)") if defined?(Rails)
     ensure
-      reader_thread.kill
-      reader_thread.join(1)
+      # Wake a reader that is waiting for spool capacity before closing its
+      # pipe and stopping ffmpeg. This order prevents cancellation from
+      # stranding a thread behind the condition variable.
+      mutex.synchronize do
+        cancelled = true
+        cv.broadcast
+      end
+      rd.close unless rd.closed?
       kill_process_group(pid)
+      reader_thread.join(SHUTDOWN_GRACE_SECONDS)
+      reader_thread.kill if reader_thread.alive?
+      reader_thread.join
       stderr_thread.kill
       stderr_thread.join(1)
-      rd.close
-      err_rd.close
+      err_rd.close unless err_rd.closed?
       buffer.close
-      File.delete(buffer.path) rescue nil
+      File.delete(buffer_path) rescue nil
     end
   end
   private_class_method :transcode_to_fmp4_internal
@@ -406,55 +437,53 @@ class TranscodeService
   # This is called by the player via AJAX (/transcode/duration) — it's
   # non-blocking, the video plays while the probe runs in the background.
   def self.probe_duration(input_url, headers: {})
-    cached = cache_get(input_url)
-    return cached[:duration] if cached && cached[:duration]
+    with_probe_single_flight(input_url, headers: headers, field: :duration) do
+      header_str = ffmpeg_headers(headers)
+      cmd = [ FFPROBE_PATH, "-v", "error" ]
+      cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
+      cmd += [ "-show_entries", "format=duration:stream=duration:format_tags=DURATION:stream_tags=DURATION",
+              "-of", "json",
+              input_url ]
 
-    header_str = ffmpeg_headers(headers)
+      result = capture_command(cmd, timeout_seconds: 10)
+      return 0 if result.timed_out || !result.status&.success?
 
-    cmd = [ FFPROBE_PATH, "-v", "error" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [ "-show_entries", "format=duration:stream=duration:format_tags=DURATION:stream_tags=DURATION",
-            "-of", "json",
-            input_url ]
-
-    result = capture_command(cmd, timeout_seconds: 10)
-    return 0 if result.timed_out || !result.status&.success?
-
-    duration = extract_probe_duration(result.stdout)
-    cache_store(input_url, duration: duration)
-    duration
+      duration = extract_probe_duration(result.stdout)
+      cache_store(input_url, headers: headers, duration: duration)
+      duration
+    end
   rescue StandardError
     0
   end
 
   def self.probe_media_tracks(input_url, headers: {})
-    cached = cache_get(input_url)
-    return cached[:media_tracks] if cached && cached[:media_tracks]
+    with_probe_single_flight(input_url, headers: headers, field: :media_tracks) do
+      header_str = ffmpeg_headers(headers)
+      cmd = [ FFPROBE_PATH, "-v", "error" ]
+      cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
+      cmd += [
+        "-show_entries",
+        "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke",
+        "-of",
+        "json",
+        input_url
+      ]
 
-    header_str = ffmpeg_headers(headers)
-    cmd = [ FFPROBE_PATH, "-v", "error" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [
-      "-show_entries",
-      "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke",
-      "-of",
-      "json",
-      input_url
-    ]
-
-    result = capture_command(cmd, timeout_seconds: 10)
-    if result.status&.success?
-      tracks = extract_media_tracks(result.stdout)
-      cache_store(
-        input_url,
-        media_tracks: tracks,
-        subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
-      )
-    else
-      tracks = empty_media_tracks
-      cache_store(input_url, media_tracks: tracks, subtitle_stream_start_times: {})
+      result = capture_command(cmd, timeout_seconds: 10)
+      if result.status&.success?
+        tracks = extract_media_tracks(result.stdout)
+        cache_store(
+          input_url,
+          headers: headers,
+          media_tracks: tracks,
+          subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
+        )
+      else
+        tracks = empty_media_tracks
+        cache_store(input_url, headers: headers, media_tracks: tracks, subtitle_stream_start_times: {})
+      end
+      tracks
     end
-    tracks
   rescue StandardError
     empty_media_tracks
   end
@@ -473,8 +502,8 @@ class TranscodeService
   end
   private_class_method :extract_subtitle_stream_start_times
 
-  def self.cached_subtitle_stream_start_time(input_url, stream_index)
-    start_time = cache_get(input_url)&.dig(:subtitle_stream_start_times, stream_index)
+  def self.cached_subtitle_stream_start_time(input_url, stream_index, headers: {})
+    start_time = cache_get(input_url, headers: headers)&.dig(:subtitle_stream_start_times, stream_index)
     start_time.is_a?(Numeric) && start_time.finite? ? start_time : 0
   end
   private_class_method :cached_subtitle_stream_start_time
@@ -500,7 +529,7 @@ class TranscodeService
     end
 
     track = probe_media_tracks(input_url, headers: headers)[:subtitles].find { |subtitle| subtitle[:index] == stream_index }
-    subtitle_stream_start_time = cached_subtitle_stream_start_time(input_url, stream_index)
+    subtitle_stream_start_time = cached_subtitle_stream_start_time(input_url, stream_index, headers: headers)
 
     unless track
       result = subtitle_result(:unsupported_track, diagnostic: "subtitle stream was not found")
@@ -1238,23 +1267,22 @@ class TranscodeService
   private_class_method :empty_media_tracks
 
   def self.probe_video_stream(input_url, headers: {})
-    cached = cache_get(input_url)
-    return cached[:video_stream] if cached&.key?(:video_stream)
+    with_probe_single_flight(input_url, headers: headers, field: :video_stream) do
+      header_str = ffmpeg_headers(headers)
+      cmd = [ FFPROBE_PATH, "-v", "error" ]
+      cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
+      cmd += [
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames",
+        "-of", "json",
+        input_url
+      ]
 
-    header_str = ffmpeg_headers(headers)
-    cmd = [ FFPROBE_PATH, "-v", "error" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [
-      "-select_streams", "v:0",
-      "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames",
-      "-of", "json",
-      input_url
-    ]
-
-    result = capture_command(cmd, timeout_seconds: 10)
-    stream = result.status&.success? ? extract_video_stream(result.stdout) : {}
-    cache_store(input_url, video_stream: stream)
-    stream
+      result = capture_command(cmd, timeout_seconds: 10)
+      stream = result.status&.success? ? extract_video_stream(result.stdout) : {}
+      cache_store(input_url, headers: headers, video_stream: stream)
+      stream
+    end
   rescue StandardError
     {}
   end
@@ -1381,42 +1409,86 @@ class TranscodeService
   private_class_method :valid_probe_duration?
 
   # ── Probe cache ───────────────────────────────────────────────────
-  # Thread-safe in-memory cache shared within a Puma worker.
-  # Multiple workers each maintain their own cache (acceptable tradeoff
-  # vs. the latency of a Redis round-trip on every probe).
+  # Thread-safe in-memory cache shared within a Puma worker. Cache keys hash
+  # the URL plus sanitized request headers, so a result obtained with one
+  # caller's bearer token or cookie is never returned to another caller.
+  def self.probe_cache_key(url, headers)
+    header_identity = ffmpeg_headers(headers).split("\r\n").sort.join("\r\n")
+    Digest::SHA256.hexdigest("#{url}\0#{header_identity}")
+  end
+  private_class_method :probe_cache_key
 
-  @probe_cache_mutex = Mutex.new
+  def self.cache_entry_for(cache_key)
+    entry = @probe_cache[cache_key]
+    return nil unless entry
 
-  def self.cache_get(url)
-    @probe_cache_mutex.synchronize do
-      entry = @probe_cache[url]
-      return nil unless entry
-      # Use monotonic clock for expiry — wall-clock (Time.now) can jump
-      # backward on NTP steps, making entries immortal until the clock
-      # catches up.  The rest of the file uses CLOCK_MONOTONIC for
-      # deadlines; the cache was the odd one out.
-      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > entry[:expires_at]
-        @probe_cache.delete(url)
-        return nil
-      end
-      entry
+    if Process.clock_gettime(Process::CLOCK_MONOTONIC) > entry[:expires_at]
+      @probe_cache.delete(cache_key)
+      return nil
     end
+    entry
+  end
+  private_class_method :cache_entry_for
+
+  def self.cache_get(url, headers: {})
+    cache_key = probe_cache_key(url, headers)
+    @probe_cache_mutex.synchronize { cache_entry_for(cache_key) }
   end
   private_class_method :cache_get
 
-  def self.cache_store(url, **fields)
+  def self.cache_store(url, headers: {}, **fields)
+    cache_key = probe_cache_key(url, headers)
     @probe_cache_mutex.synchronize do
-      while @probe_cache.size >= PROBE_CACHE_MAX_SIZE
-        oldest_key = @probe_cache.min_by { |_, entry| entry[:expires_at] }&.first
-        break unless oldest_key
-        @probe_cache.delete(oldest_key)
+      unless @probe_cache.key?(cache_key)
+        while @probe_cache.size >= PROBE_CACHE_MAX_SIZE
+          oldest_key = @probe_cache.min_by { |_, entry| entry[:expires_at] }&.first
+          break unless oldest_key
+          @probe_cache.delete(oldest_key)
+        end
       end
+
       now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      existing = @probe_cache[url] || { expires_at: now + PROBE_CACHE_TTL }
-      @probe_cache[url] = existing.merge(fields).merge(expires_at: now + PROBE_CACHE_TTL)
+      existing = @probe_cache[cache_key] || { expires_at: now + PROBE_CACHE_TTL }
+      @probe_cache[cache_key] = existing.merge(fields).merge(expires_at: now + PROBE_CACHE_TTL)
     end
   end
   private_class_method :cache_store
+
+  # Only one caller may perform a missing probe field for an authenticated
+  # input at a time. Different fields remain independent so the video and
+  # track probes in command construction can still run in parallel.
+  def self.with_probe_single_flight(input_url, headers:, field:)
+    cache_key = probe_cache_key(input_url, headers)
+    flight_key = [ cache_key, field ]
+    owner = false
+    flight = nil
+
+    until owner
+      @probe_cache_mutex.synchronize do
+        entry = cache_entry_for(cache_key)
+        return entry[field] if entry&.key?(field)
+
+        flight = @probe_inflight[flight_key]
+        if flight
+          flight.wait(@probe_cache_mutex)
+        else
+          flight = ConditionVariable.new
+          @probe_inflight[flight_key] = flight
+          owner = true
+        end
+      end
+    end
+
+    yield
+  ensure
+    if owner
+      @probe_cache_mutex.synchronize do
+        @probe_inflight.delete(flight_key)
+        flight.broadcast
+      end
+    end
+  end
+  private_class_method :with_probe_single_flight
 
   def self.ffmpeg_headers(headers)
     headers.filter_map do |key, value|

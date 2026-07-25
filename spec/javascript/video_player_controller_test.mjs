@@ -654,3 +654,301 @@ test("clearing subtitle cues invalidates an old playback hold", () => {
   assert.equal(player.subtitlePlaybackHoldToken, null)
   assert.equal(played, 0)
 })
+
+test("source selection starts from core tracks before optional external subtitle discovery", async () => {
+  const player = new VideoPlayerController()
+  const events = []
+  const previousFetch = context.fetch
+  player.streamingUrlValue = "/transcode?url=https%3A%2F%2Fexample.test%2Fmovie.mp4"
+  player.hasTracksUrlValue = true
+  player.tracksUrlValue = "/transcode/tracks"
+  player.mseSupported = true
+  player.isIOS = () => false
+  player.extractRawUrl = () => "https://example.test/movie.mp4"
+  player.addContentMetadataParams = () => {}
+  player.renderTrackControls = () => {}
+  player.renderSubtitleControls = () => {}
+  player.directPlayEligible = () => true
+  player.startDirectPlay = () => { events.push("direct") }
+  player.currentPlaybackPosition = () => 0
+
+  context.fetch = async (path) => {
+    const includeExternal = new URL(path, "https://streamvault.test").searchParams.get("include_external_subtitles")
+    events.push(includeExternal === "0" ? "core" : "external")
+    return {
+      ok: true,
+      json: async () => includeExternal === "0"
+        ? {
+            audio: [{ index: 0, language: "EN", default: true }],
+            subtitles: [{ index: 1, label: "Embedded", text_supported: true }],
+            direct_playable: true
+          }
+        : {
+            subtitles: [
+              { index: 1, label: "Embedded", text_supported: true },
+              { index: "external:subdl:english", label: "English · SubDL", text_supported: true, external: true }
+            ]
+          }
+    }
+  }
+
+  try {
+    await player.ensureVideoSource()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.deepEqual(events, ["core", "direct", "external"])
+    assert.equal(Array.from(player.subtitleTracks, (track) => track.index).join(","), "1,external:subdl:english")
+  } finally {
+    context.fetch = previousFetch
+  }
+})
+
+test("stale MSE callbacks and reader data cannot mutate a replacement pipeline", async () => {
+  const player = new VideoPlayerController()
+  const oldMediaSource = {}
+  const oldSourceBuffer = { updating: false, buffered: { length: 0 } }
+  const newMediaSource = {}
+  const newSourceBuffer = { updating: false, buffered: { length: 0 } }
+  const previousFetch = context.fetch
+  let resolveRead
+  player.msePipelineGeneration = 1
+  player.mediaSource = oldMediaSource
+  player.sourceBuffer = oldSourceBuffer
+  player.bufferQueue = []
+  player.directPlayActive = false
+  player.hlsPlaybackActive = false
+  player.hlsSessionId = null
+  player.startStallWatchdog = () => {}
+  player.handlePrematureStreamEnd = () => {}
+
+  context.fetch = async () => ({
+    ok: true,
+    body: {
+      getReader: () => ({ read: () => new Promise((resolve) => { resolveRead = resolve }) })
+    }
+  })
+
+  try {
+    const fetchPromise = player.startStreamingFetch("/transcode", 1, oldMediaSource, oldSourceBuffer)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    player.msePipelineGeneration = 2
+    player.mediaSource = newMediaSource
+    player.sourceBuffer = newSourceBuffer
+    player.bufferQueue = ["new-pipeline-fragment"]
+    player.onBufferUpdateEnd(1, oldMediaSource, oldSourceBuffer)
+    player.queueBufferChunk(new Uint8Array([0, 0, 0, 8, 109, 111, 111, 118]).buffer, 1, oldMediaSource, oldSourceBuffer)
+    assert.equal(typeof resolveRead, "function")
+    resolveRead({ done: false, value: new Uint8Array([0, 0, 0, 8, 109, 111, 111, 118]) })
+    await fetchPromise
+
+    assert.deepEqual(player.bufferQueue, ["new-pipeline-fragment"])
+    assert.equal(player.fmp4BufferSize || 0, 0)
+  } finally {
+    context.fetch = previousFetch
+  }
+})
+
+test("MSE retries the rejected quota fragment after eviction and bounds reader backlog", async () => {
+  const player = new VideoPlayerController()
+  let retainedStart = 0
+  let removals = 0
+  const fragment = new Uint8Array([7, 8, 9]).buffer
+  const attempts = []
+  const sourceBuffer = {
+    updating: false,
+    buffered: {
+      get length() { return 1 },
+      start: () => retainedStart,
+      end: () => 100
+    },
+    appendBuffer(data) {
+      attempts.push(data)
+      if (attempts.length === 1) {
+        const error = new Error("quota")
+        error.name = "QuotaExceededError"
+        throw error
+      }
+    },
+    remove() {
+      removals += 1
+      retainedStart = 10
+    }
+  }
+  const mediaSource = {}
+  player.msePipelineGeneration = 1
+  player.mediaSource = mediaSource
+  player.sourceBuffer = sourceBuffer
+  player.bufferQueue = [fragment]
+  player.directPlayActive = false
+  player.hlsPlaybackActive = false
+  player.hlsSessionId = null
+  player.videoTarget = { currentTime: 40, ended: false, play: () => Promise.resolve() }
+  player.userPaused = true
+  player.startStallWatchdog = () => {}
+
+  player.flushBufferQueue(1, mediaSource, sourceBuffer)
+  assert.equal(removals, 1)
+  assert.equal(player.bufferQueue.length, 1)
+  assert.equal(player.bufferQueue[0], fragment)
+
+  player.onBufferUpdateEnd(1, mediaSource, sourceBuffer)
+  assert.equal(attempts.length, 2)
+  assert.equal(attempts[0], fragment)
+  assert.equal(attempts[1], fragment)
+  assert.equal(player.bufferQueue.length, 0)
+
+  player.bufferQueue = Array.from({ length: 8 }, () => fragment)
+  const capacity = player.waitForMseBacklogCapacity(1, mediaSource, sourceBuffer)
+  let capacityResolved = false
+  capacity.then(() => { capacityResolved = true })
+  await Promise.resolve()
+  assert.equal(capacityResolved, false)
+
+  player.bufferQueue.pop()
+  player.releaseMseBacklogWaiters()
+  assert.equal(await capacity, true)
+})
+
+test("MSE starts at the initial 10 second budget and preserves pause and seek guards", () => {
+  const player = new VideoPlayerController()
+  let plays = 0
+  player.videoTarget = {
+    currentTime: 0,
+    ended: false,
+    play: () => { plays += 1; return Promise.resolve() }
+  }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 10 } }
+  player.playbackStarted = false
+  player.userPaused = false
+  player.isSeeking = false
+
+  player.maybeStartPlayback()
+  assert.equal(plays, 1)
+  assert.equal(player.playbackStarted, true)
+
+  player.playbackStarted = false
+  player.sourceBuffer.buffered.end = () => 30
+  player.userPaused = true
+  player.maybeStartPlayback()
+  assert.equal(plays, 1)
+
+  player.userPaused = false
+  player.isSeeking = true
+  player.maybeStartPlayback()
+  assert.equal(plays, 1)
+})
+
+test("MSE recovery budget survives raw network data and resets only when playback is ready", async () => {
+  const player = new VideoPlayerController()
+  const mediaSource = {}
+  const sourceBuffer = { updating: false, appendBuffer() {}, buffered: { length: 1, start: () => 0, end: () => 3 } }
+  const previousFetch = context.fetch
+  let reads = 0
+  player.mediaSource = mediaSource
+  player.sourceBuffer = sourceBuffer
+  player.directPlayActive = false
+  player.hlsPlaybackActive = false
+  player.hlsSessionId = null
+  player.streamRecoveryAttempts = 2
+  player.streamRecoveryActive = true
+  player.startStallWatchdog = () => {}
+  player.armBufferAheadDeadline = () => {}
+  player.handlePrematureStreamEnd = () => {}
+  player.bufferQueue = []
+  context.fetch = async () => ({
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => reads++ === 0
+          ? { done: false, value: new Uint8Array([0, 0, 0, 8, 109, 111, 111, 118]) }
+          : { done: true }
+      })
+    }
+  })
+
+  try {
+    await player.startStreamingFetch("/transcode", 1, mediaSource, sourceBuffer)
+    assert.equal(player.streamRecoveryAttempts, 2)
+    assert.equal(player.streamRecoveryActive, true)
+
+    player.videoTarget = {
+      paused: false,
+      currentTime: 0,
+      buffered: { length: 1, start: () => 0, end: () => 3 }
+    }
+    player.hideStartupOverlay = () => {}
+    player.hideSeekingOverlay = () => {}
+    player.stopProgressWatchdog = () => {}
+    player.startProgressWatchdog = () => {}
+    player.clearRebufferTimer = () => {}
+    player.clearStallWatchdog = () => {}
+    player.isSeeking = false
+    player.onVideoReady()
+
+    assert.equal(player.streamRecoveryAttempts, 0)
+    assert.equal(player.streamRecoveryActive, false)
+  } finally {
+    context.fetch = previousFetch
+  }
+})
+
+test("a newer HLS seek aborts stale bootstrap work and stops its late session", async () => {
+  const player = new VideoPlayerController()
+  const previousFetch = context.fetch
+  const previousSetTimeout = context.setTimeout
+  const stoppedSessions = []
+  let starts = 0
+  let firstStartResponse
+  let firstSignal
+  player.videoTarget = {
+    pause() {},
+    load() {},
+    play: () => Promise.resolve(),
+    addEventListener() {},
+    removeEventListener() {}
+  }
+  player.element = { dataset: {} }
+  player.directUrlValue = "https://example.test/movie.mkv"
+  player.clearSubtitleCues = () => {}
+  player.reloadTextSubtitlesAt = () => {}
+  player.hideSeekingOverlay = () => {}
+  player.hlsPlaybackToken = 0
+  player.hlsSessionId = null
+  player.hlsPlaybackActive = true
+  testDocument.querySelector = () => null
+  player.stopHlsSessionById = async (sessionId) => { stoppedSessions.push(sessionId) }
+  context.setTimeout = () => ({})
+  context.fetch = (path, options = {}) => {
+    if (path === "/hls/start") {
+      starts += 1
+      if (starts === 1) {
+        firstSignal = options.signal
+        return new Promise((resolve) => { firstStartResponse = resolve })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ session_id: "latest", playlist_url: "/hls/latest/playlist.m3u8" }) })
+    }
+    if (path === "/hls/latest/playlist.m3u8") {
+      return Promise.resolve({ status: 200, text: async () => "#EXTINF:4,\nsegment-1.ts\n#EXTINF:4,\nsegment-2.ts" })
+    }
+    return Promise.resolve({ ok: true })
+  }
+
+  try {
+    const firstSeek = player.restartHlsSession(100)
+    await new Promise((resolve) => setImmediate(resolve))
+    const secondSeek = player.restartHlsSession(200)
+    await secondSeek
+    firstStartResponse({ ok: true, json: async () => ({ session_id: "late", playlist_url: "/hls/late/playlist.m3u8" }) })
+    await firstSeek
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(firstSignal.aborted, true)
+    assert.equal(player.hlsSessionId, "latest")
+    assert.equal(player.videoTarget.src, "/hls/latest/playlist.m3u8")
+    assert.deepEqual(stoppedSessions, ["late"])
+  } finally {
+    context.fetch = previousFetch
+    context.setTimeout = previousSetTimeout
+  }
+})

@@ -114,6 +114,37 @@ RSpec.describe "Transcode", type: :request do
       expect(response.parsed_body["subtitles"].pluck("index")).to eq([ 2 ])
     end
 
+    it "skips external search for core tracks while preserving embedded tracks and capabilities" do
+      tracks = {
+        audio: [ { index: 1, codec: "aac", language: "ENG", label: "English" } ],
+        subtitles: [
+          { index: 2, language: "ENG", label: "English", text_supported: true, partial: false, quality_score: 0 },
+          { index: 3, language: "ENG", label: "English · PGS", text_supported: false, partial: false, quality_score: 0 }
+        ]
+      }
+      allow(TranscodeService).to receive(:probe_media_tracks).and_return(tracks)
+      allow(TranscodeService).to receive(:probe_video_stream).and_return(
+        codec_name: "h264", width: 3840, height: 2160, pix_fmt: "yuv420p"
+      )
+      expect(ExternalSubtitleService).not_to receive(:search)
+
+      get transcode_tracks_path, params: {
+        url: "https://download.real-debrid.com/d/file123/Inception.mp4",
+        filename: "Inception.mp4",
+        include_external_subtitles: "0"
+      }
+
+      body = response.parsed_body
+      expect(response).to have_http_status(:ok)
+      expect(body["audio"].first["language"]).to eq("ENG")
+      expect(body["subtitles"].pluck("index")).to eq([ 2 ])
+      expect(body["video_codec"]).to eq("h264")
+      expect(body["direct_playable"]).to be(false)
+      expect(body["remux_direct_playable"]).to be(true)
+      expect(body["direct_stream_url"]).to start_with("/direct_stream?url=")
+      expect(body["remux_direct_url"]).to start_with("/transcode?url=")
+    end
+
     it "omits embedded bitmap subtitles that would stall a 4K transcode" do
       tracks = {
         audio: [],

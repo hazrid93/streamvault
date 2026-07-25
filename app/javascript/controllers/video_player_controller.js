@@ -14,6 +14,8 @@ const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const BUFFER_AHEAD_SECONDS = 30
+const INITIAL_MSE_AHEAD_SECONDS = 10
+const MSE_APPEND_BACKLOG_HIGH_WATER = 8
 const BUFFER_AHEAD_MAX_WAIT_MS = 15000
 // After a stall, rebuild a meaningful buffer before resuming so ffmpeg
 // can catch up and transient upstream dips don't cause immediate
@@ -102,6 +104,8 @@ export default class extends Controller {
     this.subtitlePrefetches = new Map()
     this.subtitlePrefetchResults = new Map()
     this.subtitlePlaybackHoldToken = null
+    this.sourceSelectionToken = 0
+    this.pendingExternalSubtitleStream = null
     this.tracksData = null
     this.mediaTracksLoaded = false
     this.directPlayActive = false
@@ -112,6 +116,11 @@ export default class extends Controller {
     this.mediaSource = null
     this.sourceBuffer = null
     this.fetchController = null
+    this.msePipelineGeneration = 0
+    this.bufferQueue = []
+    this.bufferAppending = false
+    this.bufferEvicting = false
+    this.mseBacklogWaiters = []
     this.pendingSeekSeconds = null
     this.stallWatchdogTimer = null
     this.bufferingOverlayTimer = null
@@ -138,6 +147,8 @@ export default class extends Controller {
     this.mseSupported = window.MediaSource && MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E,mp4a.40.2"')
     this.hlsSessionId = null
     this.hlsPlaybackToken = 0
+    this.hlsPlaybackActive = false
+    this.hlsStartAbortController = null
     this.nativeFullscreenActive = false
     this.nativeFullscreenControls = null
     this.nativeFullscreenCueSignature = null
@@ -201,6 +212,8 @@ export default class extends Controller {
   }
 
   disconnect() {
+    this.sourceSelectionToken += 1
+    this.invalidateMsePipeline()
     this.stopHlsSession()
     this.stopProgressTracking()
     // Save progress only if navigateBack hasn't already done it.
@@ -288,22 +301,17 @@ export default class extends Controller {
   }
   async ensureVideoSource() {
     if (!this.streamingUrlValue) return
-    if (this.isIOS()) {
-      // HLS handles media playback on iPhone, but the player still needs
-      // track metadata for its audio/subtitle controls and burn-in choices.
-      await this.loadMediaTracks()
-      this.startHlsPlayback()
-      return
-    }
-    if (!this.mseSupported) {
-      this.videoTarget.src = this.streamingUrlValue
-      return
-    }
-    // Wait for media tracks to determine direct play eligibility.
-    // The probe is cached server-side, so repeated calls after the first
-    // fetch (e.g. reconnects) resolve instantly from the in-memory cache.
+
+    const selectionToken = (this.sourceSelectionToken || 0) + 1
+    this.sourceSelectionToken = selectionToken
     await this.loadMediaTracks()
-    if (this.directPlayEligible()) {
+    if (selectionToken !== this.sourceSelectionToken) return
+
+    if (this.isIOS()) {
+      this.startHlsPlayback()
+    } else if (!this.mseSupported) {
+      this.videoTarget.src = this.streamingUrlValue
+    } else if (this.directPlayEligible()) {
       console.log("[Player] Path: direct play (native <video>, no ffmpeg)")
       this.startDirectPlay()
     } else if (this.remuxDirectEligible()) {
@@ -313,32 +321,70 @@ export default class extends Controller {
       console.log("[Player] Path: MSE/transcode (hardware decode + encode)")
       this.setupMseSource(this.streamingUrlValue)
     }
+
+    // External discovery can take a network round-trip. Source selection
+    // depends only on the cheap embedded-track/capability response, so do
+    // not make startup wait on an optional subtitle search.
+    this.loadInitialTextSubtitles()
+    this.loadExternalSubtitleTracks(selectionToken)
   }
-  setupMseSource(streamUrl) {
-    // Abort current fetch and clear queue
-    this.stopProgressWatchdog()
+
+  loadInitialTextSubtitles() {
+    if (!this.subtitleTracks || !this.textSubtitleSelected()) return
+
+    this.loadSubtitleTrack(this.currentPlaybackPosition(), {
+      durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
+      lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
+      holdPlayback: true
+    })
+  }
+
+  invalidateMsePipeline() {
+    this.msePipelineGeneration = (this.msePipelineGeneration || 0) + 1
+    this.clearStallWatchdog()
     this.clearPlaybackDeadlineTimers()
-    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
+    if (this.bufferingOverlayTimer) clearTimeout(this.bufferingOverlayTimer)
+    this.bufferingOverlayTimer = null
+    if (this.fetchController) this.fetchController.abort()
+    this.fetchController = null
     this.bufferQueue = []
     this.fmp4Buffer = null
     this.fmp4BufferSize = 0
+    this.bufferAppending = false
+    this.bufferEvicting = false
+    const waiters = this.mseBacklogWaiters || []
+    this.mseBacklogWaiters = []
+    waiters.forEach((resolve) => resolve())
+    return this.msePipelineGeneration
+  }
+
+  isMsePipelineCurrent(generation, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    return generation === this.msePipelineGeneration &&
+      this.mediaSource === mediaSource &&
+      this.sourceBuffer === sourceBuffer &&
+      !this.isDirectPlay() &&
+      !this.isHls()
+  }
+
+  setupMseSource(streamUrl) {
+    this.stopProgressWatchdog()
+    this.clearPlaybackDeadlineTimers()
+    const previousMediaSource = this.mediaSource
+    const generation = this.invalidateMsePipeline()
+    if (this.isHls()) this.stopHlsSession()
     this.playbackStarted = false
     this.isStalled = false
     this.userPaused = false
     this.directPlayActive = false
     this.remuxDirectPlay = false
+    this.hlsPlaybackActive = false
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
-    // Clear any stall watchdog from the previous connection so a
-    // pending timer can't fire into the new MSE pipeline.
     this.clearStallWatchdog()
 
-    // Tear down old MediaSource
-    if (this.mediaSource) {
-      if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
-      this.mediaSource = null
-      this.sourceBuffer = null
-    }
+    if (previousMediaSource?.readyState === "open") { try { previousMediaSource.endOfStream() } catch {} }
+    this.mediaSource = null
+    this.sourceBuffer = null
     if (this.videoTarget.src.startsWith("blob:")) URL.revokeObjectURL(this.videoTarget.src)
 
     const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'
@@ -349,13 +395,17 @@ export default class extends Controller {
       return
     }
 
-    this.mediaSource = new MediaSource()
-    this.videoTarget.src = URL.createObjectURL(this.mediaSource)
-    this.mediaSource.addEventListener("sourceopen", () => {
-      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType)
-      this.sourceBuffer.mode = "segments"
-      this.sourceBuffer.addEventListener("updateend", () => this.onBufferUpdateEnd())
-      this.startStreamingFetch(streamUrl)
+    const mediaSource = new MediaSource()
+    this.mediaSource = mediaSource
+    this.videoTarget.src = URL.createObjectURL(mediaSource)
+    mediaSource.addEventListener("sourceopen", () => {
+      if (generation !== this.msePipelineGeneration || this.mediaSource !== mediaSource || this.isDirectPlay() || this.isHls()) return
+      const sourceBuffer = mediaSource.addSourceBuffer(mimeType)
+      if (generation !== this.msePipelineGeneration || this.mediaSource !== mediaSource) return
+      this.sourceBuffer = sourceBuffer
+      sourceBuffer.mode = "segments"
+      sourceBuffer.addEventListener("updateend", () => this.onBufferUpdateEnd(generation, mediaSource, sourceBuffer))
+      this.startStreamingFetch(streamUrl, generation, mediaSource, sourceBuffer)
     }, { once: true })
   }
 
@@ -373,7 +423,7 @@ export default class extends Controller {
   // exist on iPhone Safari, and the native HLS player handles its
   // own buffering and recovery.
   isHls() {
-    return !!this.hlsSessionId
+    return !!this.hlsSessionId || !!this.hlsPlaybackActive
   }
 
   // True when using direct play (native <video> src, no MSE, no ffmpeg).
@@ -503,8 +553,12 @@ export default class extends Controller {
   // browser downloads at network speed.  No ffmpeg, no MSE, no box
   // parser — the browser handles everything natively.
   startDirectPlay() {
+    const previousMediaSource = this.mediaSource
+    if (this.isHls()) this.stopHlsSession()
+    this.invalidateMsePipeline()
     this.directPlayActive = true
     this.remuxDirectPlay = false
+    this.hlsPlaybackActive = false
     this.stopProgressWatchdog()
     this.clearPlaybackDeadlineTimers()
     this.bufferAheadDeadline = null
@@ -514,12 +568,9 @@ export default class extends Controller {
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
 
-    if (this.mediaSource) {
-      if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
-      this.mediaSource = null
-      this.sourceBuffer = null
-    }
-    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
+    if (previousMediaSource?.readyState === "open") { try { previousMediaSource.endOfStream() } catch {} }
+    this.mediaSource = null
+    this.sourceBuffer = null
 
     this.videoTarget.src = this.directStreamUrlValue
     this.videoTarget.load()
@@ -542,8 +593,12 @@ export default class extends Controller {
   // stream and plays it natively — no MSE, no SourceBuffer, no B-frame
   // limitation.  Runs at near network speed — no video re-encode.
   startRemuxDirectPlay() {
+    const previousMediaSource = this.mediaSource
+    if (this.isHls()) this.stopHlsSession()
+    this.invalidateMsePipeline()
     this.directPlayActive = true
     this.remuxDirectPlay = true
+    this.hlsPlaybackActive = false
     this.stopProgressWatchdog()
     this.clearPlaybackDeadlineTimers()
     this.bufferAheadDeadline = null
@@ -553,12 +608,9 @@ export default class extends Controller {
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
 
-    if (this.mediaSource) {
-      if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
-      this.mediaSource = null
-      this.sourceBuffer = null
-    }
-    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
+    if (previousMediaSource?.readyState === "open") { try { previousMediaSource.endOfStream() } catch {} }
+    this.mediaSource = null
+    this.sourceBuffer = null
 
     const remuxUrl = this.buildRemuxDirectUrl()
     this.videoTarget.src = remuxUrl
@@ -598,18 +650,56 @@ export default class extends Controller {
     if (this.burnedSubtitleSelected()) params.set('subtitle_stream', this.selectedSubtitleStream)
   }
 
+  beginHlsOperation() {
+    if (this.hlsStartAbortController) this.hlsStartAbortController.abort()
+    const abortController = new AbortController()
+    this.hlsStartAbortController = abortController
+    const playbackToken = (this.hlsPlaybackToken || 0) + 1
+    this.hlsPlaybackToken = playbackToken
+    return { playbackToken, abortController }
+  }
+
+  isHlsOperationCurrent(playbackToken, abortController) {
+    return playbackToken === this.hlsPlaybackToken &&
+      this.hlsStartAbortController === abortController &&
+      !abortController.signal.aborted
+  }
+
+  supersedeHlsSession() {
+    const sessionId = this.hlsSessionId
+    this.hlsSessionId = null
+    if (this.hlsStartAbortController) this.hlsStartAbortController.abort()
+    this.hlsPlaybackToken = (this.hlsPlaybackToken || 0) + 1
+    if (sessionId) this.stopHlsSessionById(sessionId)
+  }
+
+  async stopStaleHlsStartResponse(response) {
+    if (!response?.ok) return
+    try {
+      const data = await response.json()
+      if (data?.session_id) this.stopHlsSessionById(data.session_id)
+    } catch {
+      // A stale or aborted response may not have a readable body.
+    }
+  }
+
   async startHlsPlayback() {
-    if (this.hlsSessionId) this.stopHlsSession()
+    this.supersedeHlsSession()
+    this.invalidateMsePipeline()
+    this.hlsPlaybackActive = true
+    this.directPlayActive = false
+    this.remuxDirectPlay = false
     this.stopProgressWatchdog()
     this.clearStallWatchdog()
     this.clearPlaybackDeadlineTimers()
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
     this.isStalled = false
-    const playbackToken = ++this.hlsPlaybackToken
+    const { playbackToken, abortController } = this.beginHlsOperation()
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
       console.warn('HLS: no direct URL available')
+      this.hlsPlaybackActive = false
       return
     }
 
@@ -624,16 +714,21 @@ export default class extends Controller {
       const response = await fetch('/hls/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
-        body: params.toString()
+        body: params.toString(),
+        signal: abortController.signal
       })
-
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
+        await this.stopStaleHlsStartResponse(response)
+        return
+      }
       if (!response.ok) {
+        this.hlsPlaybackActive = false
         console.warn('HLS: start failed', response.status)
         return
       }
 
       const data = await response.json()
-      if (playbackToken !== this.hlsPlaybackToken) {
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
         if (data?.session_id) this.stopHlsSessionById(data.session_id)
         return
       }
@@ -644,8 +739,8 @@ export default class extends Controller {
       // (Accepted) while the playlist isn't ready yet.  This avoids
       // setting a video src that points to a non-existent playlist,
       // which would cause iOS Safari to fail silently.
-      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken)
-      if (playbackToken !== this.hlsPlaybackToken || this.hlsSessionId !== data.session_id) {
+      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken, abortController.signal)
+      if (!this.isHlsOperationCurrent(playbackToken, abortController) || this.hlsSessionId !== data.session_id) {
         if (this.hlsSessionId !== data.session_id && data?.session_id) this.stopHlsSessionById(data.session_id)
         return
       }
@@ -665,6 +760,7 @@ export default class extends Controller {
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
       const p = this.videoTarget.play()
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
       if (p?.catch) p.catch((err) => {
         // iOS autoplay policy may block play() when not in a user
         // gesture context (the async fetch broke the gesture chain).
@@ -672,6 +768,7 @@ export default class extends Controller {
         // gesture needed to start playback.  Keep the spinner visible
         // so the user sees something is loading, and show the spinner
         // again after the tap while play() resolves.
+        if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
         console.warn('HLS: autoplay blocked, showing tap-to-play', err)
         if (this.hasStartupOverlayTarget) {
           this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
@@ -682,6 +779,7 @@ export default class extends Controller {
           if (label) label.textContent = "Tap to play"
           if (sub) sub.textContent = "Tap anywhere to start"
           const onTap = (e) => {
+            if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
             e.preventDefault()
             e.stopPropagation()
             // Show a loading spinner immediately so the user sees
@@ -706,7 +804,9 @@ export default class extends Controller {
         }
       })
     } catch (e) {
+      if (!this.isHlsOperationCurrent(playbackToken, abortController) || e.name === "AbortError") return
       console.warn('HLS: start error', e)
+      this.hlsPlaybackActive = false
     }
   }
 
@@ -719,8 +819,8 @@ export default class extends Controller {
   // playback starts with a single segment buffer and the transcode
   // throughput dips.  Falls back to 1 segment if the timeout is nearly
   // reached, so a slow source doesn't fail entirely.
-  async waitForPlaylist(playlistUrl, playbackToken = this.hlsPlaybackToken) {
-    if (playbackToken !== this.hlsPlaybackToken) return false
+  async waitForPlaylist(playlistUrl, playbackToken = this.hlsPlaybackToken, signal = null) {
+    if (playbackToken !== this.hlsPlaybackToken || signal?.aborted) return false
     const maxAttempts = 150  // 150 × 200ms = 30s max wait
     const pollInterval = 200
     const minSegments = 2
@@ -730,8 +830,8 @@ export default class extends Controller {
       try {
         // GET (not HEAD) so we can count segments in the playlist body.
         // The playlist is small (a few KB), so fetching it is cheap.
-        const res = await fetch(playlistUrl)
-        if (playbackToken !== this.hlsPlaybackToken) return false
+        const res = await fetch(playlistUrl, signal ? { signal } : undefined)
+        if (playbackToken !== this.hlsPlaybackToken || signal?.aborted) return false
         if (res.status === 424) {
           try {
             const body = await res.json()
@@ -741,24 +841,42 @@ export default class extends Controller {
         }
         if (res.status === 200) {
           const text = await res.text()
+          if (playbackToken !== this.hlsPlaybackToken || signal?.aborted) return false
           const segmentCount = (text.match(/#EXTINF/g) || []).length
           const minNeeded = i >= fallbackAttempts ? 1 : minSegments
           if (segmentCount >= minNeeded) return true
         }
         // 202 (Accepted) — playlist not ready yet, keep polling
       } catch {
+        if (signal?.aborted) return false
         // network error — keep polling
       }
-      await new Promise(resolve => setTimeout(resolve, pollInterval))
+      if (!await this.waitForHlsPollInterval(pollInterval, signal)) return false
     }
     console.warn('HLS: playlist poll timed out after', maxAttempts * pollInterval / 1000, 's')
     return false
+  }
+
+  waitForHlsPollInterval(delay, signal) {
+    if (signal?.aborted) return Promise.resolve(false)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort)
+        resolve(true)
+      }, delay)
+      const onAbort = () => {
+        clearTimeout(timer)
+        resolve(false)
+      }
+      signal?.addEventListener("abort", onAbort, { once: true })
+    })
   }
 
   // Restart the HLS transcode from a new position (seek).
   // Stops the current session, starts a new one with the updated
   // start_seconds, and swaps the video source to the new playlist.
   async restartHlsSession(startSeconds) {
+    this.hlsPlaybackActive = true
     this.startSecondsValue = startSeconds
     this.element.dataset.videoPlayerStartSecondsValue = startSeconds.toString()
     this.stopProgressWatchdog()
@@ -772,16 +890,16 @@ export default class extends Controller {
     this.clearSubtitleCues()
     this.reloadTextSubtitlesAt(startSeconds)
 
-    // Fire the stop request without awaiting — it runs in parallel
-    // with the new session start.  The old ffmpeg process is killed
-    // server-side; we don't need to wait for that before starting
-    // the new transcode.
-    this.stopHlsSession()
-    const playbackToken = ++this.hlsPlaybackToken
+    // A new user seek supersedes every bootstrap/poll operation that came
+    // before it. Stop a known session now; a stale start response stops its
+    // own newly-created session once it arrives.
+    this.supersedeHlsSession()
+    const { playbackToken, abortController } = this.beginHlsOperation()
 
     const directUrl = this.directUrlValue || this.extractRawUrl()
     if (!directUrl) {
       console.warn('HLS seek: no direct URL available')
+      this.hlsPlaybackActive = false
       this.isSeeking = false
       this.hideSeekingOverlay()
       return
@@ -789,36 +907,37 @@ export default class extends Controller {
 
     try {
       const params = new URLSearchParams({ url: directUrl })
-      if (startSeconds > 0) {
-        params.set('start_seconds', startSeconds)
-      }
+      if (startSeconds > 0) params.set('start_seconds', startSeconds)
       this.appendSelectedHlsTracks(params)
 
       const csrfToken = document.querySelector("meta[name='csrf-token']")?.content
       const response = await fetch('/hls/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
-        body: params.toString()
+        body: params.toString(),
+        signal: abortController.signal
       })
-
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
+        await this.stopStaleHlsStartResponse(response)
+        return
+      }
       if (!response.ok) {
         console.warn('HLS seek: start failed', response.status)
+        this.hlsPlaybackActive = false
         this.isSeeking = false
         this.hideSeekingOverlay()
         return
       }
 
       const data = await response.json()
-      if (playbackToken !== this.hlsPlaybackToken) {
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) {
         if (data?.session_id) this.stopHlsSessionById(data.session_id)
         return
       }
       this.hlsSessionId = data.session_id
 
-      // Wait for the playlist to be ready before swapping the video
-      // source — same as initial playback.
-      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken)
-      if (playbackToken !== this.hlsPlaybackToken || this.hlsSessionId !== data.session_id) {
+      const playlistReady = await this.waitForPlaylist(data.playlist_url, playbackToken, abortController.signal)
+      if (!this.isHlsOperationCurrent(playbackToken, abortController) || this.hlsSessionId !== data.session_id) {
         if (this.hlsSessionId !== data.session_id && data?.session_id) this.stopHlsSessionById(data.session_id)
         return
       }
@@ -830,10 +949,6 @@ export default class extends Controller {
         return
       }
 
-      // Swap to the new playlist.  iOS Safari handles the source
-      // change and starts playing from the beginning of the new
-      // HLS stream (which starts at the seek position thanks to
-      // ffmpeg -ss).
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
       const p = this.videoTarget.play()
@@ -841,24 +956,25 @@ export default class extends Controller {
 
       // Hide the seeking overlay once playback actually starts.
       const onPlaying = () => {
-        if (playbackToken !== this.hlsPlaybackToken) return
+        if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
         this.isSeeking = false
         this.hideSeekingOverlay()
         this.videoTarget.removeEventListener('playing', onPlaying)
       }
       this.videoTarget.addEventListener('playing', onPlaying, { once: true })
 
-      // Safety: hide overlay after 30s even if 'playing' never fires
+      // Safety: hide overlay after 30s even if 'playing' never fires.
       setTimeout(() => {
-        if (playbackToken !== this.hlsPlaybackToken) return
+        if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
         if (this.isSeeking) {
           this.isSeeking = false
           this.hideSeekingOverlay()
         }
       }, 30000)
     } catch (e) {
-      if (playbackToken !== this.hlsPlaybackToken) return
+      if (!this.isHlsOperationCurrent(playbackToken, abortController) || e.name === "AbortError") return
       console.warn('HLS seek: error', e)
+      this.hlsPlaybackActive = false
       this.isSeeking = false
       this.hideSeekingOverlay()
     }
@@ -870,7 +986,10 @@ export default class extends Controller {
   async stopHlsSession() {
     const sessionId = this.hlsSessionId
     this.hlsSessionId = null
-    this.hlsPlaybackToken += 1
+    this.hlsPlaybackActive = false
+    if (this.hlsStartAbortController) this.hlsStartAbortController.abort()
+    this.hlsStartAbortController = null
+    this.hlsPlaybackToken = (this.hlsPlaybackToken || 0) + 1
     if (!sessionId) return
 
     await this.stopHlsSessionById(sessionId)
@@ -889,56 +1008,65 @@ export default class extends Controller {
     }
   }
 
-  async startStreamingFetch(url) {
-    this.fetchController = new AbortController()
-    // Arm the stall watchdog before awaiting the fetch.  If the source
-    // is dead (e.g. an expired RealDebrid link) the server returns a
-    // 502 after its first-data timeout, and the only thing that will
-    // trigger recovery is this watchdog — neither onBufferUpdateEnd nor
-    // a fresh "waiting" event will fire when no data ever arrives.
+  async startStreamingFetch(url, generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
+    const abortController = new AbortController()
+    this.fetchController = abortController
+    // Arm the stall watchdog before awaiting the fetch. If the source is
+    // dead, no append callback will arrive to initiate recovery.
     this.startStallWatchdog()
     try {
-      const response = await fetch(url, { signal: this.fetchController.signal })
+      const response = await fetch(url, { signal: abortController.signal })
+      if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) || this.fetchController !== abortController) return
       if (!response.ok) {
         console.warn("Stream fetch failed:", response.status)
-        // A 502 means ffmpeg couldn't open the source (expired link,
-        // auth failure).  Trigger recovery instead of leaving the
-        // video frozen on "Buffering…".
         this.handleStreamStall()
         return
       }
       const reader = response.body.getReader()
       let firstChunk = true
       while (true) {
-        // No per-chunk timeout: ffmpeg transcodes in bursts, and
-        // pausing between bursts is normal. The stall watchdog on the
-        // video element detects true playback stalls (buffer ran dry
-        // with no new data arriving).
+        // Do not pull unboundedly while SourceBuffer is busy. This keeps
+        // fragments ordered without retaining a second stream's data.
+        if (!await this.waitForMseBacklogCapacity(generation, mediaSource, sourceBuffer)) return
         const { done, value } = await reader.read()
+        if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) || this.fetchController !== abortController) return
         if (done) {
-          // The server closed the response early (e.g. Cloudflare 100s
-          // origin timeout, or ffmpeg exited mid-stream). If the video
-          // is not actually near the end, recover by reconnecting.
           this.handlePrematureStreamEnd()
           break
         }
         if (firstChunk) {
           firstChunk = false
-          this.streamRecoveryAttempts = 0
-          this.streamRecoveryActive = false
-          // Set a deadline: if the buffer-ahead threshold isn't reached
-          // within BUFFER_AHEAD_MAX_WAIT_MS, start playback with whatever
-          // we have — better to play with a small buffer than stall on
-          // a slow source forever.
+          // A network chunk only proves bytes arrived. Recovery credit is
+          // restored by onVideoReady after the media element is playing.
           this.bufferAheadDeadline = Date.now() + BUFFER_AHEAD_MAX_WAIT_MS
           this.armBufferAheadDeadline()
         }
-        this.queueBufferChunk(value)
+        this.queueBufferChunk(value, generation, mediaSource, sourceBuffer)
       }
     } catch (e) {
-      if (e.name === "AbortError") return
+      if (e.name === "AbortError" || !this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) || this.fetchController !== abortController) return
       console.warn("Stream fetch failed:", e)
     }
+  }
+
+  waitForMseBacklogCapacity(generation, mediaSource, sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return Promise.resolve(false)
+    const backlog = this.bufferQueue || (this.bufferQueue = [])
+    if (backlog.length < MSE_APPEND_BACKLOG_HIGH_WATER) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const waiters = this.mseBacklogWaiters || (this.mseBacklogWaiters = [])
+      waiters.push(() => resolve(
+        this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) &&
+        this.bufferQueue.length < MSE_APPEND_BACKLOG_HIGH_WATER
+      ))
+    })
+  }
+
+  releaseMseBacklogWaiters() {
+    const waiters = this.mseBacklogWaiters || []
+    this.mseBacklogWaiters = []
+    waiters.forEach((resolve) => resolve())
   }
 
   // ── Stall watchdog ────────────────────────────────────────────────
@@ -1509,6 +1637,8 @@ export default class extends Controller {
   async reconnectFromCurrentPosition() {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
     const savedAttempts = this.streamRecoveryAttempts
+    const recoveryGeneration = this.msePipelineGeneration
+    this.invalidateMsePipeline()
 
     // Backoff before the 2nd and 3rd reconnect attempts so a transient
     // upstream throttle has time to clear before we hammer the same RD
@@ -1522,6 +1652,7 @@ export default class extends Controller {
     if (savedAttempts >= 2) {
       await this.#sleep(2000)
     }
+    if (recoveryGeneration + 1 !== this.msePipelineGeneration || !this.streamRecoveryActive) return
 
     // Don't show the "Seeking..." overlay for automatic recovery —
     // it sets isSeeking=true which blocks the seek bar and shows a
@@ -1530,7 +1661,6 @@ export default class extends Controller {
     // shown by showBufferingOverlay, which has pointer-events-none).
     // We only set isSeeking + show "Seeking..." for explicit user
     // seeks (performSeek → restartPlaybackAt).
-    this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
     this.startSecondsValue = targetSeconds
     this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
@@ -1577,7 +1707,8 @@ export default class extends Controller {
   // CHUNK_DEMUXER_ERROR_APPEND_FAILED.  This parser accumulates bytes
   // and only feeds complete top-level boxes (or moof+mdat pairs) to
   // appendBuffer, holding back partial boxes until more data arrives.
-  queueBufferChunk(chunk) {
+  queueBufferChunk(chunk, generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
     const chunkArr = new Uint8Array(chunk)
     const newSize = (this.fmp4BufferSize || 0) + chunkArr.byteLength
     if (!this.fmp4Buffer || this.fmp4Buffer.length < newSize) {
@@ -1588,7 +1719,9 @@ export default class extends Controller {
     }
     this.fmp4Buffer.set(chunkArr, this.fmp4BufferSize || 0)
     this.fmp4BufferSize = newSize
-    this.flushBufferQueue()
+    const data = this.extractCompleteBoxes()
+    if (data) this.bufferQueue.push(data)
+    this.flushBufferQueue(generation, mediaSource, sourceBuffer)
   }
 
   // Extract complete top-level boxes from fmp4Buffer.  Each fMP4 box
@@ -1668,51 +1801,52 @@ export default class extends Controller {
     return result.buffer
   }
 
-  flushBufferQueue() {
-    if (this.bufferAppending || !this.sourceBuffer || this.sourceBuffer.updating) return
-    const data = this.extractCompleteBoxes()
+  flushBufferQueue(generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
+    if (this.bufferAppending || sourceBuffer.updating) return
+    const data = this.bufferQueue[0]
     if (!data) return
-    this.bufferAppending = true
+
     try {
-      this.sourceBuffer.appendBuffer(data)
+      sourceBuffer.appendBuffer(data)
+      if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
+      // Remove only after appendBuffer accepts the fragment. A quota retry
+      // must append this exact head entry, not a later fragment.
+      this.bufferQueue.shift()
+      this.bufferAppending = true
+      this.releaseMseBacklogWaiters()
     } catch (e) {
+      if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
       this.bufferAppending = false
       if (e.name === "QuotaExceededError") {
-        this.evictOldBuffer()
+        if (this.bufferEvicting) return
+        this.bufferEvicting = true
+        if (!this.evictOldBuffer(generation, mediaSource, sourceBuffer)) {
+          this.bufferEvicting = false
+          console.warn("appendBuffer quota exceeded with no retained data to evict")
+          this.handleStreamStall()
+        }
       } else {
-        // Any other append error (InvalidStateError from a closed
-        // MediaSource, parse error on a malformed fragment) means the
-        // current MSE pipeline is broken. Clear the queue and trigger
-        // a full reconnect from the current playback position.
+        // Any other append error means this MSE pipeline is broken. The
+        // generation guard ensures its recovery cannot tear down a newer one.
         console.warn("appendBuffer failed, recovering:", e.name)
-        this.fmp4Buffer = null; this.fmp4BufferSize = 0
         this.handleStreamStall()
       }
     }
   }
 
-  onBufferUpdateEnd() {
+  onBufferUpdateEnd(generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
     this.bufferAppending = false
-    this.evictOldBuffer()
-    // Data arrived — the fetch is alive.  Restart the stall watchdog.
-    // If the video is paused (rebuffering), use the shorter timeout so
-    // trickling data doesn't keep resetting the 60s timer indefinitely —
-    // the rebuffer gate may never reach REBUFFER_AHEAD_SECONDS on a
-    // slow source, and the shorter timeout triggers recovery sooner.
-    // If the video is playing, use the default 60s.
-    // Only use the shorter rebuffer watchdog when the video is actually
-    // waiting on an empty buffer.  While data is trickling in during a
-    // rebuffer, isStalled is still true but the buffer is no longer empty
-    // — using REBUFFER_STALL_TIMEOUT_MS there can trip a spurious stall
-    // right at the 20s boundary of an otherwise-healthy rebuffer.  Gate
-    // on hasBufferedAhead(0.5) so the 20s timer only applies when the
-    // buffer is genuinely dry; otherwise the 60s timer is correct.
+    this.bufferEvicting = false
+    this.evictOldBuffer(generation, mediaSource, sourceBuffer)
+    // Data arrived — the fetch is alive. Restart the stall watchdog.
     const actuallyWaiting = this.isStalled && !this.userPaused && !this.hasBufferedAhead(0.5)
     this.startStallWatchdog(actuallyWaiting ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
     this.maybeHideBufferingOverlay()
-    this.flushBufferQueue()
+    this.flushBufferQueue(generation, mediaSource, sourceBuffer)
   }
 
   // Start (or resume) playback once the buffer holds at least
@@ -1732,11 +1866,10 @@ export default class extends Controller {
 
     const bufferedAhead = this.bufferedAheadOfCurrent()
 
-    // Initial start: wait for the buffer-ahead threshold (or deadline).
     if (this.userPaused || this.isSeeking) return
     if (!this.playbackStarted) {
       const deadlineReached = this.bufferAheadDeadline && Date.now() >= this.bufferAheadDeadline
-      if (bufferedAhead >= BUFFER_AHEAD_SECONDS || deadlineReached) {
+      if (bufferedAhead >= INITIAL_MSE_AHEAD_SECONDS || deadlineReached) {
         this.playbackStarted = true
         this.bufferAheadDeadline = null
         const p = this.videoTarget.play()
@@ -1804,18 +1937,23 @@ export default class extends Controller {
     this.hideSeekingOverlay()
   }
 
-  evictOldBuffer() {
-    if (!this.sourceBuffer || this.sourceBuffer.updating) return
+  evictOldBuffer(generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
+    if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) || sourceBuffer.updating) return false
     const evictBefore = this.videoTarget.currentTime - 30
-    if (evictBefore <= 0) return
-    for (let i = 0; i < this.sourceBuffer.buffered.length; i++) {
-      const start = this.sourceBuffer.buffered.start(i)
-      const end = this.sourceBuffer.buffered.end(i)
+    if (evictBefore <= 0) return false
+    for (let i = 0; i < sourceBuffer.buffered.length; i++) {
+      const start = sourceBuffer.buffered.start(i)
+      const end = sourceBuffer.buffered.end(i)
       if (start < evictBefore) {
-        try { this.sourceBuffer.remove(start, Math.min(end, evictBefore)) } catch {}
-        return
+        try {
+          sourceBuffer.remove(start, Math.min(end, evictBefore))
+          return true
+        } catch {
+          return false
+        }
       }
     }
+    return false
   }
 
   // ── Play / pause ──────────────────────────────────────────────────
@@ -1959,9 +2097,7 @@ export default class extends Controller {
     this.stopProgressTracking()
     this.saveProgressSync()
     this.navigatingAway = true
-    if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
-    this.bufferQueue = []
-    this.fmp4Buffer = null; this.fmp4BufferSize = 0
+    this.invalidateMsePipeline()
   }
 
   // Auto-advance to the next episode when the current one finishes.
@@ -2060,9 +2196,7 @@ export default class extends Controller {
   pauseAndDetachVideo() {
     if (!this.hasVideoTarget) return
     try {
-      if (this.fetchController) { this.fetchController.abort(); this.fetchController = null }
-      this.bufferQueue = []
-      this.fmp4Buffer = null; this.fmp4BufferSize = 0
+      this.invalidateMsePipeline()
       if (this.mediaSource) {
         if (this.mediaSource.readyState === "open") { try { this.mediaSource.endOfStream() } catch {} }
         this.mediaSource = null
@@ -2234,8 +2368,7 @@ export default class extends Controller {
   // ── Audio / subtitles ─────────────────────────────────────────────
 
   async loadMediaTracks() {
-    if (this.mediaTracksLoaded) return
-    if (!this.hasTracksUrlValue) return
+    if (this.mediaTracksLoaded || !this.hasTracksUrlValue) return
 
     const rawUrl = this.extractRawUrl()
     if (!rawUrl) return
@@ -2243,6 +2376,9 @@ export default class extends Controller {
     try {
       const url = new URL(this.tracksUrlValue, window.location.origin)
       url.searchParams.set("url", rawUrl)
+      // Capability and embedded-track data decides the playback path. Keep
+      // the optional external provider search out of this startup request.
+      url.searchParams.set("include_external_subtitles", "0")
       this.addContentMetadataParams(url)
       const response = await fetch(url.pathname + url.search, { headers: { "Accept": "application/json" } })
       if (!response.ok) return
@@ -2251,19 +2387,54 @@ export default class extends Controller {
       this.tracksData = data
       this.mediaTracksLoaded = true
       this.audioTracks = Array.isArray(data.audio) ? data.audio : []
-      this.subtitleTracks = Array.isArray(data.subtitles) ? data.subtitles : []
+      this.subtitleTracks = (Array.isArray(data.subtitles) ? data.subtitles : []).filter((track) => track.external !== true)
       this.selectedAudioStream ||= this.preferredAudioTrack()?.index?.toString() || null
       if (this.selectedSubtitleStream && !this.subtitleTrackForStream(this.selectedSubtitleStream)) {
+        if (this.selectedSubtitleStream.startsWith("external:")) this.pendingExternalSubtitleStream = this.selectedSubtitleStream
         this.selectedSubtitleStream = null
       }
       this.renderTrackControls()
-      if (this.textSubtitleSelected()) this.loadSubtitleTrack(this.currentPlaybackPosition(), {
-        durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
-        lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-        holdPlayback: true
-      })
     } catch (e) {
       console.warn("Track probe failed:", e)
+    }
+  }
+
+  async loadExternalSubtitleTracks(selectionToken = this.sourceSelectionToken) {
+    if (!this.hasTracksUrlValue) return
+    const rawUrl = this.extractRawUrl()
+    if (!rawUrl) return
+
+    try {
+      const url = new URL(this.tracksUrlValue, window.location.origin)
+      url.searchParams.set("url", rawUrl)
+      url.searchParams.set("include_external_subtitles", "1")
+      this.addContentMetadataParams(url)
+      const response = await fetch(url.pathname + url.search, { headers: { "Accept": "application/json" } })
+      if (!response.ok || selectionToken !== this.sourceSelectionToken) return
+
+      const data = await response.json()
+      if (selectionToken !== this.sourceSelectionToken) return
+      const externalTracks = (Array.isArray(data.subtitles) ? data.subtitles : []).filter((track) => track.external === true)
+      const embeddedTracks = (this.subtitleTracks || []).filter((track) => track.external !== true)
+      this.subtitleTracks = [...embeddedTracks, ...externalTracks]
+      this.tracksData = { ...this.tracksData, subtitles: this.subtitleTracks }
+
+      let restoredExternalSelection = false
+      if (this.pendingExternalSubtitleStream && this.subtitleTrackForStream(this.pendingExternalSubtitleStream)) {
+        this.selectedSubtitleStream = this.pendingExternalSubtitleStream
+        this.pendingExternalSubtitleStream = null
+        restoredExternalSelection = true
+      }
+      this.renderSubtitleControls()
+      if (restoredExternalSelection && this.textSubtitleSelected()) {
+        this.loadSubtitleTrack(this.currentPlaybackPosition(), {
+          durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
+          lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
+          holdPlayback: true
+        })
+      }
+    } catch (e) {
+      console.warn("External subtitle discovery failed:", e)
     }
   }
 
@@ -3214,6 +3385,12 @@ export default class extends Controller {
     const targetSeconds = Math.floor(percent * this.knownDuration)
     if (targetSeconds === Math.floor(this.currentPlaybackPosition())) return
 
+    if (this.isHls()) {
+      this.restartPlaybackAt(targetSeconds)
+      this.currentTimeTarget.textContent = this.formatTime(targetSeconds)
+      this.updateSeekVisuals(targetSeconds / this.knownDuration)
+      return
+    }
     if (this.isSeeking) {
       this.pendingSeekSeconds = targetSeconds
       return

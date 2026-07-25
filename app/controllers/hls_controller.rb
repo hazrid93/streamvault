@@ -12,6 +12,13 @@ class HlsController < ApplicationController
   # an unguessable bearer token, and the playlist/segment actions
   # rely on the session ID alone for authorisation.
   before_action :authenticate_user!, only: %i[start stop]
+  MAX_START_SECONDS = 24 * 60 * 60
+  MAX_SEGMENT_WAIT_SECONDS = 2.0
+  SEGMENT_POLL_INTERVAL_SECONDS = 0.05
+  SEGMENT_WAIT_SECONDS = begin
+    seconds = ENV.fetch("HLS_SEGMENT_WAIT_SECONDS", Rails.env.test? ? "0.05" : "1.0").to_f
+    seconds.finite? ? seconds.clamp(0.0, MAX_SEGMENT_WAIT_SECONDS) : (Rails.env.test? ? 0.05 : 1.0)
+  end
 
   # POST /hls/start
   # Params: url, start_seconds, audio_stream, subtitle_stream
@@ -32,7 +39,7 @@ class HlsController < ApplicationController
       user_id: current_user.id,
       input_url: input_url,
       headers: headers,
-      start_seconds: params[:start_seconds].to_f,
+      start_seconds: normalized_start_seconds(params[:start_seconds]),
       audio_stream: params[:audio_stream],
       subtitle_stream: params[:subtitle_stream],
       default_language: current_user.default_stream_language,
@@ -50,19 +57,18 @@ class HlsController < ApplicationController
   # sending session cookies.  The session ID is an unguessable bearer
   # token that authorises the request.
   def playlist
+    error = HlsSession.error(params[:id])
+    if error
+      render json: { error: error }, status: :failed_dependency
+      return
+    end
     session = HlsSession.find(params[:id])
     unless session
       head :not_found
       return
     end
 
-    # If ffmpeg failed before producing any segments, return a
-    # descriptive error so the client can stop polling and show it.
-    error = HlsSession.error(params[:id])
-    if error
-      render json: { error: error }, status: :failed_dependency
-      return
-    end
+    HlsSession.touch_activity(session.id)
 
     # Playlist not ready yet — either the file doesn't exist, or
     # ffmpeg has written the #EXTM3U header but no segment entries
@@ -87,13 +93,10 @@ class HlsController < ApplicationController
   # GET /hls/:id/:segment (e.g. 0.ts, 1.ts)
   #
   # iOS Safari's native HLS player requests segments by index as it
-  # plays through the playlist.  When ffmpeg is transcoding slower
-  # than 1×, Safari may request a segment that hasn't been written to
-  # disk yet.  Returning 404 causes Safari to treat it as a fatal
-  # error — playback stops and the screen goes black.  Instead, we
-  # block for up to SEGMENT_WAIT_SECONDS for the segment to appear,
-  # so Safari's request simply waits until ffmpeg produces it.
-  SEGMENT_WAIT_SECONDS = Rails.env.test? ? 1 : 10
+  # plays through the playlist. When ffmpeg is transcoding slower than 1×, it
+  # may request a segment before the file has been written. Wait briefly for
+  # the file to appear; long waits can occupy all Puma threads, so the wait is
+  # configured with HLS_SEGMENT_WAIT_SECONDS and capped at two seconds.
 
   def segment
     session = HlsSession.find(params[:id])
@@ -101,6 +104,7 @@ class HlsController < ApplicationController
       head :not_found
       return
     end
+    HlsSession.touch_activity(session.id)
 
     segment_index = params[:segment].to_i
     path = session.segment_path(segment_index)
@@ -113,20 +117,25 @@ class HlsController < ApplicationController
         return
       end
 
-      # Wait for the segment to appear.  Poll the filesystem so we
-      # don't hold a DB connection or thread for long.  Return 503
-      # if it doesn't appear within the timeout — Safari will retry.
+      # Poll the filesystem without holding a DB connection.  The bounded
+      # wait gives ffmpeg a chance to finish the segment, then lets Safari
+      # retry instead of occupying a Puma thread for a long time.
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SEGMENT_WAIT_SECONDS
-      while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-        sleep 0.3
-        break if File.exist?(path)
-        # If ffmpeg died while waiting, stop waiting.
-        break if ffmpeg_finished?(session)
+      loop do
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        break if remaining <= 0
+
+        sleep [ SEGMENT_POLL_INTERVAL_SECONDS, remaining ].min
+        break if File.exist?(path) || ffmpeg_finished?(session)
       end
 
       unless File.exist?(path)
-        response.headers["Retry-After"] = "1"
-        head :service_unavailable
+        if ffmpeg_finished?(session)
+          head :not_found
+        else
+          response.headers["Retry-After"] = "1"
+          head :service_unavailable
+        end
         return
       end
     end
@@ -150,5 +159,12 @@ class HlsController < ApplicationController
     File.read(playlist).include?("#EXT-X-ENDLIST")
   rescue StandardError
     false
+  end
+
+  def normalized_start_seconds(value)
+    seconds = value.to_f
+    return 0 unless seconds.finite? && seconds.positive?
+
+    [ seconds, MAX_START_SECONDS ].min
   end
 end

@@ -1,43 +1,87 @@
-<div class="px-6 py-8 max-w-2xl">
+<div class="max-w-2xl px-4 py-6 sm:px-6 sm:py-8">
   <h1 class="text-3xl font-bold text-white mb-8">Settings</h1>
+  <% pin_error_attributes = %i[current_pin pin pin_confirmation] %>
+  <% pin_errors, settings_errors = @user.errors.partition { |error| pin_error_attributes.include?(error.attribute) } %>
 
-  <%= form_with model: @user, url: settings_path, method: :patch, class: "space-y-6" do |f| %>
-    <% if @user.errors.any? %>
-      <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-4">
-        <ul class="list-disc list-inside text-sm text-red-300">
-          <% @user.errors.full_messages.each do |msg| %>
-            <li><%= msg %></li>
+  <%= form_with url: settings_pin_path, method: :patch, class: "mb-6 rounded-xl border border-sv-border bg-sv-surface p-4 sm:p-6" do %>
+    <h2 class="text-lg font-semibold text-sv-text">Change PIN</h2>
+    <p id="settings-pin-guidance" class="mt-1 text-xs text-sv-text-muted">Enter your current PIN, then choose a new PIN using exactly 4 digits (0–9).</p>
+
+    <% if pin_errors.any? %>
+      <div id="settings-pin-errors" class="flash-alert mt-4" role="alert" aria-live="assertive">
+        <p class="text-sm font-medium">Your PIN could not be changed:</p>
+        <ul class="mt-1 list-disc space-y-1 pl-5 text-sm">
+          <% pin_errors.each do |error| %>
+            <li><%= error.full_message %></li>
           <% end %>
         </ul>
       </div>
     <% end %>
 
-    <div class="bg-sv-surface rounded-xl p-6 border border-sv-border">
-      <h2 class="text-lg font-semibold text-white mb-4">Account</h2>
-
-      <div class="mb-4">
-        <label class="block text-sm font-medium text-sv-text-muted mb-1.5">Email</label>
-        <input type="email" value="<%= @user.email %>" class="input-field" disabled>
+    <div class="mt-5 space-y-4">
+      <div>
+        <%= label_tag :current_pin, "Current PIN", class: "mb-1.5 block text-sm font-medium text-sv-text-muted" %>
+        <%= password_field_tag :current_pin, nil,
+              class: "input-field max-w-xs text-center text-xl tracking-widest tabular-nums",
+              inputmode: "numeric",
+              pattern: "[0-9]{4}",
+              minlength: 4,
+              maxlength: 4,
+              autocomplete: "current-password",
+              required: true,
+              aria: {
+                describedby: "settings-pin-guidance#{' settings-pin-errors' if pin_errors.any?}",
+                invalid: pin_errors.any? { |error| error.attribute == :current_pin }
+              } %>
       </div>
 
-      <div class="border-t border-sv-border pt-4">
-        <h3 class="text-sm font-medium text-white mb-3">Change Password</h3>
-        <div class="space-y-3">
-          <div>
-            <%= f.label :current_password, "Current Password", class: "block text-sm font-medium text-sv-text-muted mb-1.5" %>
-            <%= f.password_field :current_password, class: "input-field", autocomplete: "current-password" %>
-          </div>
-          <div>
-            <%= f.label :password, "New Password", class: "block text-sm font-medium text-sv-text-muted mb-1.5" %>
-            <%= f.password_field :password, class: "input-field", autocomplete: "new-password", placeholder: "Leave blank to keep current" %>
-          </div>
-          <div>
-            <%= f.label :password_confirmation, "Confirm New Password", class: "block text-sm font-medium text-sv-text-muted mb-1.5" %>
-            <%= f.password_field :password_confirmation, class: "input-field", autocomplete: "new-password" %>
-          </div>
-        </div>
+      <div>
+        <%= label_tag :pin, "New PIN", class: "mb-1.5 block text-sm font-medium text-sv-text-muted" %>
+        <%= password_field_tag :pin, nil,
+              class: "input-field max-w-xs text-center text-xl tracking-widest tabular-nums",
+              inputmode: "numeric",
+              pattern: "[0-9]{4}",
+              minlength: 4,
+              maxlength: 4,
+              autocomplete: "new-password",
+              required: true,
+              aria: {
+                describedby: "settings-pin-guidance#{' settings-pin-errors' if pin_errors.any?}",
+                invalid: pin_errors.any? { |error| error.attribute == :pin }
+              } %>
+      </div>
+
+      <div>
+        <%= label_tag :pin_confirmation, "Confirm new PIN", class: "mb-1.5 block text-sm font-medium text-sv-text-muted" %>
+        <%= password_field_tag :pin_confirmation, nil,
+              class: "input-field max-w-xs text-center text-xl tracking-widest tabular-nums",
+              inputmode: "numeric",
+              pattern: "[0-9]{4}",
+              minlength: 4,
+              maxlength: 4,
+              autocomplete: "new-password",
+              required: true,
+              aria: {
+                describedby: "settings-pin-guidance#{' settings-pin-errors' if pin_errors.any?}",
+                invalid: pin_errors.any? { |error| error.attribute == :pin_confirmation }
+              } %>
       </div>
     </div>
+
+    <%= submit_tag "Change PIN", class: "btn-primary mt-5 cursor-pointer" %>
+  <% end %>
+
+  <%= form_with model: @user, url: settings_path, method: :patch, class: "space-y-6" do |f| %>
+    <% if settings_errors.any? %>
+      <div class="flash-alert" role="alert" aria-live="assertive">
+        <ul class="list-inside list-disc text-sm">
+          <% settings_errors.each do |error| %>
+            <li><%= error.full_message %></li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+
 
     <div class="bg-sv-surface rounded-xl p-6 border border-sv-border">
       <h2 class="text-lg font-semibold text-white mb-4">RealDebrid</h2>

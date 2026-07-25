@@ -9,9 +9,8 @@
 # The app is available at http://localhost:${PORT:-3000}.
 # First run creates the database automatically (db:prepare).
 #
-# Create an admin user:
-#   docker compose exec web bin/rails c
-#   > User.create!(email: "you@example.com", password: "password", password_confirmation: "password")
+# On your first browser visit, set an exactly 4-digit PIN.
+# Later locked visits use the same PIN; Settings changes it, and Lock ends the session.
 #
 # Containers restart automatically and survive system reboots
 # (restart: unless-stopped + Docker's systemd service).

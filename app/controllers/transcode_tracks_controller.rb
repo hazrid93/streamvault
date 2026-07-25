@@ -15,8 +15,13 @@ class TranscodeTracksController < ApplicationController
       return
     end
 
-    tracks = TranscodeService.probe_media_tracks(input_url, headers: transcode_headers)
-    external_subtitles = ExternalSubtitleService.search(
+    headers = transcode_headers
+    tracks_thread = Thread.new { TranscodeService.probe_media_tracks(input_url, headers: headers) }
+    video_thread = Thread.new { probe_video_stream(input_url, headers: headers) }
+
+    tracks = tracks_thread.value
+    video_stream = video_thread.value
+    external_subtitles = include_external_subtitles? ? ExternalSubtitleService.search(
       imdb_id: params[:imdb_id],
       type: params[:type],
       season: params[:season],
@@ -25,9 +30,7 @@ class TranscodeTracksController < ApplicationController
       filename: params[:filename],
       preferred_languages: current_user.preferred_stream_languages,
       default_language: current_user.default_stream_language
-    )
-
-    video_stream = probe_video_stream(input_url)
+    ) : []
     embedded_subtitles = tracks[:subtitles]
     if bitmap_burn_too_expensive?(video_stream)
       # Burning PGS/VobSub forces a full video re-encode. On 4K sources the
@@ -54,8 +57,12 @@ class TranscodeTracksController < ApplicationController
     { "Authorization" => "Bearer #{current_user.realdebrid_api_key}" }
   end
 
-  def probe_video_stream(input_url)
-    TranscodeService.probe_video_stream(input_url, headers: transcode_headers)
+  def probe_video_stream(input_url, headers: transcode_headers)
+    TranscodeService.probe_video_stream(input_url, headers: headers)
+  end
+
+  def include_external_subtitles?
+    !%w[0 false].include?(params[:include_external_subtitles].to_s.downcase)
   end
 
   def bitmap_burn_too_expensive?(video_stream)

@@ -1,0 +1,73 @@
+<% pin_errors = Array(@pin_errors) %>
+<% content_for :title, "#{@setup ? 'Set your PIN' : 'Unlock'} · StreamVault" %>
+
+<main class="flex min-h-screen items-center justify-center px-4 py-8">
+  <div class="w-full max-w-md">
+    <div class="mb-8 flex items-center justify-center gap-2" aria-label="StreamVault">
+      <svg class="h-10 w-10 text-sv-accent" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M8 5v14l11-7z"/>
+      </svg>
+      <span class="text-2xl font-bold tracking-tight text-sv-text">StreamVault</span>
+    </div>
+
+    <section class="rounded-xl border border-sv-border bg-sv-surface p-6 sm:p-8" aria-labelledby="pin-heading">
+      <div class="mb-6 text-center">
+        <h1 id="pin-heading" class="text-2xl font-bold text-sv-text"><%= @setup ? "Set your PIN" : "Enter PIN" %></h1>
+        <p class="mt-2 text-sm text-sv-text-muted">
+          <%= @setup ? "Choose a PIN to protect this StreamVault." : "Enter your PIN to unlock StreamVault." %>
+        </p>
+      </div>
+
+      <% if pin_errors.any? %>
+        <div id="pin-errors" class="flash-alert mb-6" role="alert" aria-live="assertive">
+          <p class="text-sm font-medium"><%= @setup ? "Your PIN could not be set:" : "StreamVault could not be unlocked:" %></p>
+          <ul class="mt-1 list-disc space-y-1 pl-5 text-sm">
+            <% pin_errors.each do |message| %>
+              <li><%= message %></li>
+            <% end %>
+          </ul>
+        </div>
+      <% end %>
+
+      <%= form_with url: user_session_path, method: :post, class: "space-y-5" do %>
+        <div>
+          <%= label_tag :pin, @setup ? "New PIN" : "PIN", class: "mb-1.5 block text-sm font-medium text-sv-text-muted" %>
+          <%= password_field_tag :pin, nil,
+                class: "input-field text-center text-2xl tracking-widest tabular-nums",
+                inputmode: "numeric",
+                pattern: "[0-9]{4}",
+                minlength: 4,
+                maxlength: 4,
+                autocomplete: (@setup ? "new-password" : "current-password"),
+                autofocus: true,
+                required: true,
+                aria: {
+                  describedby: "pin-guidance#{' pin-errors' if pin_errors.any?}",
+                  invalid: pin_errors.any?
+                } %>
+          <p id="pin-guidance" class="mt-1.5 text-xs text-sv-text-muted">Use exactly 4 digits (0–9).</p>
+        </div>
+
+        <% if @setup %>
+          <div>
+            <%= label_tag :pin_confirmation, "Confirm PIN", class: "mb-1.5 block text-sm font-medium text-sv-text-muted" %>
+            <%= password_field_tag :pin_confirmation, nil,
+                  class: "input-field text-center text-2xl tracking-widest tabular-nums",
+                  inputmode: "numeric",
+                  pattern: "[0-9]{4}",
+                  minlength: 4,
+                  maxlength: 4,
+                  autocomplete: "new-password",
+                  required: true,
+                  aria: {
+                    describedby: "pin-guidance#{' pin-errors' if pin_errors.any?}",
+                    invalid: pin_errors.any?
+                  } %>
+          </div>
+        <% end %>
+
+        <%= submit_tag(@setup ? "Set PIN and continue" : "Unlock", class: "btn-primary w-full cursor-pointer text-center") %>
+      <% end %>
+    </section>
+  </div>
+</main>

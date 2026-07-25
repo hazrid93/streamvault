@@ -147,32 +147,24 @@ class ContentStreamingService
   end
 
   def resolve_first_valid_batch(candidates)
-    mutex = Mutex.new
-    winner = nil
-
+    completed = Queue.new
     threads = candidates.map do |stream|
-      Thread.new(stream) do |s|
-        already_done = mutex.synchronize { !!winner }
-        next if already_done
-
-        resolved = resolve_stream(s)
-        if resolved
-          mutex.synchronize { winner ||= resolved }
-        end
+      Thread.new(stream) do |candidate|
+        completed << resolve_stream(candidate)
+      rescue StandardError => error
+        Rails.logger.warn("[ContentStreamingService] Failed to resolve stream: #{error.class}: #{error.message}")
+        completed << nil
       end
     end
 
-    # Join threads one at a time, stopping as soon as we have a winner.
-    # Previously this joined ALL threads — a single slow/stale resolve
-    # URL (15s timeout) held the entire batch hostage even after a
-    # winner was found, making "Loading..." take 10-15s instead of <1s.
-    threads.each do |thread|
-      mutex.synchronize { break if winner }
-      thread.join
+    candidates.length.times do
+      winner = completed.pop
+      return winner if winner
     end
-    threads.each { |t| t.kill unless t == Thread.current }
 
-    winner
+    nil
+  ensure
+    threads&.each { |thread| thread.kill if thread.alive? && thread != Thread.current }
   end
 
   def verify_resolve_url(resolve_url)

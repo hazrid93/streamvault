@@ -95,7 +95,7 @@ StreamVault (Rails app)
 ### Personalisation
 - **Language preferences** — Choose your preferred audio languages (16 supported). Streams are filtered and sorted to prioritise your languages.
 - **Default language** — Set which language is selected by default when starting a stream.
-- **Per-user configuration** — Each user has their own library, history, wishlist, and settings. API keys are encrypted at rest.
+- **Single-operator configuration** — Your library, history, wishlist, and settings are private to the operator. API keys are encrypted at rest.
 
 ### Interface
 - **Dark theme** — Easy on the eyes, with an indigo-violet accent on dark neutral surfaces.
@@ -180,24 +180,15 @@ The app is available at `http://localhost:3000` unless you change `PORT`.
 
 Assets are precompiled inside the image during build — no local Ruby or Node installation needed. The PostgreSQL database is persisted in a local `./data` directory and survives container rebuilds.
 
-### Create your first user
+### Set up access
 
-Sign-ups are disabled by default for security. Create your user via the Rails console:
+On your first browser visit, StreamVault prompts you to create an exactly 4-digit PIN. Setting the PIN creates the single operator and unlocks StreamVault in that browser.
 
-```bash
-docker compose exec web bin/rails c
-> password = SecureRandom.base58(24)
-> User.create!(email: "you@example.com", password: password, password_confirmation: password)
-> puts password
-```
-
-Store the generated password in your password manager, then sign in and change it from your profile if desired.
-
-To enable self-registration, set `ENABLE_SIGNUPS=true` in `.env` and restart.
+On later locked visits, enter the same PIN to unlock StreamVault. Choose **Lock** to end the browser session when you are finished. To change the PIN, open **Settings** and enter the current PIN and a new 4-digit PIN.
 
 ### Configure your RealDebrid key
 
-After logging in, go to **Settings** and enter your RealDebrid API key. The app verifies the key automatically and shows a confirmation. Your key is encrypted at rest using Active Record Encryption — it never appears in logs or is transmitted in plain text.
+After unlocking StreamVault, go to **Settings** and enter your RealDebrid API key. The app verifies the key automatically and shows a confirmation. Your key is encrypted at rest using Active Record Encryption — it never appears in logs or is transmitted in plain text.
 
 ### Auto-start on boot
 
@@ -224,7 +215,6 @@ docker compose up -d --build
 | `ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY` | Deterministic encryption key (generate with `openssl rand -hex 32`) | Required |
 | `ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT` | Key derivation salt (generate with `openssl rand -hex 32`) | Required |
 | `APP_DOMAIN` | Domain the app is served from (recommended for Rails host authorisation in public deployments) | Optional |
-| `ENABLE_SIGNUPS` | Set to `true` to allow new user registration | `false` |
 | `POSTGRES_USER` | PostgreSQL database user | `streamvault` |
 | `POSTGRES_PASSWORD` | PostgreSQL database password (generate with `openssl rand -hex 16`) | Required |
 | `POSTGRES_DB` | PostgreSQL database name | `streamvault` |
@@ -365,9 +355,9 @@ bundle exec rspec spec/requests/    # Request specs
 ```
 app/
 ├── controllers/     # Home, search, content, library, wishlist, streaming, settings, episodes, transcode
-├── models/          # User-owned media state, recommendations, and HLS session records
+├── models/          # Operator-owned media state, recommendations, and HLS session records
 ├── services/        # Business logic (see below)
-├── policies/        # ActionPolicy authorisation — all resources scoped per-user
+├── policies/        # ActionPolicy authorisation — all resources scoped to the operator
 ├── javascript/      # Stimulus controllers (video player, carousels, language picker, etc.)
 ├── jobs/            # Recommendation refresh and background work
 └── views/           # Dark-themed Tailwind views with Turbo Drive
@@ -391,7 +381,7 @@ app/
 
 ### Authorisation
 
-All resources are scoped to the current user via ActionPolicy. Users can only access their own library entries, watch history, wishlist, and episode progress. API keys are encrypted at rest using Active Record Encryption.
+All resources are scoped to the single operator via ActionPolicy. The operator's library entries, watch history, wishlist, and episode progress remain private to the deployment. API keys are encrypted at rest using Active Record Encryption.
 
 ## License
 

@@ -109,10 +109,9 @@
             <% end %>
           </nav>
 
-          <%# User info %>
+          <%# Session action %>
           <div class="mt-auto px-3 py-2">
-            <p class="text-sm text-sv-text-muted truncate"><%= current_user.email %></p>
-            <%= button_to "Sign out", destroy_user_session_path, method: :delete, class: "text-xs text-sv-text-muted hover:text-sv-accent transition-colors cursor-pointer bg-transparent border-0 p-0" %>
+            <%= button_to "Lock", destroy_user_session_path, method: :delete, class: "cursor-pointer border-0 bg-transparent p-0 text-sm font-medium text-sv-text-muted transition-colors hover:text-sv-accent" %>
           </div>
         </aside>
 
