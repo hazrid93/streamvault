@@ -419,6 +419,10 @@ RSpec.describe "Streaming", type: :request do
 
       top_controls = player_document.at_css('[data-video-player-target="topControls"]')
       expect(top_controls).to be_present
+      expect(top_controls["class"]).to include("top-1/2", "-translate-y-1/2")
+      expect(top_controls["class"]).not_to include("top-16", "bg-black/70")
+      expect(top_controls.css("button")).to all(satisfy { |button| button["class"].include?("bg-black/") })
+      expect(top_controls.css("button")).to all(satisfy { |button| !button["class"].include?("bg-white") })
       expect(top_controls.css("button").map { |button| button["aria-label"] }).to eq([
         "Back 10 seconds", "Play or pause", "Forward 10 seconds"
       ])

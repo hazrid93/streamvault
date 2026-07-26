@@ -60,17 +60,15 @@
          style="object-fit: contain; background: #000;">
   </video>
 
-  <%# Primary touch controls. On narrow screens these sit below the title
-      and stream-info row; wider screens have enough room to keep them at
-      the very top. The compact group only intercepts taps on its buttons. %>
+  <%# Primary touch controls. This group floats over the center of the movie
+      and follows the exact same visibility state as the player menu below. %>
   <div data-video-player-target="topControls"
-       class="absolute top-16 md:top-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/15 bg-black/70 p-1.5 text-white shadow-xl backdrop-blur-sm opacity-100 transition-opacity duration-500"
-       style="margin-top: env(safe-area-inset-top, 0px);"
+       class="absolute top-1/2 left-1/2 z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-3 sm:gap-4 text-white opacity-100 transition-opacity duration-500"
        role="group"
        aria-label="Playback controls">
     <button type="button"
             data-action="click->video-player#skipBack"
-            class="relative flex min-h-12 min-w-12 items-center justify-center rounded-full text-white/90 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+            class="relative flex min-h-14 min-w-14 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white/95 shadow-xl backdrop-blur-md transition-colors hover:bg-black/70 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
             aria-label="Back 10 seconds"
             title="Back 10 seconds">
       <span class="relative block h-7 w-7" aria-hidden="true">
@@ -83,7 +81,7 @@
 
     <button type="button"
             data-action="click->video-player#togglePlay"
-            class="flex min-h-14 min-w-14 items-center justify-center rounded-full bg-white text-black shadow-lg transition-transform hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 active:scale-95"
+            class="flex min-h-16 min-w-16 items-center justify-center rounded-full border border-white/25 bg-black/60 text-white shadow-2xl backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 active:scale-95"
             aria-label="Play or pause">
       <svg data-video-player-target="playIcon" class="h-7 w-7 hidden" aria-hidden="true" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
       <svg data-video-player-target="pauseIcon" class="h-7 w-7" aria-hidden="true" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
@@ -91,7 +89,7 @@
 
     <button type="button"
             data-action="click->video-player#skipForward"
-            class="relative flex min-h-12 min-w-12 items-center justify-center rounded-full text-white/90 transition-colors hover:bg-white/15 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+            class="relative flex min-h-14 min-w-14 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white/95 shadow-xl backdrop-blur-md transition-colors hover:bg-black/70 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
             aria-label="Forward 10 seconds"
             title="Forward 10 seconds">
       <span class="relative block h-7 w-7" aria-hidden="true">

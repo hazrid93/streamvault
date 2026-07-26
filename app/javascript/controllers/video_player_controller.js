@@ -2541,6 +2541,11 @@ export default class extends Controller {
     // before playback begins, and "playing" means playback has begun.
     this.hideStartupOverlay()
 
+    // Autoplay may begin after the first hide timer fired while the video
+    // was still paused. Re-arm it on every real playback start/resume so
+    // the center buttons never outlive the player menu.
+    this.scheduleUiHide()
+
     // After a user seek, hide the seeking overlay as soon as playback
     // resumes — the seeking overlay is not a buffering indicator, and
     // the rebuffer gate handles buffer depth from here.  Only gate

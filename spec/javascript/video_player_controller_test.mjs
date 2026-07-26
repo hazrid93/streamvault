@@ -249,6 +249,7 @@ test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
   const player = new VideoPlayerController()
   let bufferingHidden = 0
   let watchdogStarted = 0
+  let uiHideScheduled = 0
   player.videoTarget = { paused: false, currentTime: 42, buffered: { length: 0 } }
   player.hlsSessionId = "ios-session"
   player.directPlayActive = false
@@ -258,6 +259,7 @@ test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
   player.subtitlePlaybackHoldToken = null
   player.pendingSeekSeconds = null
   player.hideStartupOverlay = () => {}
+  player.scheduleUiHide = () => { uiHideScheduled += 1 }
   player.hideSeekingOverlay = () => { bufferingHidden += 1; player.isStalled = false }
   player.resetProgressBaseline = () => {}
   player.startProgressWatchdog = () => { watchdogStarted += 1 }
@@ -267,6 +269,7 @@ test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
   assert.equal(player.playbackStarted, true)
   assert.equal(bufferingHidden, 1)
   assert.equal(watchdogStarted, 1)
+  assert.equal(uiHideScheduled, 1)
   assert.equal(player.isStalled, false)
 })
 
@@ -1214,6 +1217,7 @@ test("MSE recovery budget survives raw network data and resets only when playbac
       buffered: { length: 1, start: () => 0, end: () => 3 }
     }
     player.hideStartupOverlay = () => {}
+    player.scheduleUiHide = () => {}
     player.hideSeekingOverlay = () => {}
     player.stopProgressWatchdog = () => {}
     player.startProgressWatchdog = () => {}
