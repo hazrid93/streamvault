@@ -611,6 +611,7 @@ test("continuous seek movement still requests the latest frame on the throttle i
   player.thumbnailDesiredSecond = 10
   player.seekPreviewImageTarget = { classList: classes, getAttribute: () => null }
   player.seekPreviewLoadingTarget = { classList: classes }
+  player.seekPreviewErrorTarget = { classList: classes }
   player.loadSeekThumbnail = (second) => requested.push(second)
 
   player.scheduleSeekThumbnail(10)
@@ -626,6 +627,7 @@ test("seek thumbnail loading keeps only one request in flight and skips stale fr
   const player = new VideoPlayerController()
   const imageClasses = new Set(["hidden"])
   const loadingClasses = new Set()
+  const errorClasses = new Set(["hidden"])
   const requestedSources = []
   let imageSource = ""
   const image = {
@@ -648,6 +650,12 @@ test("seek thumbnail loading keeps only one request in flight and skips stale fr
     classList: {
       add: (name) => loadingClasses.add(name),
       remove: (name) => loadingClasses.delete(name)
+    }
+  }
+  player.seekPreviewErrorTarget = {
+    classList: {
+      add: (name) => errorClasses.add(name),
+      remove: (name) => errorClasses.delete(name)
     }
   }
   player.thumbnailPreviewActive = true
@@ -676,6 +684,14 @@ test("seek thumbnail loading keeps only one request in flight and skips stale fr
   assert.equal(player.displayedThumbnailSecond, 25)
   assert.equal(imageClasses.has("hidden"), false)
   assert.equal(loadingClasses.has("hidden"), true)
+  assert.equal(errorClasses.has("hidden"), true)
+
+  player.thumbnailDesiredSecond = 30
+  player.loadSeekThumbnail(30)
+  image.onerror()
+  assert.equal(imageClasses.has("hidden"), true)
+  assert.equal(loadingClasses.has("hidden"), true)
+  assert.equal(errorClasses.has("hidden"), false)
 })
 
 test("playback time updates do not overwrite the seek position while dragging", () => {

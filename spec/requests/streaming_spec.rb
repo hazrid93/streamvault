@@ -412,6 +412,7 @@ RSpec.describe "Streaming", type: :request do
       preview_image = seek_preview.at_css('[data-video-player-target="seekPreviewImage"]')
       expect(preview_image).to be_present
       expect(seek_preview.at_css('[data-video-player-target="seekPreviewTime"]')).to be_present
+      expect(seek_preview.at_css('[data-video-player-target="seekPreviewError"]')).to be_present
       expect(preview_image.parent["class"]).to include("h-[100px]")
       seek_actions = player_document.at_css('[data-video-player-target="seekBar"]')["data-action"]
       expect(seek_actions).to include("touchcancel->video-player#cancelSeekDrag")
@@ -423,6 +424,9 @@ RSpec.describe "Streaming", type: :request do
       expect(top_controls["class"]).not_to include("top-16", "bg-black/70")
       expect(top_controls.css("button")).to all(satisfy { |button| button["class"].include?("bg-black/") })
       expect(top_controls.css("button")).to all(satisfy { |button| !button["class"].include?("bg-white") })
+      expect(top_controls.css("button").map { |button| button["class"] }).to match([
+        include("bg-black/25"), include("bg-black/30"), include("bg-black/25")
+      ])
       expect(top_controls.css("button").map { |button| button["aria-label"] }).to eq([
         "Back 10 seconds", "Play or pause", "Forward 10 seconds"
       ])

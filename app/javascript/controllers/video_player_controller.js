@@ -58,7 +58,7 @@ export default class extends Controller {
   static get targets() {
     return [
       "video", "controls", "topControls", "seekBar", "seekFilled", "seekBuffered", "seekHandle",
-      "seekPreview", "seekPreviewImage", "seekPreviewLoading", "seekPreviewTime", "seekPreviewPointer",
+      "seekPreview", "seekPreviewImage", "seekPreviewLoading", "seekPreviewError", "seekPreviewTime", "seekPreviewPointer",
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
@@ -3744,11 +3744,13 @@ export default class extends Controller {
     if (!this.thumbnailRequestInFlight && this.displayedThumbnailSecond === second && this.seekPreviewImageTarget.getAttribute("src")) {
       this.seekPreviewImageTarget.classList.remove("hidden")
       this.seekPreviewLoadingTarget.classList.add("hidden")
+      this.seekPreviewErrorTarget.classList.add("hidden")
       return
     }
 
     this.seekPreviewImageTarget.classList.add("hidden")
     this.seekPreviewLoadingTarget.classList.remove("hidden")
+    this.seekPreviewErrorTarget.classList.add("hidden")
     // Throttle rather than trailing-debounce: a continuously moving finger
     // must still receive frames instead of resetting the timer forever.
     if (this.thumbnailDebounceTimer || this.thumbnailRequestInFlight) return
@@ -3775,6 +3777,7 @@ export default class extends Controller {
     this.displayedThumbnailSecond = null
     this.seekPreviewImageTarget.classList.add("hidden")
     this.seekPreviewLoadingTarget.classList.remove("hidden")
+    this.seekPreviewErrorTarget.classList.add("hidden")
     const token = ++this.thumbnailRequestToken
     this.seekPreviewImageTarget.onload = () => this.finishSeekThumbnail(token, true)
     this.seekPreviewImageTarget.onerror = () => this.finishSeekThumbnail(token, false)
@@ -3796,6 +3799,7 @@ export default class extends Controller {
       if (this.thumbnailPreviewActive) {
         this.seekPreviewImageTarget.classList.remove("hidden")
         this.seekPreviewLoadingTarget.classList.add("hidden")
+        this.seekPreviewErrorTarget.classList.add("hidden")
       }
       return
     }
@@ -3803,6 +3807,7 @@ export default class extends Controller {
     if (this.thumbnailPreviewActive && this.thumbnailDesiredSecond !== completedSecond) {
       this.seekPreviewImageTarget.classList.add("hidden")
       this.seekPreviewLoadingTarget.classList.remove("hidden")
+      this.seekPreviewErrorTarget.classList.add("hidden")
       // Every follow-up passes through the same throttle so a long scrub
       // cannot turn fast responses into an FFmpeg request burst.
       this.scheduleSeekThumbnail(this.thumbnailDesiredSecond)
@@ -3810,6 +3815,8 @@ export default class extends Controller {
     }
 
     this.seekPreviewLoadingTarget.classList.add("hidden")
+    this.seekPreviewImageTarget.classList.add("hidden")
+    this.seekPreviewErrorTarget.classList.remove("hidden")
   }
 
   hideSeekPreview() {

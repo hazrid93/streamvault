@@ -141,7 +141,10 @@ class TranscodeService
   LOCAL_VIDEO_PROBE_INTERVAL_SECONDS = 1
   LOCAL_PROBE_MAX_WAIT_SECONDS = 20
   LOCAL_PROBE_COMMAND_TIMEOUT_SECONDS = 5
-  THUMBNAIL_TIMEOUT_SECONDS = 8
+  # Large remote MKV files can take several seconds just to follow their cue
+  # index and open a ranged keyframe. Keep this above the observed 12-second
+  # 4K path while the global capture slots still bound server load.
+  THUMBNAIL_TIMEOUT_SECONDS = 20
   THUMBNAIL_MAX_BYTES = 512.kilobytes
   THUMBNAIL_CACHE_TTL_SECONDS = 5.minutes.to_i
   THUMBNAIL_CACHE_MAX_SIZE = 100
@@ -1728,7 +1731,14 @@ class TranscodeService
     cmd = [ FFMPEG_PATH, "-hide_banner", "-loglevel", "error", "-nostdin" ]
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     cmd += [
+      # Keep probing bounded and accept the nearest keyframe. A seek preview
+      # values responsiveness over frame-exact decoding, especially for 4K
+      # remote MKV files whose next non-key frame can be expensive to reach.
+      "-probesize", "1M",
+      "-analyzeduration", "2000000",
       "-ss", timestamp.to_s,
+      "-noaccurate_seek",
+      "-skip_frame", "nokey",
       "-i", input_url,
       "-map", "0:v:0",
       "-frames:v", "1",

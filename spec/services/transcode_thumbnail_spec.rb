@@ -34,7 +34,10 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
     expect(output).to eq(jpeg)
     expect(argument_pairs(command)).to include(
       [ "-headers", "Authorization: Bearer token\r\n" ],
+      [ "-probesize", "1M" ],
+      [ "-analyzeduration", "2000000" ],
       [ "-ss", "42" ],
+      [ "-skip_frame", "nokey" ],
       [ "-i", input_url ],
       [ "-map", "0:v:0" ],
       [ "-frames:v", "1" ],
@@ -43,7 +46,7 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
       [ "-f", "image2pipe" ]
     )
     expect(command.index("-ss")).to be < command.index("-i")
-    expect(command).to include("-an", "-sn", "-dn", "pipe:1")
+    expect(command).to include("-noaccurate_seek", "-an", "-sn", "-dn", "pipe:1")
     expect(command.count("-frames:v")).to eq(1)
     expect(command.join(" ")).not_to include("Injected", "Also-Bad", "ignored")
   end
