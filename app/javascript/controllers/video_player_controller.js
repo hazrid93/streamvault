@@ -12,6 +12,8 @@ const SUBTITLE_OFFSET_MAX_SECONDS = 5
 const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
+const SEEK_THUMBNAIL_DEBOUNCE_MS = 250
+const SEEK_PREVIEW_WIDTH_PX = 178
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const HLS_MAX_RATE_LIMIT_RETRIES = 2
 const HLS_RETRY_AFTER_MAX_SECONDS = 10
@@ -55,7 +57,8 @@ const SUBTITLE_BOTTOM_LOWERED = "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)
 export default class extends Controller {
   static get targets() {
     return [
-      "video", "controls", "seekBar", "seekFilled", "seekBuffered", "seekHandle",
+      "video", "controls", "topControls", "seekBar", "seekFilled", "seekBuffered", "seekHandle",
+      "seekPreview", "seekPreviewImage", "seekPreviewLoading", "seekPreviewTime", "seekPreviewPointer",
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
@@ -73,7 +76,7 @@ export default class extends Controller {
       tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
       nextEpisodeTitle: String, hasNextEpisode: Boolean,
       localTorrentHash: String, localTorrentSession: String, localStatusUrl: String, localStopUrl: String,
-      castSessionsUrl: String
+      castSessionsUrl: String, thumbnailUrl: String
     }
   }
 
@@ -117,8 +120,17 @@ export default class extends Controller {
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
+    this.dragEndHandler = null
+    this.dragCancelHandler = null
     this.suppressNextSeekClick = false
     this.suppressSeekClickTimer = null
+    this.thumbnailDebounceTimer = null
+    this.thumbnailRequestInFlight = false
+    this.thumbnailRequestToken = 0
+    this.thumbnailRequestedSecond = null
+    this.thumbnailDesiredSecond = null
+    this.displayedThumbnailSecond = null
+    this.thumbnailPreviewActive = false
     this.mediaSource = null
     this.sourceBuffer = null
     this.fetchController = null
@@ -235,6 +247,10 @@ export default class extends Controller {
     this.clearUiHideTimer()
     this.clearStartupOverlayTimer()
     this.clearSuppressSeekClickTimer()
+    this.clearSeekThumbnailTimer()
+    this.thumbnailRequestToken += 1
+    this.seekPreviewImageTarget.onload = null
+    this.seekPreviewImageTarget.onerror = null
     this.clearStallWatchdog()
     if (this.bufferingOverlayTimer) clearTimeout(this.bufferingOverlayTimer)
     this.clearPlaybackDeadlineTimers()
@@ -2501,14 +2517,14 @@ export default class extends Controller {
 
   updatePlayIcon() {
     if (this.videoTarget.paused) {
-      this.playIconTarget.classList.remove("hidden")
-      this.pauseIconTarget.classList.add("hidden")
+      this.playIconTargets.forEach((icon) => icon.classList.remove("hidden"))
+      this.pauseIconTargets.forEach((icon) => icon.classList.add("hidden"))
       // Disarm the progress watchdog on a deliberate pause —
       // currentTime won't advance, but this is not a stall.
       this.stopProgressWatchdog()
     } else {
-      this.playIconTarget.classList.add("hidden")
-      this.pauseIconTarget.classList.remove("hidden")
+      this.playIconTargets.forEach((icon) => icon.classList.add("hidden"))
+      this.pauseIconTargets.forEach((icon) => icon.classList.remove("hidden"))
       // Re-arm on resume (also covers recovery from a rebuffer pause
       // gated by maybeStartPlayback).
       this.startProgressWatchdog()
@@ -3635,14 +3651,26 @@ export default class extends Controller {
     this.isDragging = true
     event.preventDefault()
     this.dragMoveHandler = (e) => this.onSeekDragMove(e)
+    this.dragEndHandler = (e) => this.stopSeekDrag(e)
+    this.dragCancelHandler = () => this.cancelSeekDrag()
     document.addEventListener("mousemove", this.dragMoveHandler)
     document.addEventListener("touchmove", this.dragMoveHandler)
+    document.addEventListener("mouseup", this.dragEndHandler)
+    document.addEventListener("touchend", this.dragEndHandler)
+    document.addEventListener("touchcancel", this.dragCancelHandler)
+    this.updateSeekDrag(event)
   }
 
   onSeekDragMove(event) {
     if (!this.isDragging) return
+    event.preventDefault?.()
+    this.updateSeekDrag(event)
+  }
+
+  updateSeekDrag(event) {
     const percent = this.seekPercentFromEvent(event)
     this.updateSeekVisuals(percent)
+    this.showSeekPreview(percent)
   }
 
   stopSeekDrag(event) {
@@ -3660,11 +3688,139 @@ export default class extends Controller {
 
   cancelSeekDrag() {
     this.isDragging = false
-    if (!this.dragMoveHandler) return
+    this.hideSeekPreview()
 
-    document.removeEventListener("mousemove", this.dragMoveHandler)
-    document.removeEventListener("touchmove", this.dragMoveHandler)
+    if (this.dragMoveHandler) {
+      document.removeEventListener("mousemove", this.dragMoveHandler)
+      document.removeEventListener("touchmove", this.dragMoveHandler)
+    }
+    if (this.dragEndHandler) {
+      document.removeEventListener("mouseup", this.dragEndHandler)
+      document.removeEventListener("touchend", this.dragEndHandler)
+    }
+    if (this.dragCancelHandler) document.removeEventListener("touchcancel", this.dragCancelHandler)
     this.dragMoveHandler = null
+    this.dragEndHandler = null
+    this.dragCancelHandler = null
+  }
+
+  showSeekPreview(percent) {
+    if (this.knownDuration <= 0 || !this.thumbnailUrlValue || !this.extractRawUrl()) return
+
+    const normalizedPercent = Math.max(0, Math.min(1, percent))
+    const second = Math.floor(normalizedPercent * this.knownDuration)
+    this.thumbnailPreviewActive = true
+    this.thumbnailDesiredSecond = second
+    this.controlsTarget.style.zIndex = "25"
+    this.seekPreviewTarget.classList.remove("hidden")
+    this.seekPreviewTarget.setAttribute("aria-hidden", "false")
+    this.seekPreviewTimeTarget.textContent = this.formatTime(second)
+    this.positionSeekPreview(normalizedPercent)
+    this.scheduleSeekThumbnail(second)
+  }
+
+  positionSeekPreview(percent) {
+    const rect = this.seekBarTarget.getBoundingClientRect()
+    if (!rect.width) return
+
+    const previewWidth = this.seekPreviewTarget.offsetWidth || SEEK_PREVIEW_WIDTH_PX
+    const effectiveWidth = Math.min(previewWidth, rect.width)
+    const halfWidth = effectiveWidth / 2
+    const pointerX = percent * rect.width
+    const centerX = Math.max(halfWidth, Math.min(rect.width - halfWidth, pointerX))
+    const previewLeft = centerX - (previewWidth / 2)
+    const pointerWithinPreview = Math.max(10, Math.min(previewWidth - 10, pointerX - previewLeft))
+
+    this.seekPreviewTarget.style.left = `${centerX}px`
+    this.seekPreviewPointerTarget.style.left = `${pointerWithinPreview}px`
+  }
+
+  scheduleSeekThumbnail(second) {
+    if (!this.thumbnailRequestInFlight && this.displayedThumbnailSecond === second && this.seekPreviewImageTarget.getAttribute("src")) {
+      this.seekPreviewImageTarget.classList.remove("hidden")
+      this.seekPreviewLoadingTarget.classList.add("hidden")
+      return
+    }
+
+    this.seekPreviewImageTarget.classList.add("hidden")
+    this.seekPreviewLoadingTarget.classList.remove("hidden")
+    // Throttle rather than trailing-debounce: a continuously moving finger
+    // must still receive frames instead of resetting the timer forever.
+    if (this.thumbnailDebounceTimer || this.thumbnailRequestInFlight) return
+
+    this.thumbnailDebounceTimer = setTimeout(() => {
+      this.thumbnailDebounceTimer = null
+      this.loadSeekThumbnail(this.thumbnailDesiredSecond)
+    }, SEEK_THUMBNAIL_DEBOUNCE_MS)
+  }
+
+  loadSeekThumbnail(second) {
+    if (!this.thumbnailPreviewActive || !Number.isFinite(second)) return
+    if (this.thumbnailRequestInFlight) return
+
+    const rawUrl = this.extractRawUrl()
+    if (!rawUrl || !this.thumbnailUrlValue) return
+
+    const requestUrl = new URL(this.thumbnailUrlValue, window.location.origin)
+    requestUrl.searchParams.set("url", rawUrl)
+    requestUrl.searchParams.set("timestamp", Math.floor(second).toString())
+
+    this.thumbnailRequestInFlight = true
+    this.thumbnailRequestedSecond = Math.floor(second)
+    this.displayedThumbnailSecond = null
+    this.seekPreviewImageTarget.classList.add("hidden")
+    this.seekPreviewLoadingTarget.classList.remove("hidden")
+    const token = ++this.thumbnailRequestToken
+    this.seekPreviewImageTarget.onload = () => this.finishSeekThumbnail(token, true)
+    this.seekPreviewImageTarget.onerror = () => this.finishSeekThumbnail(token, false)
+    this.seekPreviewImageTarget.src = requestUrl.pathname + requestUrl.search
+  }
+
+  finishSeekThumbnail(token, succeeded) {
+    if (token !== this.thumbnailRequestToken) return
+
+    const completedSecond = this.thumbnailRequestedSecond
+    this.thumbnailRequestInFlight = false
+    this.thumbnailRequestedSecond = null
+    this.seekPreviewImageTarget.onload = null
+    this.seekPreviewImageTarget.onerror = null
+
+    const isCurrentFrame = succeeded && completedSecond === this.thumbnailDesiredSecond
+    if (isCurrentFrame) {
+      this.displayedThumbnailSecond = completedSecond
+      if (this.thumbnailPreviewActive) {
+        this.seekPreviewImageTarget.classList.remove("hidden")
+        this.seekPreviewLoadingTarget.classList.add("hidden")
+      }
+      return
+    }
+
+    if (this.thumbnailPreviewActive && this.thumbnailDesiredSecond !== completedSecond) {
+      this.seekPreviewImageTarget.classList.add("hidden")
+      this.seekPreviewLoadingTarget.classList.remove("hidden")
+      // Every follow-up passes through the same throttle so a long scrub
+      // cannot turn fast responses into an FFmpeg request burst.
+      this.scheduleSeekThumbnail(this.thumbnailDesiredSecond)
+      return
+    }
+
+    this.seekPreviewLoadingTarget.classList.add("hidden")
+  }
+
+  hideSeekPreview() {
+    this.thumbnailPreviewActive = false
+    this.thumbnailDesiredSecond = null
+    this.controlsTarget.style.removeProperty("z-index")
+    this.clearSeekThumbnailTimer()
+    this.seekPreviewTarget.classList.add("hidden")
+    this.seekPreviewTarget.setAttribute("aria-hidden", "true")
+  }
+
+  clearSeekThumbnailTimer() {
+    if (!this.thumbnailDebounceTimer) return
+
+    clearTimeout(this.thumbnailDebounceTimer)
+    this.thumbnailDebounceTimer = null
   }
 
   clearSuppressSeekClickTimer() {
@@ -3801,7 +3957,7 @@ export default class extends Controller {
 
     this.currentTimeTarget.textContent = this.formatTime(currentPos)
     this.updateSubtitleOverlay(currentPos)
-    if (duration > 0) {
+    if (duration > 0 && !this.isDragging) {
       this.updateSeekVisuals(currentPos / duration)
     }
 
@@ -3969,6 +4125,8 @@ export default class extends Controller {
     this.sourceInfoTarget.style.pointerEvents = "auto"
     this.controlsTarget.style.opacity = "1"
     this.controlsTarget.style.pointerEvents = "auto"
+    this.topControlsTarget.style.opacity = "1"
+    this.topControlsTarget.style.pointerEvents = "auto"
     this.positionSubtitleOverlay(true)
     this.scheduleUiHide()
   }
@@ -3981,6 +4139,8 @@ export default class extends Controller {
       this.sourceInfoTarget.style.pointerEvents = "none"
       this.controlsTarget.style.opacity = "0"
       this.controlsTarget.style.pointerEvents = "none"
+      this.topControlsTarget.style.opacity = "0"
+      this.topControlsTarget.style.pointerEvents = "none"
       this.positionSubtitleOverlay(false)
     }
   }
@@ -4014,8 +4174,13 @@ export default class extends Controller {
     this.clearUiHideTimer()
     if (!this.sourceDetailsTarget.classList.contains("hidden")) {
       this.backButtonTarget.style.opacity = "1"
+      this.backButtonTarget.style.pointerEvents = "auto"
       this.sourceInfoTarget.style.opacity = "1"
+      this.sourceInfoTarget.style.pointerEvents = "auto"
       this.controlsTarget.style.opacity = "1"
+      this.controlsTarget.style.pointerEvents = "auto"
+      this.topControlsTarget.style.opacity = "1"
+      this.topControlsTarget.style.pointerEvents = "auto"
       this.positionSubtitleOverlay(true)
     } else {
       this.scheduleUiHide()

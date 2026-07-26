@@ -30,6 +30,9 @@ class TranscodeThumbnailController < ApplicationController
               type: "image/jpeg",
               disposition: :inline,
               filename: "thumbnail.jpg"
+  rescue TranscodeService::ThumbnailBusyError
+    response.headers["Retry-After"] = "1"
+    render json: { error: "Thumbnail extraction is busy" }, status: :service_unavailable
   rescue TranscodeService::ThumbnailTimeoutError
     render json: { error: "Thumbnail extraction timed out" }, status: :gateway_timeout
   rescue TranscodeService::ThumbnailExtractionError

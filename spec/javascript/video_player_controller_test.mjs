@@ -487,12 +487,13 @@ test("subtitle responses use the guarded timeline before cue merging", () => {
   assert.equal(player.subtitleCues[0].text, "Window-relative response")
 })
 
-test("subtitle moves above visible controls and returns to the safe-area bottom after they hide", () => {
+test("tap controls and subtitles follow the overlay visibility state", () => {
   const player = new VideoPlayerController()
   const styleTarget = () => ({ style: {} })
   player.backButtonTarget = styleTarget()
   player.sourceInfoTarget = styleTarget()
   player.controlsTarget = styleTarget()
+  player.topControlsTarget = styleTarget()
   player.subtitleOverlayTarget = styleTarget()
   player.hasSubtitleOverlayTarget = true
   player.videoTarget = { paused: false }
@@ -500,13 +501,196 @@ test("subtitle moves above visible controls and returns to the safe-area bottom 
   player.scheduleUiHide = () => {}
 
   player.showOverlayUi()
+  assert.equal(player.controlsTarget.style.opacity, "1")
+  assert.equal(player.controlsTarget.style.pointerEvents, "auto")
+  assert.equal(player.topControlsTarget.style.opacity, "1")
+  assert.equal(player.topControlsTarget.style.pointerEvents, "auto")
   assert.equal(player.subtitleOverlayTarget.style.bottom, "6.5rem")
 
   player.hideOverlayUi()
+  assert.equal(player.controlsTarget.style.opacity, "0")
+  assert.equal(player.controlsTarget.style.pointerEvents, "none")
+  assert.equal(player.topControlsTarget.style.opacity, "0")
+  assert.equal(player.topControlsTarget.style.pointerEvents, "none")
   assert.equal(
     player.subtitleOverlayTarget.style.bottom,
     "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)"
   )
+})
+
+test("all play and pause icons stay synchronized", () => {
+  const player = new VideoPlayerController()
+  const icon = (hidden) => {
+    const classes = new Set(hidden ? ["hidden"] : [])
+    return {
+      classes,
+      classList: {
+        add: (name) => classes.add(name),
+        remove: (name) => classes.delete(name)
+      }
+    }
+  }
+  const playIcons = [icon(true), icon(true)]
+  const pauseIcons = [icon(false), icon(false)]
+  player.playIconTargets = playIcons
+  player.pauseIconTargets = pauseIcons
+  player.stopProgressWatchdog = () => {}
+  player.startProgressWatchdog = () => {}
+
+  player.videoTarget = { paused: true }
+  player.updatePlayIcon()
+  assert.equal(playIcons.every((item) => !item.classes.has("hidden")), true)
+  assert.equal(pauseIcons.every((item) => item.classes.has("hidden")), true)
+
+  player.videoTarget.paused = false
+  player.updatePlayIcon()
+  assert.equal(playIcons.every((item) => item.classes.has("hidden")), true)
+  assert.equal(pauseIcons.every((item) => !item.classes.has("hidden")), true)
+})
+
+test("ten-second skip controls seek in both directions and keep controls visible", () => {
+  const player = new VideoPlayerController()
+  const skips = []
+  let overlayShows = 0
+  player.skip = (seconds) => skips.push(seconds)
+  player.showOverlayUi = () => { overlayShows += 1 }
+
+  player.skipBack()
+  player.skipForward()
+
+  assert.deepEqual(skips, [-10, 10])
+  assert.equal(overlayShows, 2)
+})
+
+test("seek preview shows the selected time and stays clamped above the slider", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set(["hidden"])
+  const attributes = new Map()
+  let scheduledSecond = null
+  player.knownDuration = 1000
+  player.thumbnailUrlValue = "/transcode/thumbnail"
+  player.extractRawUrl = () => "https://download.real-debrid.com/video.mkv"
+  player.controlsTarget = { style: {} }
+  player.seekBarTarget = {
+    getBoundingClientRect: () => ({ left: 20, width: 200 })
+  }
+  player.seekPreviewTarget = {
+    offsetWidth: 100,
+    style: {},
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name)
+    },
+    setAttribute: (name, value) => attributes.set(name, value)
+  }
+  player.seekPreviewPointerTarget = { style: {} }
+  player.seekPreviewTimeTarget = { textContent: "" }
+  player.scheduleSeekThumbnail = (second) => { scheduledSecond = second }
+
+  player.showSeekPreview(0.98)
+
+  assert.equal(classes.has("hidden"), false)
+  assert.equal(attributes.get("aria-hidden"), "false")
+  assert.equal(player.seekPreviewTimeTarget.textContent, "16:20")
+  assert.equal(scheduledSecond, 980)
+  assert.equal(player.seekPreviewTarget.style.left, "150px")
+  assert.equal(player.seekPreviewPointerTarget.style.left, "90px")
+  assert.equal(player.controlsTarget.style.zIndex, "25")
+})
+
+test("continuous seek movement still requests the latest frame on the throttle interval", async () => {
+  const player = new VideoPlayerController()
+  const classes = { add() {}, remove() {} }
+  const requested = []
+  player.displayedThumbnailSecond = null
+  player.thumbnailDebounceTimer = null
+  player.thumbnailRequestInFlight = false
+  player.thumbnailDesiredSecond = 10
+  player.seekPreviewImageTarget = { classList: classes, getAttribute: () => null }
+  player.seekPreviewLoadingTarget = { classList: classes }
+  player.loadSeekThumbnail = (second) => requested.push(second)
+
+  player.scheduleSeekThumbnail(10)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  player.thumbnailDesiredSecond = 20
+  player.scheduleSeekThumbnail(20)
+  await new Promise((resolve) => setTimeout(resolve, 140))
+
+  assert.deepEqual(requested, [20])
+})
+
+test("seek thumbnail loading keeps only one request in flight and skips stale frames", () => {
+  const player = new VideoPlayerController()
+  const imageClasses = new Set(["hidden"])
+  const loadingClasses = new Set()
+  const requestedSources = []
+  let imageSource = ""
+  const image = {
+    onload: null,
+    onerror: null,
+    classList: {
+      add: (name) => imageClasses.add(name),
+      remove: (name) => imageClasses.delete(name)
+    },
+    getAttribute: (name) => name === "src" ? imageSource : null,
+    set src(value) {
+      imageSource = value
+      requestedSources.push(value)
+    }
+  }
+  player.thumbnailUrlValue = "/transcode/thumbnail"
+  player.extractRawUrl = () => "https://download.real-debrid.com/video.mkv?token=secret"
+  player.seekPreviewImageTarget = image
+  player.seekPreviewLoadingTarget = {
+    classList: {
+      add: (name) => loadingClasses.add(name),
+      remove: (name) => loadingClasses.delete(name)
+    }
+  }
+  player.thumbnailPreviewActive = true
+  player.thumbnailRequestInFlight = false
+  player.thumbnailRequestToken = 0
+  player.thumbnailDesiredSecond = 10
+  // Keep this unit test synchronous while still exercising the production
+  // latest-only handoff (scheduleSeekThumbnail owns the real 250ms throttle).
+  player.scheduleSeekThumbnail = (second) => player.loadSeekThumbnail(second)
+
+  player.loadSeekThumbnail(10)
+  const firstLoad = image.onload
+  player.thumbnailDesiredSecond = 25
+  player.loadSeekThumbnail(25)
+
+  assert.equal(requestedSources.length, 1)
+  assert.match(requestedSources[0], /timestamp=10/)
+  assert.match(requestedSources[0], /url=https%3A%2F%2Fdownload\.real-debrid\.com/)
+
+  firstLoad()
+  assert.equal(requestedSources.length, 2)
+  assert.match(requestedSources[1], /timestamp=25/)
+  assert.equal(imageClasses.has("hidden"), true)
+
+  image.onload()
+  assert.equal(player.displayedThumbnailSecond, 25)
+  assert.equal(imageClasses.has("hidden"), false)
+  assert.equal(loadingClasses.has("hidden"), true)
+})
+
+test("playback time updates do not overwrite the seek position while dragging", () => {
+  const player = new VideoPlayerController()
+  let visualUpdates = 0
+  player.isDragging = true
+  player.isStalled = false
+  player.currentTimeTarget = { textContent: "" }
+  player.currentPlaybackPosition = () => 30
+  player.effectiveDuration = () => 120
+  player.updateSubtitleOverlay = () => {}
+  player.updateSeekVisuals = () => { visualUpdates += 1 }
+  player.updateBufferBar = () => {}
+
+  player.onTimeUpdate()
+
+  assert.equal(player.currentTimeTarget.textContent, "0:30")
+  assert.equal(visualUpdates, 0)
 })
 
 test("subtitle text renders inside the centered caption box", () => {

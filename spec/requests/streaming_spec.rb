@@ -396,12 +396,36 @@ RSpec.describe "Streaming", type: :request do
       expect(response.body).to include(%(data-video-player-default-language-value="ENG"))
       expect(response.body).to include(%(data-video-player-tracks-url-value="/transcode/tracks"))
       expect(response.body).to include(%(data-video-player-subtitles-url-value="/transcode/subtitles"))
+      expect(response.body).to include(%(data-video-player-thumbnail-url-value="/transcode/thumbnail"))
       expect(response.body).to include(%(data-video-player-target="audioControls"))
       expect(response.body).to include(%(data-video-player-target="subtitleControls"))
       expect(response.body).to include(%(data-video-player-target="subtitleOverlay"))
       expect(response.body).to include(%(data-video-player-target="subtitleText"))
       expect(response.body).to include("absolute inset-x-0 z-20")
-      expect(response.body).not_to include("-translate-x-1/2")
+
+      player_document = Nokogiri::HTML(response.body)
+      subtitle_overlay = player_document.at_css('[data-video-player-target="subtitleOverlay"]')
+      expect(subtitle_overlay["class"]).not_to include("-translate-x-1/2")
+
+      seek_preview = player_document.at_css('[data-video-player-target="seekPreview"]')
+      expect(seek_preview).to be_present
+      preview_image = seek_preview.at_css('[data-video-player-target="seekPreviewImage"]')
+      expect(preview_image).to be_present
+      expect(seek_preview.at_css('[data-video-player-target="seekPreviewTime"]')).to be_present
+      expect(preview_image.parent["class"]).to include("h-[100px]")
+      seek_actions = player_document.at_css('[data-video-player-target="seekBar"]')["data-action"]
+      expect(seek_actions).to include("touchcancel->video-player#cancelSeekDrag")
+      expect(seek_actions).not_to include("mouseleave->video-player#stopSeekDrag")
+
+      top_controls = player_document.at_css('[data-video-player-target="topControls"]')
+      expect(top_controls).to be_present
+      expect(top_controls.css("button").map { |button| button["aria-label"] }).to eq([
+        "Back 10 seconds", "Play or pause", "Forward 10 seconds"
+      ])
+      expect(top_controls.css("button").map { |button| button["data-action"] }).to eq([
+        "click->video-player#skipBack", "click->video-player#togglePlay", "click->video-player#skipForward"
+      ])
+
       expect(response.body).to include(%(click-&gt;video-player#navigateBack))
       expect(response.body).to include("toggleAudioMenu")
       expect(response.body).to include("toggleSubtitleMenu")

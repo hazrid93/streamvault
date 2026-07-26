@@ -10,6 +10,7 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
   before do
     described_class.instance_variable_set(:@thumbnail_cache, {})
     described_class.instance_variable_set(:@thumbnail_inflight, {})
+    described_class.instance_variable_set(:@thumbnail_active_captures, 0)
   end
 
   it "uses sanitized headers and fast input seeking to emit one bounded JPEG frame" do
@@ -126,6 +127,31 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
     described_class.extract_thumbnail(input_url, timestamp: 10)
 
     expect(calls).to eq(2)
+  end
+
+  it "rejects excess distinct captures instead of filling request threads" do
+    stub_const("TranscodeService::THUMBNAIL_MAX_CONCURRENT_CAPTURES", 1)
+    started = Queue.new
+    release = Queue.new
+    allow(described_class).to receive(:capture_command) do
+      started << true
+      release.pop
+      capture_result(jpeg)
+    end
+
+    first = Thread.new { described_class.extract_thumbnail(input_url, timestamp: 30) }
+    Timeout.timeout(2) { started.pop }
+
+    expect {
+      described_class.extract_thumbnail(input_url, timestamp: 31)
+    }.to raise_error(described_class::ThumbnailBusyError)
+
+    release << true
+    expect(first.value).to eq(jpeg)
+    expect(described_class.instance_variable_get(:@thumbnail_active_captures)).to eq(0)
+  ensure
+    release << true if release
+    first&.kill if first&.alive?
   end
 
   it "shares an identical in-flight extraction" do

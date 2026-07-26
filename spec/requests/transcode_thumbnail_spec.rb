@@ -98,6 +98,18 @@ RSpec.describe "Transcode thumbnails", type: :request do
       end
     end
 
+    it "returns a short retry response when thumbnail capacity is busy" do
+      allow(TranscodeService).to receive(:extract_thumbnail)
+        .and_raise(TranscodeService::ThumbnailBusyError, "sensitive queue details")
+
+      get transcode_thumbnail_path, params: { url: input_url, timestamp: 30 }
+
+      expect(response).to have_http_status(:service_unavailable)
+      expect(response.headers["Retry-After"]).to eq("1")
+      expect(response.body).to include("Thumbnail extraction is busy")
+      expect(response.body).not_to include("sensitive queue details")
+    end
+
     it "returns a bounded timeout response without leaking extraction details" do
       allow(TranscodeService).to receive(:extract_thumbnail)
         .and_raise(TranscodeService::ThumbnailTimeoutError, "Bearer test_key #{input_url} ffmpeg stderr")

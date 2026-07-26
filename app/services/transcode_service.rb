@@ -145,15 +145,18 @@ class TranscodeService
   THUMBNAIL_MAX_BYTES = 512.kilobytes
   THUMBNAIL_CACHE_TTL_SECONDS = 5.minutes.to_i
   THUMBNAIL_CACHE_MAX_SIZE = 100
+  THUMBNAIL_MAX_CONCURRENT_CAPTURES = 2
   THUMBNAIL_FILTER =
     "scale=w=320:h=100:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
 
   @thumbnail_cache = {}
   @thumbnail_inflight = {}
+  @thumbnail_active_captures = 0
   @thumbnail_cache_mutex = Mutex.new
 
   class TranscodeError < StandardError; end
   class ThumbnailExtractionError < StandardError; end
+  class ThumbnailBusyError < ThumbnailExtractionError; end
   class ThumbnailTimeoutError < ThumbnailExtractionError; end
 
   CommandCaptureResult = Struct.new(:stdout, :stderr, :status, :timed_out, keyword_init: true)
@@ -193,7 +196,9 @@ class TranscodeService
     end
 
     begin
-      jpeg = capture_thumbnail(input_url, headers: headers, timestamp: second)
+      jpeg = with_thumbnail_capture_slot do
+        capture_thumbnail(input_url, headers: headers, timestamp: second)
+      end
       store_thumbnail(cache_key, jpeg)
       finish_thumbnail_flight(cache_key, flight, result: jpeg)
       jpeg.dup
@@ -1696,6 +1701,27 @@ class TranscodeService
     @thumbnail_cache.delete_if { |_key, entry| entry[:stored_at] < cutoff }
   end
   private_class_method :prune_thumbnail_cache
+
+  def self.with_thumbnail_capture_slot
+    acquired = false
+    @thumbnail_cache_mutex.synchronize do
+      if @thumbnail_active_captures >= THUMBNAIL_MAX_CONCURRENT_CAPTURES
+        raise ThumbnailBusyError, "Thumbnail extraction is busy"
+      end
+
+      @thumbnail_active_captures += 1
+      acquired = true
+    end
+
+    yield
+  ensure
+    if acquired
+      @thumbnail_cache_mutex.synchronize do
+        @thumbnail_active_captures -= 1
+      end
+    end
+  end
+  private_class_method :with_thumbnail_capture_slot
 
   def self.capture_thumbnail(input_url, headers:, timestamp:)
     header_str = ffmpeg_headers(headers)
