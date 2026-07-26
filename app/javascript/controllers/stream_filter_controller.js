@@ -51,25 +51,11 @@ export default class extends Controller {
     this.applying = true
 
     const rows = this.rowTargets.slice()
-    const groups = new Map()
-    rows.forEach((row) => {
-      const container = row.parentElement
-      if (!groups.has(container)) groups.set(container, [])
-      groups.get(container).push(row)
-    })
-
     let visibleCount = 0
-    groups.forEach((groupRows, container) => {
-      const visible = groupRows
-        .filter((row) => this.activeQuality === "all" || (row.dataset.quality || "") === this.activeQuality)
-        .sort((a, b) => this.compareRows(a, b))
-
-      groupRows.forEach((row) => { row.hidden = true })
-      visible.forEach((row) => {
-        row.hidden = false
-        container.appendChild(row)
-      })
-      visibleCount += visible.length
+    rows.forEach((row) => {
+      const visible = this.activeQuality === "all" || (row.dataset.quality || "") === this.activeQuality
+      row.hidden = !visible
+      if (visible) visibleCount += 1
     })
 
     if (this.hasCountTarget) this.countTarget.textContent = visibleCount

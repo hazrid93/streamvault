@@ -64,3 +64,28 @@ test("known zero seeders sorts ahead of an unavailable count", () => {
 
   assert.ok(controller.compareRows(zero, unknown) < 0)
 })
+
+test("filtering loaded Turbo rows never reparents them", () => {
+  const controller = new StreamFilterController()
+  const parent = { appendChild() { throw new Error("rows must not be moved") } }
+  const matching = { dataset: { quality: "1080p" }, parentElement: parent, hidden: false }
+  const hidden = { dataset: { quality: "4K" }, parentElement: parent, hidden: false }
+  const count = { textContent: "" }
+  const empty = { hidden: false }
+
+  controller.activeQuality = "1080p"
+  Object.defineProperties(controller, {
+    rowTargets: { value: [matching, hidden] },
+    hasCountTarget: { value: true },
+    countTarget: { value: count },
+    hasEmptyTarget: { value: true },
+    emptyTarget: { value: empty }
+  })
+
+  controller.apply()
+
+  assert.equal(matching.hidden, false)
+  assert.equal(hidden.hidden, true)
+  assert.equal(count.textContent, 1)
+  assert.equal(empty.hidden, true)
+})
