@@ -22,6 +22,7 @@ RSpec.describe "Settings", type: :request do
       it "returns success" do
         get settings_path
         expect(response).to have_http_status(:ok)
+        expect(response.body).not_to include('<turbo-frame id="content"')
       end
     end
   end
@@ -35,6 +36,7 @@ RSpec.describe "Settings", type: :request do
 
       patch settings_path, params: { user: { realdebrid_api_key: "new_key_123" } }
       expect(response).to redirect_to(settings_path)
+      expect(response).to have_http_status(:see_other)
       expect(user.reload.realdebrid_api_key).to eq("new_key_123")
     end
 

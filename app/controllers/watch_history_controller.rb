@@ -49,7 +49,7 @@ class WatchHistoryController < ApplicationController
       current_user.watch_history_entries.delete_all
       current_user.episode_progresses.delete_all
     end
-    redirect_to watch_history_index_path, notice: "Watch history cleared."
+    redirect_to watch_history_index_path, status: :see_other, notice: "Watch history cleared."
   end
 
   private

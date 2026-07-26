@@ -1,8 +1,9 @@
 <%# locals: item, link_path, variant (optional, "carousel" default) %>
 <% variant = local_assigns[:variant] || "carousel" %>
 <% item_type = item[:type].presence %>
+<% target_frame = local_assigns[:turbo_frame] %>
 <div class="poster-card group <%= variant == "grid" ? "w-full" : "w-[9.5rem] sm:w-[10.5rem] shrink-0" %>">
-  <%= link_to link_path, data: { page_loader: "link" }, class: "block", aria: { label: [item[:title], item[:year]].compact.join(", ") } do %>
+  <%= link_to link_path, data: { page_loader: "link", turbo_frame: target_frame }, class: "block", aria: { label: [item[:title], item[:year]].compact.join(", ") } do %>
     <div class="poster-card__image">
       <% if item[:poster_url] %>
         <img src="<%= item[:poster_url] %>" alt="" loading="lazy">

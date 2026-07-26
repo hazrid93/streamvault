@@ -23,7 +23,7 @@ class WishlistController < ApplicationController
 
     if @entry.save
       respond_to do |format|
-        format.html { redirect_to wishlist_index_path, notice: "#{@entry.title} added to wishlist." }
+        format.html { redirect_to wishlist_index_path, status: :see_other, notice: "#{@entry.title} added to wishlist." }
         format.json { render json: { ok: true, kind: "wishlist", destroy_url: wishlist_path(@entry), notice: "#{@entry.title} added to wishlist." } }
       end
     else
@@ -38,7 +38,7 @@ class WishlistController < ApplicationController
     title = @entry.title
     @entry.destroy
     respond_to do |format|
-      format.html { redirect_to wishlist_index_path, notice: "#{title} removed from wishlist." }
+      format.html { redirect_to wishlist_index_path, status: :see_other, notice: "#{title} removed from wishlist." }
       format.json { render json: { ok: true, kind: "wishlist" } }
     end
   end
@@ -61,7 +61,7 @@ class WishlistController < ApplicationController
       @entry.destroy!
       entry
     end
-    redirect_to library_index_path, notice: "#{library_entry.title} moved to library."
+    redirect_to library_index_path, status: :see_other, notice: "#{library_entry.title} moved to library."
   end
 
   private

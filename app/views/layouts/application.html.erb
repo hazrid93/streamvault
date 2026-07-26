@@ -154,10 +154,11 @@
             </div>
           <% end %>
 
-          <%# Turbo Frame for main content %>
-          <turbo-frame id="content" data-turbo-cache="false">
+          <%# Main content uses normal Turbo Drive navigation. Only explicitly lazy
+              provider/recommendation sections are Turbo Frames. %>
+          <div id="content">
             <%= yield %>
-          </turbo-frame>
+          </div>
         </main>
 
         <%# Mobile bottom nav %>

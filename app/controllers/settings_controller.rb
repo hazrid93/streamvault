@@ -27,9 +27,9 @@ class SettingsController < ApplicationController
   def clear_local_torrents
     result = LocalTorrentService.new.clear!
     if result.success?
-      redirect_to settings_path, notice: "Temporary local media cleared."
+      redirect_to settings_path, status: :see_other, notice: "Temporary local media cleared."
     else
-      redirect_to settings_path, alert: result.error_message
+      redirect_to settings_path, status: :see_other, alert: result.error_message
     end
   end
 
@@ -44,7 +44,7 @@ class SettingsController < ApplicationController
     end
 
     if @user.set_pin(attributes[:pin], attributes[:pin_confirmation])
-      redirect_to settings_path, notice: "PIN updated successfully."
+      redirect_to settings_path, status: :see_other, notice: "PIN updated successfully."
     else
       load_local_torrent_status
       render :show, status: :unprocessable_entity
@@ -55,14 +55,14 @@ class SettingsController < ApplicationController
 
   def redirect_after_settings_update(verify_realdebrid_key)
     unless verify_realdebrid_key
-      return redirect_to settings_path, notice: "Settings updated."
+      return redirect_to settings_path, status: :see_other, notice: "Settings updated."
     end
 
     result = RealDebridService.new(@user.realdebrid_api_key).verify_key
     if result.success?
-      redirect_to settings_path, notice: "Settings updated. RealDebrid connection verified."
+      redirect_to settings_path, status: :see_other, notice: "Settings updated. RealDebrid connection verified."
     else
-      redirect_to settings_path, alert: "Settings saved, but RealDebrid key could not be verified: #{result.error_message}"
+      redirect_to settings_path, status: :see_other, alert: "Settings saved, but RealDebrid key could not be verified: #{result.error_message}"
     end
   end
 

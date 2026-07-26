@@ -10,7 +10,7 @@
       </div>
       <div data-carousel-target="track" class="scrollbar-hide flex gap-4 overflow-x-auto pb-3" tabindex="0">
         <% @similar.each do |item| %>
-          <%= render "shared/poster_card", item: item, link_path: content_path(type: item[:type].presence || @type, imdb_id: item[:imdb_id]) %>
+          <%= render "shared/poster_card", item: item, link_path: content_path(type: item[:type].presence || @type, imdb_id: item[:imdb_id]), turbo_frame: "_top" %>
         <% end %>
       </div>
     </section>

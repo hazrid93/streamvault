@@ -34,7 +34,7 @@ class LibraryController < ApplicationController
     if @entry.save
       current_user.wishlist_entries.find_by(imdb_id: @entry.imdb_id)&.destroy
       respond_to do |format|
-        format.html { redirect_to library_index_path, notice: "#{@entry.title} added to library." }
+        format.html { redirect_to library_index_path, status: :see_other, notice: "#{@entry.title} added to library." }
         format.json { render json: { ok: true, kind: "library", destroy_url: library_path(@entry), notice: "#{@entry.title} added to library." } }
       end
     else
@@ -47,9 +47,9 @@ class LibraryController < ApplicationController
 
   def update
     if @entry.update(entry_params)
-      redirect_to library_index_path, notice: "#{@entry.title} updated."
+      redirect_to library_index_path, status: :see_other, notice: "#{@entry.title} updated."
     else
-      redirect_to library_index_path, alert: @entry.errors.full_messages.join(", ")
+      redirect_to library_index_path, status: :see_other, alert: @entry.errors.full_messages.join(", ")
     end
   end
 
@@ -57,7 +57,7 @@ class LibraryController < ApplicationController
     title = @entry.title
     @entry.destroy
     respond_to do |format|
-      format.html { redirect_to library_index_path, notice: "#{title} removed from library." }
+      format.html { redirect_to library_index_path, status: :see_other, notice: "#{title} removed from library." }
       format.json { render json: { ok: true, kind: "library" } }
     end
   end
