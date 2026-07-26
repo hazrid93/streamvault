@@ -66,21 +66,27 @@ test("leaving a local player sends one authenticated keepalive stop", () => {
   })
 })
 
-test("native video transitions do not clean an actively playing local source", () => {
+test("returning to mobile Chrome reloads subtitles at the resumed absolute position", () => {
   const player = new VideoPlayerController()
-  let stops = 0
-  const video = { paused: false }
-  Object.defineProperty(player, "videoTarget", { value: video })
-  player.stopLocalTorrent = () => { stops += 1 }
+  let cleared = 0
+  let reloadedAt = null
+  let leaseRefreshes = 0
+  player.textSubtitleSelected = () => true
+  player.currentPlaybackPosition = () => 187.25
+  player.clearSubtitleCues = () => { cleared += 1 }
+  player.reloadTextSubtitlesAt = (position) => { reloadedAt = position }
+  player.refreshLocalTorrentStatus = () => { leaseRefreshes += 1 }
+
   testDocument.visibilityState = "hidden"
+  player.onVisibilityChange()
+  assert.equal(cleared, 0)
+  assert.equal(reloadedAt, null)
 
-  player.cleanupHiddenLocalPlayback()
-  assert.equal(stops, 0)
-
-  video.paused = true
-  player.cleanupHiddenLocalPlayback()
-  assert.equal(stops, 1)
   testDocument.visibilityState = "visible"
+  player.onVisibilityChange()
+  assert.equal(leaseRefreshes, 2)
+  assert.equal(cleared, 1)
+  assert.equal(reloadedAt, 187.25)
 })
 
 test("cast button opens the native AirPlay target picker on Apple browsers", async () => {
@@ -108,7 +114,7 @@ test("an iOS NotSupported HLS response automatically rebuilds instead of showing
     player.startSecondsValue = 58
     player.hasStartupOverlayTarget = false
     player.reportStall = () => {}
-    player.currentAbsoluteTime = () => 58
+    player.currentPlaybackPosition = () => 91
     let restartedAt = null
     player.restartHlsSession = (position) => { restartedAt = position }
 
@@ -117,7 +123,7 @@ test("an iOS NotSupported HLS response automatically rebuilds instead of showing
     assert.equal(player.hlsUnsupportedRecoveries, 1)
     assert.equal(typeof scheduled, "function")
     scheduled()
-    assert.equal(restartedAt, 58)
+    assert.equal(restartedAt, 91)
   } finally {
     context.setTimeout = originalSetTimeout
   }
@@ -481,6 +487,28 @@ test("subtitle responses use the guarded timeline before cue merging", () => {
   assert.equal(player.subtitleCues[0].text, "Window-relative response")
 })
 
+test("subtitle moves above visible controls and returns to the safe-area bottom after they hide", () => {
+  const player = new VideoPlayerController()
+  const styleTarget = () => ({ style: {} })
+  player.backButtonTarget = styleTarget()
+  player.sourceInfoTarget = styleTarget()
+  player.controlsTarget = styleTarget()
+  player.subtitleOverlayTarget = styleTarget()
+  player.hasSubtitleOverlayTarget = true
+  player.videoTarget = { paused: false }
+  player.trackMenuOpen = () => false
+  player.scheduleUiHide = () => {}
+
+  player.showOverlayUi()
+  assert.equal(player.subtitleOverlayTarget.style.bottom, "6.5rem")
+
+  player.hideOverlayUi()
+  assert.equal(
+    player.subtitleOverlayTarget.style.bottom,
+    "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)"
+  )
+})
+
 test("subtitle text renders inside the centered caption box", () => {
   const player = new VideoPlayerController()
   const classes = new Set(["hidden"])
@@ -501,6 +529,43 @@ test("subtitle text renders inside the centered caption box", () => {
 
   assert.equal(player.subtitleTextTarget.textContent, "Centered on the TV")
   assert.equal(classes.has("hidden"), false)
+})
+
+test("subtitle overlay clears stale text when its cue window becomes empty", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set()
+  player.hasSubtitleOverlayTarget = true
+  player.hasSubtitleTextTarget = true
+  player.subtitleOverlayTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name)
+    }
+  }
+  player.subtitleTextTarget = { textContent: "Old dialogue" }
+  player.subtitleCues = []
+  player.ensureSubtitleWindow = () => {}
+
+  player.updateSubtitleOverlay(30)
+
+  assert.equal(player.subtitleTextTarget.textContent, "")
+  assert.equal(classes.has("hidden"), true)
+})
+
+test("subtitle provider rate limits suppress repeated mobile requests", () => {
+  const player = new VideoPlayerController()
+  let retryDelay = null
+  player.scheduleSubtitleRetry = (delay) => { retryDelay = delay }
+
+  const applied = player.applySubtitleResponse({
+    ok: false,
+    status: 429,
+    text: "",
+    retryAfter: 3600
+  })
+
+  assert.equal(applied, false)
+  assert.equal(retryDelay, 3_600_000)
 })
 
 test("subtitle delay buttons update the overlay and stay within the supported range", () => {

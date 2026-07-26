@@ -6,19 +6,22 @@ require "digest"
 class ExternalSubtitleService
   STREAM_PREFIX = "external:"
   WINDOW_LOOK_BEHIND_SECONDS = 5
-  CACHE_TTL = 12.hours
+  CACHE_TTL = 7.days
+  FAILURE_CACHE_TTL = 5.minutes
+  RATE_LIMIT_CACHE_TTL = 6.hours
+  @download_locks_mutex = Mutex.new
+  @download_locks = {}
 
   def self.search(imdb_id:, type:, season: nil, episode: nil, title: nil, filename: nil, preferred_languages: [], default_language: nil)
-    subdl_provider.search(
-      imdb_id: imdb_id,
-      type: type,
-      season: season,
-      episode: episode,
-      title: title,
-      filename: filename,
-      preferred_languages: preferred_languages,
-      default_language: default_language
-    )
+    arguments = {
+      imdb_id: imdb_id, type: type, season: season, episode: episode,
+      title: title, filename: filename,
+      preferred_languages: preferred_languages, default_language: default_language
+    }
+    # The official OpenSubtitles Stremio relay has a high download allowance;
+    # keep SubDL as a release-matched secondary source instead of making its
+    # 50-download daily quota a single point of failure.
+    opensubtitles_provider.search(**arguments) + subdl_provider.search(**arguments)
   end
 
   def self.external_stream?(value)
@@ -33,7 +36,7 @@ class ExternalSubtitleService
   def self.extract_subtitles(stream_id, start_seconds: 0, duration_seconds: TranscodeService::SUBTITLE_EXTRACTION_WINDOW_SECONDS)
     provider, payload = parse_stream_id(stream_id)
     return subtitle_result(:invalid_stream, diagnostic: "invalid external subtitle stream") unless provider && payload
-    return subtitle_result(:unsupported_track, diagnostic: "external subtitle provider is not available") unless provider == "subdl"
+    return subtitle_result(:unsupported_track, diagnostic: "external subtitle provider is not available") unless subtitle_provider(provider)
 
     cues_result = cached_cues(provider, payload)
     return cues_result if cues_result.is_a?(TranscodeService::SubtitleExtractionResult)
@@ -60,6 +63,14 @@ class ExternalSubtitleService
     @subdl_provider = provider
   end
 
+  def self.opensubtitles_provider
+    @opensubtitles_provider ||= OpenSubtitlesStremioProvider.new
+  end
+
+  def self.opensubtitles_provider=(provider)
+    @opensubtitles_provider = provider
+  end
+
   def self.parse_stream_id(stream_id)
     prefix, provider, encoded = stream_id.to_s.split(":", 3)
     return nil unless "#{prefix}:" == STREAM_PREFIX && provider.present? && encoded.present?
@@ -72,20 +83,74 @@ class ExternalSubtitleService
   private_class_method :parse_stream_id
 
   def self.cached_cues(provider, payload)
-    cache_key = "external_subtitles/#{provider}/#{Digest::SHA256.hexdigest(payload)}"
+    digest = Digest::SHA256.hexdigest(payload)
+    cache_key = "external_subtitles/#{provider}/#{digest}"
+    failure_key = "external_subtitles/failures/#{provider}/#{digest}"
     cached = Rails.cache.read(cache_key)
     return cached if cached
+    return cached_failure_result(provider, Rails.cache.read(failure_key)) if Rails.cache.read(failure_key)
 
-    download_result = subdl_provider.download(payload)
-    return subtitle_result(:failed, source: provider, diagnostic: download_result.error_message) if download_result.failure?
+    with_download_lock(cache_key) do
+      cached = Rails.cache.read(cache_key)
+      return cached if cached
+      failure = Rails.cache.read(failure_key)
+      return cached_failure_result(provider, failure) if failure
 
-    cues = parse_subtitle_file(download_result.data)
-    return subtitle_result(:failed, source: provider, diagnostic: "external subtitle file had no readable cues") if cues.empty?
+      download_result = subtitle_provider(provider).download(payload)
+      if download_result.failure?
+        status = download_result.error_code.to_i == 429 ? :rate_limited : :failed
+        ttl = status == :rate_limited ? RATE_LIMIT_CACHE_TTL : FAILURE_CACHE_TTL
+        failure = { status: status.to_s, diagnostic: download_result.error_message.to_s }
+        Rails.cache.write(failure_key, failure, expires_in: ttl)
+        return cached_failure_result(provider, failure)
+      end
 
-    Rails.cache.write(cache_key, cues, expires_in: CACHE_TTL)
-    cues
+      cues = parse_subtitle_file(download_result.data)
+      if cues.empty?
+        failure = { status: "failed", diagnostic: "external subtitle file had no readable cues" }
+        Rails.cache.write(failure_key, failure, expires_in: FAILURE_CACHE_TTL)
+        return cached_failure_result(provider, failure)
+      end
+
+      Rails.cache.write(cache_key, cues, expires_in: CACHE_TTL)
+      cues
+    end
   end
   private_class_method :cached_cues
+
+  def self.with_download_lock(cache_key)
+    entry = @download_locks_mutex.synchronize do
+      current = (@download_locks[cache_key] ||= { mutex: Mutex.new, references: 0 })
+      current[:references] += 1
+      current
+    end
+    entry[:mutex].synchronize { yield }
+  ensure
+    if entry
+      @download_locks_mutex.synchronize do
+        entry[:references] -= 1
+        @download_locks.delete(cache_key) if entry[:references].zero?
+      end
+    end
+  end
+  private_class_method :with_download_lock
+
+  def self.subtitle_provider(provider)
+    case provider.to_s
+    when "subdl" then subdl_provider
+    when "opensubtitles" then opensubtitles_provider
+    end
+  end
+  private_class_method :subtitle_provider
+
+  def self.cached_failure_result(provider, failure)
+    subtitle_result(
+      failure.fetch(:status, failure.fetch("status", "failed")).to_sym,
+      source: provider,
+      diagnostic: failure[:diagnostic] || failure["diagnostic"]
+    )
+  end
+  private_class_method :cached_failure_result
 
   def self.cues_in_window(cues, start_seconds, duration_seconds)
     start_at = normalized_start_seconds(start_seconds)

@@ -35,8 +35,8 @@ class TranscodeTracksController < ApplicationController
     embedded_subtitles = tracks[:subtitles]
     if bitmap_burn_too_expensive?(video_stream)
       # Burning PGS/VobSub forces a full video re-encode. On 4K sources the
-      # software encoder cannot emit data before the playback timeout, so
-      # offer text/external tracks instead of a choice that stalls the movie.
+      # software encoder cannot emit data before the playback timeout, so use
+      # native text tracks from the external providers instead.
       embedded_subtitles = embedded_subtitles.select { |track| track[:text_supported] }
     end
     subtitles = TranscodeService.selectable_subtitle_tracks(embedded_subtitles + external_subtitles)

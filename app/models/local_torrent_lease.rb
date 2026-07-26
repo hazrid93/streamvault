@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
 class LocalTorrentLease < ApplicationRecord
-  HEARTBEAT_TIMEOUT = ENV.fetch("LOCAL_TORRENT_HEARTBEAT_TIMEOUT", 600).to_i.clamp(30, 900).seconds
+  # Mobile browsers suspend JavaScript timers while backgrounded. Keep a
+  # browser lease long enough for a normal app switch/phone lock, while the
+  # explicit player exit still releases immediately.
+  HEARTBEAT_TIMEOUT = ENV.fetch("LOCAL_TORRENT_HEARTBEAT_TIMEOUT", 1800).to_i.clamp(300, 21_600).seconds
 
   belongs_to :user, optional: true
   has_one :cast_session, dependent: :nullify

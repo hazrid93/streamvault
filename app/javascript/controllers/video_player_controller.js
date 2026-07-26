@@ -175,8 +175,8 @@ export default class extends Controller {
     this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
     this.startLocalTorrentStatus()
     this.initializeCasting()
-    this.handleLocalVisibilityChange = () => this.scheduleHiddenLocalCleanup()
-    if (this.localTorrentHashValue) document.addEventListener("visibilitychange", this.handleLocalVisibilityChange)
+    this.visibilityChangeHandler = () => this.onVisibilityChange()
+    document.addEventListener("visibilitychange", this.visibilityChangeHandler)
     this.showOverlayUi()
     this.element.addEventListener("mousemove", this.mouseMoveHandler)
     document.addEventListener("keydown", this.keydownHandler)
@@ -228,8 +228,7 @@ export default class extends Controller {
     this.stopProgressTracking()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
     this.localStatusInterval = null
-    if (this.handleLocalVisibilityChange) document.removeEventListener("visibilitychange", this.handleLocalVisibilityChange)
-    if (this.hiddenLocalCleanupTimer) clearTimeout(this.hiddenLocalCleanupTimer)
+    if (this.visibilityChangeHandler) document.removeEventListener("visibilitychange", this.visibilityChangeHandler)
     this.stopLocalTorrent()
     // Save progress only if navigateBack hasn't already done it.
     if (!this.navigatingAway) this.saveProgressSync()
@@ -396,41 +395,44 @@ export default class extends Controller {
   startLocalTorrentStatus() {
     if (!this.hasLocalStatsTarget || !this.localTorrentHashValue || !this.localStatusUrlValue) return
 
-    const refresh = async () => {
-      try {
-        const query = new URLSearchParams({
-          info_hash: this.localTorrentHashValue,
-          session_token: this.localTorrentSessionValue
-        })
-        const response = await fetch(`${this.localStatusUrlValue}?${query}`, { headers: { Accept: "application/json" } })
-        if (!response.ok) return
-        const status = await response.json()
-        const down = this.formatByteRate(status.download_speed)
-        const up = this.formatByteRate(status.upload_speed)
-        this.localStatsTarget.textContent = `${status.seeders || 0} seeders · ${status.peers || 0} peers · ↓ ${down} · ↑ ${up}`
-      } catch (error) {
-        console.warn("Local torrent status failed:", error)
-      }
+    this.refreshLocalTorrentStatus()
+    this.localStatusInterval = setInterval(() => this.refreshLocalTorrentStatus(), 5000)
+  }
+
+  async refreshLocalTorrentStatus() {
+    if (!this.localTorrentHashValue || !this.localStatusUrlValue) return
+
+    try {
+      const query = new URLSearchParams({
+        info_hash: this.localTorrentHashValue,
+        session_token: this.localTorrentSessionValue
+      })
+      const response = await fetch(`${this.localStatusUrlValue}?${query}`, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" }
+      })
+      if (!response.ok) return
+      const status = await response.json()
+      if (!this.hasLocalStatsTarget) return
+
+      const down = this.formatByteRate(status.download_speed)
+      const up = this.formatByteRate(status.upload_speed)
+      this.localStatsTarget.textContent = `${status.seeders || 0} seeders · ${status.peers || 0} peers · ↓ ${down} · ↑ ${up}`
+    } catch (error) {
+      console.warn("Local torrent status failed:", error)
     }
-
-    refresh()
-    this.localStatusInterval = setInterval(refresh, 5000)
   }
 
-  scheduleHiddenLocalCleanup() {
-    if (this.hiddenLocalCleanupTimer) clearTimeout(this.hiddenLocalCleanupTimer)
-    this.hiddenLocalCleanupTimer = null
-    if (document.visibilityState !== "hidden") return
+  onVisibilityChange() {
+    // Refresh the browser lease both when mobile Chrome backgrounds and when
+    // it returns. Do not treat a backgrounded, OS-paused tab as an explicit
+    // player exit; the user must be able to resume the same local torrent.
+    this.refreshLocalTorrentStatus()
+    if (document.visibilityState !== "visible" || !this.textSubtitleSelected()) return
 
-    // iOS may briefly hide the document while entering native video/fullscreen.
-    // Never tear down an actively playing source during that transition. A
-    // genuinely abandoned paused/background tab is cleaned after a grace
-    // period; browser crashes still fall back to TorrServer's disconnect TTL.
-    this.hiddenLocalCleanupTimer = setTimeout(() => this.cleanupHiddenLocalPlayback(), 45000)
-  }
-
-  cleanupHiddenLocalPlayback() {
-    if (document.visibilityState === "hidden" && this.videoTarget.paused) this.stopLocalTorrent()
+    const position = this.currentPlaybackPosition()
+    this.clearSubtitleCues()
+    this.reloadTextSubtitlesAt(position)
   }
 
   stopLocalTorrent() {
@@ -1053,7 +1055,7 @@ export default class extends Controller {
       if (sub) sub.textContent = "Reconnecting automatically..."
     }
 
-    const restartAt = Math.max(this.startSecondsValue || 0, this.currentAbsoluteTime?.() || 0)
+    const restartAt = Math.max(this.startSecondsValue || 0, this.currentPlaybackPosition())
     setTimeout(() => {
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
       this.restartHlsSession(restartAt)
@@ -3046,7 +3048,12 @@ export default class extends Controller {
       signal
     })
     const text = response.status === 204 ? "" : await response.text()
-    return { ok: response.ok, status: response.status, text }
+    return {
+      ok: response.ok,
+      status: response.status,
+      text,
+      retryAfter: Number.parseInt(response.headers.get("Retry-After") || "0", 10)
+    }
   }
 
   rememberPrefetchedSubtitleResponse(requestKey, response) {
@@ -3068,7 +3075,10 @@ export default class extends Controller {
     }
 
     if (!response.ok) {
-      this.scheduleSubtitleRetry()
+      const retryMs = response.status === 429 && Number.isFinite(response.retryAfter)
+        ? Math.max(5000, response.retryAfter * 1000)
+        : 5000
+      this.scheduleSubtitleRetry(retryMs)
       return false
     }
 
@@ -3320,7 +3330,11 @@ export default class extends Controller {
   updateSubtitleOverlay(currentPos) {
     if (!this.hasSubtitleOverlayTarget) return
     this.ensureSubtitleWindow(currentPos)
-    if (this.subtitleCues.length === 0) return
+    if (this.subtitleCues.length === 0) {
+      if (this.hasSubtitleTextTarget) this.subtitleTextTarget.textContent = ""
+      this.subtitleOverlayTarget.classList.add("hidden")
+      return
+    }
 
     const effectivePos = currentPos - this.subtitleOffset
     const activeCues = this.subtitleCues

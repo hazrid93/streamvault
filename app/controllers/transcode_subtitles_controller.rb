@@ -24,6 +24,9 @@ class TranscodeSubtitlesController < ApplicationController
       render json: { error: "Subtitle track is not available" }, status: :unprocessable_entity
     when :timeout
       render json: { error: "Subtitle extraction timed out" }, status: :gateway_timeout
+    when :rate_limited
+      response.set_header("Retry-After", ExternalSubtitleService::RATE_LIMIT_CACHE_TTL.to_i.to_s)
+      render json: { error: "Subtitle provider is temporarily rate limited" }, status: :too_many_requests
     else
       render json: { error: "Subtitle extraction failed" }, status: :bad_gateway
     end

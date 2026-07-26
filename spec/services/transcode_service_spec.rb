@@ -156,6 +156,40 @@ RSpec.describe TranscodeService do
       expect(commands).to all(include("-c:v", "copy"))
     end
 
+    it "retries a cold local track probe so embedded subtitles are not cached as missing" do
+      partial_output = {
+        "format" => { "nb_streams" => 3 },
+        "streams" => [
+          { "index" => 0, "codec_type" => "video", "codec_name" => "hevc" },
+          { "index" => 1, "codec_type" => "audio", "codec_name" => "eac3", "channels" => 6 }
+        ]
+      }.to_json
+      ready_output = {
+        "format" => { "nb_streams" => 3 },
+        "streams" => [
+          { "index" => 0, "codec_type" => "video", "codec_name" => "hevc" },
+          { "index" => 1, "codec_type" => "audio", "codec_name" => "eac3", "channels" => 6, "tags" => { "language" => "eng" } },
+          { "index" => 3, "codec_type" => "subtitle", "codec_name" => "hdmv_pgs_subtitle", "tags" => { "language" => "eng" } }
+        ]
+      }.to_json
+      calls = 0
+      allow(described_class).to receive(:local_torrent_input?).and_return(true)
+      allow(described_class).to receive(:sleep)
+      allow(described_class).to receive(:capture_command) do |_cmd, **_kwargs|
+        calls += 1
+        capture_result(calls == 1 ? partial_output : ready_output)
+      end
+
+      first = described_class.probe_media_tracks("http://torrserver:8090/stream/movie.mkv")
+      cached = described_class.probe_media_tracks("http://torrserver:8090/stream/movie.mkv")
+
+      expect(calls).to eq(2)
+      expect(first[:audio].pluck(:index)).to eq([ 1 ])
+      expect(first[:subtitles].pluck(:index)).to eq([ 3 ])
+      expect(cached).to eq(first)
+      expect(described_class).to have_received(:sleep).once
+    end
+
     it "retries an empty local torrent probe and caches only the usable result" do
       empty_output = { "streams" => [] }.to_json
       ready_output = {

@@ -139,6 +139,8 @@ class TranscodeService
   # beginning of the selected file.
   LOCAL_VIDEO_PROBE_ATTEMPTS = 10
   LOCAL_VIDEO_PROBE_INTERVAL_SECONDS = 1
+  LOCAL_PROBE_MAX_WAIT_SECONDS = 20
+  LOCAL_PROBE_COMMAND_TIMEOUT_SECONDS = 5
 
   class TranscodeError < StandardError; end
 
@@ -470,30 +472,70 @@ class TranscodeService
       cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
       cmd += [
         "-show_entries",
-        "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke",
+        "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke:format=nb_streams",
         "-of",
         "json",
         input_url
       ]
 
-      result = capture_command(cmd, timeout_seconds: 10)
-      if result.status&.success?
-        tracks = extract_media_tracks(result.stdout)
-        cache_store(
-          input_url,
-          headers: headers,
-          media_tracks: tracks,
-          subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
-        )
-      else
-        tracks = empty_media_tracks
-        cache_store(input_url, headers: headers, media_tracks: tracks, subtitle_stream_start_times: {})
+      local_input = local_torrent_input?(input_url)
+      attempts = local_input ? LOCAL_VIDEO_PROBE_ATTEMPTS : 1
+      deadline = monotonic_now + LOCAL_PROBE_MAX_WAIT_SECONDS
+
+      attempts.times do |attempt|
+        command_timeout = local_input ? LOCAL_PROBE_COMMAND_TIMEOUT_SECONDS : 10
+        result = capture_command(cmd, timeout_seconds: command_timeout)
+        if result.status&.success? && probe_output_has_stream?(result.stdout)
+          tracks = extract_media_tracks(result.stdout)
+          # A cold MKV can reveal only its video stream first. Do not cache
+          # that partial answer as "no audio/subtitles"; keep warming until
+          # at least one selectable track is visible. Video-only local files
+          # simply reach the bounded deadline and remain uncached.
+          local_tracks_incomplete = local_input && (
+            !probe_output_complete?(result.stdout) ||
+            (tracks[:audio].empty? && tracks[:subtitles].empty?)
+          )
+          unless local_tracks_incomplete
+            cache_store(
+              input_url,
+              headers: headers,
+              media_tracks: tracks,
+              subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
+            )
+            return tracks
+          end
+        end
+
+        break if attempt == attempts - 1 || monotonic_now >= deadline
+        Rails.logger.info("[Transcode] Local stream is warming; retrying track probe (#{attempt + 2}/#{attempts})") if defined?(Rails)
+        remaining = [ deadline - monotonic_now, 0 ].max
+        sleep [ LOCAL_VIDEO_PROBE_INTERVAL_SECONDS, remaining ].min if remaining.positive?
       end
+
+      tracks = empty_media_tracks
+      cache_store(input_url, headers: headers, media_tracks: tracks, subtitle_stream_start_times: {}) unless local_input
       tracks
     end
   rescue StandardError
     empty_media_tracks
   end
+
+  def self.probe_output_has_stream?(output)
+    data = JSON.parse(output)
+    Array(data["streams"]).any?
+  rescue JSON::ParserError
+    false
+  end
+  private_class_method :probe_output_has_stream?
+
+  def self.probe_output_complete?(output)
+    data = JSON.parse(output)
+    expected = data.dig("format", "nb_streams").to_i
+    expected <= 0 || Array(data["streams"]).length >= expected
+  rescue JSON::ParserError
+    false
+  end
+  private_class_method :probe_output_complete?
 
   def self.extract_subtitle_stream_start_times(output)
     data = JSON.parse(output)
@@ -1294,18 +1336,21 @@ class TranscodeService
 
       local_input = local_torrent_input?(input_url)
       attempts = local_input ? LOCAL_VIDEO_PROBE_ATTEMPTS : 1
+      deadline = monotonic_now + LOCAL_PROBE_MAX_WAIT_SECONDS
 
       attempts.times do |attempt|
-        result = capture_command(cmd, timeout_seconds: 10)
+        command_timeout = local_input ? LOCAL_PROBE_COMMAND_TIMEOUT_SECONDS : 10
+        result = capture_command(cmd, timeout_seconds: command_timeout)
         stream = result.status&.success? ? extract_video_stream(result.stdout) : {}
         if usable_video_probe?(stream)
           cache_store(input_url, headers: headers, video_stream: stream)
           return stream
         end
 
-        break if attempt == attempts - 1
+        break if attempt == attempts - 1 || monotonic_now >= deadline
         Rails.logger.info("[Transcode] Local stream is warming; retrying video probe (#{attempt + 2}/#{attempts})") if defined?(Rails)
-        sleep LOCAL_VIDEO_PROBE_INTERVAL_SECONDS
+        remaining = [ deadline - monotonic_now, 0 ].max
+        sleep [ LOCAL_VIDEO_PROBE_INTERVAL_SECONDS, remaining ].min if remaining.positive?
       end
 
       # Preserve the short negative cache for ordinary remote failures, but
@@ -1318,6 +1363,11 @@ class TranscodeService
     {}
   end
   public_class_method :probe_video_stream
+
+  def self.monotonic_now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+  private_class_method :monotonic_now
 
   def self.local_torrent_input?(input_url)
     return false unless defined?(LocalTorrentService) && LocalTorrentService.enabled?

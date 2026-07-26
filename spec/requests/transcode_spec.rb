@@ -145,7 +145,7 @@ RSpec.describe "Transcode", type: :request do
       expect(body["remux_direct_url"]).to start_with("/transcode?url=")
     end
 
-    it "omits embedded bitmap subtitles that would stall a 4K transcode" do
+    it "uses fullscreen-safe external text subtitles instead of bitmap tracks for UHD playback" do
       tracks = {
         audio: [],
         subtitles: [
@@ -311,6 +311,22 @@ RSpec.describe "Transcode", type: :request do
         start_seconds: 30.0,
         duration_seconds: 60
       )
+    end
+
+    it "returns provider rate limits with a long retry interval" do
+      allow(ExternalSubtitleService).to receive(:extract_subtitles).and_return(
+        TranscodeService::SubtitleExtractionResult.new(
+          status: :rate_limited, vtt: "", cue_count: 0, source: :subdl
+        )
+      )
+
+      get transcode_subtitles_path, params: {
+        url: "https://download.real-debrid.com/d/file123/Inception.mkv",
+        subtitle_stream: "external:subdl:abc"
+      }
+
+      expect(response).to have_http_status(:too_many_requests)
+      expect(response.headers["Retry-After"]).to eq("21600")
     end
 
     it "uses the default subtitle window when duration is omitted" do

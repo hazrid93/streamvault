@@ -8,6 +8,7 @@ RSpec.describe ExternalSubtitleService do
 
   after do
     described_class.subdl_provider = nil
+    described_class.opensubtitles_provider = nil
     Rails.cache = @original_cache
   end
 
@@ -45,6 +46,64 @@ RSpec.describe ExternalSubtitleService do
 
       described_class.extract_subtitles(stream_id, start_seconds: 30, duration_seconds: 10)
       expect(provider).to have_received(:download).once
+    end
+
+    it "downloads OpenSubtitles tracks through the same absolute WebVTT timeline" do
+      provider = instance_double(OpenSubtitlesStremioProvider)
+      allow(provider).to receive(:download).and_return(
+        ServiceResult.success("1\n00:02:31,250 --> 00:02:33,500\nPerfect timing\n")
+      )
+      described_class.opensubtitles_provider = provider
+      stream_id = described_class.stream_id(
+        "opensubtitles",
+        "https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/1"
+      )
+
+      result = described_class.extract_subtitles(stream_id, start_seconds: 150, duration_seconds: 60)
+
+      expect(result.status).to eq(:ok)
+      expect(result.source).to eq("opensubtitles")
+      expect(result.vtt).to include("00:02:31.250 --> 00:02:33.500")
+      expect(result.vtt).to include("Perfect timing")
+    end
+
+    it "caches provider rate limits instead of exhausting the quota in a retry loop" do
+      provider = instance_double(SubdlSubtitleProvider)
+      allow(provider).to receive(:download).and_return(ServiceResult.failure("Daily limit reached", 429))
+      described_class.subdl_provider = provider
+      stream_id = described_class.stream_id("subdl", "/subtitle/123/limited")
+
+      first = described_class.extract_subtitles(stream_id, start_seconds: 0)
+      second = described_class.extract_subtitles(stream_id, start_seconds: 30)
+
+      expect(first.status).to eq(:rate_limited)
+      expect(second.status).to eq(:rate_limited)
+      expect(provider).to have_received(:download).once
+    end
+
+    it "does not serialize downloads for unrelated subtitle files" do
+      provider = instance_double(OpenSubtitlesStremioProvider)
+      mutex = Mutex.new
+      active = 0
+      maximum_active = 0
+      allow(provider).to receive(:download) do
+        mutex.synchronize do
+          active += 1
+          maximum_active = [ maximum_active, active ].max
+        end
+        sleep 0.05
+        mutex.synchronize { active -= 1 }
+        ServiceResult.success("1\n00:00:01,000 --> 00:00:02,000\nParallel\n")
+      end
+      described_class.opensubtitles_provider = provider
+      streams = %w[1 2].map do |id|
+        described_class.stream_id("opensubtitles", "https://subs5.strem.io/en/download/file/#{id}")
+      end
+
+      threads = streams.map { |stream| Thread.new { described_class.extract_subtitles(stream, start_seconds: 0) } }
+      threads.each(&:value)
+
+      expect(maximum_active).to eq(2)
     end
 
     it "accepts WebVTT subtitle downloads before applying the media window" do

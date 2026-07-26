@@ -232,7 +232,7 @@ docker compose up -d --build
 | `TORRSERVER_PASSWORD` | Random sidecar password (`openssl rand -hex 32`) | required |
 | `LOCAL_TORRENT_GLOBAL_CACHE_BYTES` | Aggregate budget shared by every concurrent local torrent | `16106127360` (15 GiB) |
 | `LOCAL_TORRENT_PER_TORRENT_CACHE_BYTES` | Rolling window reserved per distinct torrent; not a title-size limit | `2147483648` (2 GiB) |
-| `LOCAL_TORRENT_HEARTBEAT_TIMEOUT` | Seconds without a viewer/receiver heartbeat before its lease expires | `600` |
+| `LOCAL_TORRENT_HEARTBEAT_TIMEOUT` | Background/mobile viewer grace before its lease expires | `1800` (30 minutes) |
 | `LOCAL_TORRENT_MIN_FREE_BYTES` | Refuse new local playback below this server free-space reserve | `5368709120` (5 GiB) |
 | `LOCAL_TORRENT_DISCONNECT_TIMEOUT` | Seconds after the final reader disconnects before its cache is removed | `60` |
 | `LOCAL_TORRENT_UPLOAD_LIMIT_KBPS` | BitTorrent upload limit in KiB/s (`0` is unlimited) | `512` |
