@@ -112,7 +112,7 @@ class TorrentioService
     # Stream listings depend on the user's RealDebrid account (Torrentio
     # embeds the RD key in the path and checks RD instant availability
     # per key), so cache per-RD-key-hash.  Stale-while-revalidate.
-    cache_key = "torrentio:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    cache_key = stream_cache_key(imdb_id, type, season: season, episode: episode)
     parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
       fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
     end
@@ -124,6 +124,10 @@ class TorrentioService
     result = filter_by_preferred_languages(result, language_priority, default_language: default_language) if language_priority.present?
     result = sort_streams(result, language_priority: language_priority)
     ServiceResult.success(result)
+  end
+
+  def stream_cache_key(imdb_id, type, season: nil, episode: nil)
+    "torrentio:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
   end
 
   # Fetch + parse raw streams from Torrentio (no language filtering).

@@ -57,7 +57,7 @@ class CometService
     # RD instant availability per key, and resolve URLs embed the key), so
     # cache per-RD-key-hash.  Stale-while-revalidate: a stale listing is
     # served instantly and refreshed in the background.
-    cache_key = "comet:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
+    cache_key = stream_cache_key(imdb_id, type, season: season, episode: episode)
     parsed = cached_fetch(cache_key, ttl: STREAMS_CACHE_TTL) do
       fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
     end
@@ -71,6 +71,10 @@ class CometService
     result = filter_by_preferred_languages(result, language_priority) if language_priority.present?
     result = sort_streams(result, language_priority: language_priority)
     ServiceResult.success(result)
+  end
+
+  def stream_cache_key(imdb_id, type, season: nil, episode: nil)
+    "comet:streams:v#{STREAM_CACHE_VERSION}:#{rd_key_hash}/#{imdb_id}/#{type}/#{season}/#{episode}"
   end
 
   # Fetch + parse raw streams from Comet (no language filtering).  Returns

@@ -34,31 +34,10 @@ class HomeController < ApplicationController
 
   private
 
-  # Warm per-account stream cache for ALL cached catalog titles (not
-  # just the visible carousel subset), so any popular/new-release title
-  # plays instantly.  Runs once per account: only triggers when the
-  # account's stream cache is cold or older than the stream TTL, so
-  # returning users don't re-trigger it on every Home load.
+  # Atomically enqueue one durable per-account warm. The job, not the Puma
+  # request, owns provider concurrency and completion bookkeeping.
   def prefetch_visible_streams
-    return unless current_user.has_realdebrid_key?
-
-    # Only warm if never warmed or the last warm is older than the
-    # stream cache freshness window (so fresh entries get refreshed).
-    return if current_user.streams_warmed_at.present? &&
-               current_user.streams_warmed_at > ApiCache::FRESH_TTL.ago
-
-    Thread.new do
-      ActiveRecord::Base.connection_pool.with_connection do
-        StreamPrefetcher.new(
-          rd_api_key: current_user.realdebrid_api_key,
-          preferred_languages: current_user.preferred_stream_languages,
-          default_language: current_user.default_stream_language
-        ).warm_all
-        current_user.update_column(:streams_warmed_at, Time.current)
-      end
-    rescue StandardError => e
-      Rails.logger.error("[HomeController] stream prefetch error: #{e.message}")
-    end
+    StreamPrefetchJob.enqueue_for(current_user)
   end
 
   def fetch_up_next

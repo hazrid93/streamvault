@@ -211,9 +211,9 @@
       <li><span class="text-sv-success">Fresh</span> (&lt; 1 day) — served instantly from DB.</li>
       <li><span class="text-sv-warning">Stale</span> (&gt; 1 day) — served instantly, refreshed in the background.</li>
       <li><span class="text-sv-accent">Fetching</span> — a background refresh thread holds the advisory lock on this key.</li>
-      <li><b>Boot warmer</b> — runs 10s after startup, pre-warms ~100 popular + ~100 new-release titles per type.</li>
-      <li><b>Periodic re-warm</b> — every <%= humanize_duration(@warmer_status[:rewarm_interval]) %>, re-fetches all entries and discovers new titles.</li>
-      <li><b>Stream prefetcher</b> — per-account, warms streams for all discovered titles on Home visit (once per hour per user).</li>
+      <li><b>Boot warmer</b> — a durable queue job runs after startup and warms ~100 popular + ~50 new-release titles per type.</li>
+      <li><b>Periodic re-warm</b> — every <%= humanize_duration(@warmer_status[:rewarm_interval]) %>, refreshes the same bounded catalog set and its metadata.</li>
+      <li><b>Stream prefetcher</b> — per-account, warms movie streams with six-request concurrency at most once per day; shows remain episode-specific.</li>
     </ul>
   </div>
 </div>

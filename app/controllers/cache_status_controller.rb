@@ -148,19 +148,41 @@ class CacheStatusController < ApplicationController
   # ---- Per-account stream prefetch ---------------------------------------
 
   def build_stream_status
-    users = User.where.not(realdebrid_api_key: [nil, ""]).to_a
+    users = User.where.not(realdebrid_api_key: [ nil, "" ]).to_a
+    movie_ids = cached_movie_ids
     users.map do |u|
       hash = Digest::SHA256.hexdigest(u.realdebrid_api_key)[0, 16]
-      comet = ApiCache.where("key LIKE ?", "comet:streams:#{hash}%").count
-      torrentio = ApiCache.where("key LIKE ?", "torrentio:streams:#{hash}%").count
-      total_titles = build_crawler_status[:titles_discovered]
+      comet_keys = movie_ids.map do |id|
+        "comet:streams:v#{CometService::STREAM_CACHE_VERSION}:#{hash}/#{id}/movie//"
+      end
+      torrentio_keys = movie_ids.map do |id|
+        "torrentio:streams:v#{TorrentioService::STREAM_CACHE_VERSION}:#{hash}/#{id}/movie//"
+      end
+      cached_keys = ApiCache.where(key: comet_keys + torrentio_keys).pluck(:key).to_set
+      comet = comet_keys.count { |key| cached_keys.include?(key) }
+      torrentio = torrentio_keys.count { |key| cached_keys.include?(key) }
+      covered = movie_ids.each_index.count do |index|
+        cached_keys.include?(comet_keys[index]) || cached_keys.include?(torrentio_keys[index])
+      end
+      total_titles = movie_ids.size
       {
         email: u.email,
         warmed_at: u.streams_warmed_at,
         comet_cached: comet,
         torrentio_cached: torrentio,
-        coverage_pct: total_titles.zero? ? 0 : (comet.to_f / total_titles * 100).round(1)
+        coverage_pct: total_titles.zero? ? 0 : (covered.to_f / total_titles * 100).round(1)
       }
-    end.sort_by { |h| -h[:comet_cached] }
+    end.sort_by { |status| -(status[:comet_cached] + status[:torrentio_cached]) }
+  end
+
+  def cached_movie_ids
+    ids = Set.new
+    keys = CacheWarmer.catalog_slices.filter_map { |slice| slice[:key] if slice[:type] == "movie" }
+    ApiCache.where(key: keys).find_each do |record|
+      Array(record.payload).each do |item|
+        ids << item["imdb_id"] if item["type"] == "movie" && item["imdb_id"].present?
+      end
+    end
+    ids.to_a
   end
 end

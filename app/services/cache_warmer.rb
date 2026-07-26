@@ -1,17 +1,17 @@
 # frozen_string_literal: true
 
 # Pre-warms and refreshes the ApiCache table for high-traffic content.
-# Called on boot and every REWARM_INTERVAL by the cache_warmer initializer.
+# Called on boot and every REWARM_INTERVAL by CacheWarmerJob/Solid Queue.
 # All work is wrapped so one failing slice never aborts the rest.
 #
 # Crawl scope (bounded to limit upstream load):
 #   - popular: top 100 movies + top 100 series (cinemeta "top", 2 pages)
-#   - new releases: top 100 for the current year (cinemeta "year")
-#   - title metadata for every title surfaced above
+#   - new releases: top 50 for the current year (cinemeta "year")
+#   - title metadata for the unique titles fetched in this run
 #
-# This warmer BYPASSES the cache-read path (it calls the *_uncached
-# fetchers directly and upserts), so a periodic re-warm actually refreshes
-# entries instead of short-circuiting on the fresh cache it just built.
+# Catalog polling bypasses the cache-read path so periodic runs discover
+# newly popular releases. Metadata uses its one-day freshness window and only
+# calls the uncached fetcher for missing/stale titles.
 # The advisory lock in Cacheable still applies to per-request refreshes;
 # here we upsert directly (idempotent), so no lock is needed.
 #
@@ -31,6 +31,32 @@ class CacheWarmer
   # across all Puma workers/processes — in-memory state isn't visible
   # cross-process).  Updated on every warm event.
   STATUS_KEY = "internal:warmer:status"
+
+  # The single bounded catalog definition shared by metadata warming,
+  # account stream prefetch, and dashboard coverage. Keeping these slices in
+  # one place prevents search/history catalog rows from expanding the crawl.
+  def self.catalog_slices(year: Date.current.year)
+    %w[movie show].flat_map do |type|
+      cinemeta_type = type == "show" ? "series" : type
+      [ nil, PAGE_SIZE ].map do |skip|
+        {
+          type: type,
+          cinemeta_type: cinemeta_type,
+          catalog_id: "top",
+          genre: nil,
+          skip: skip,
+          key: "cinemeta:catalog/#{cinemeta_type}/top//#{skip}/#{PAGE_SIZE}"
+        }
+      end + [ {
+        type: type,
+        cinemeta_type: cinemeta_type,
+        catalog_id: "year",
+        genre: year.to_s,
+        skip: nil,
+        key: "cinemeta:catalog/#{cinemeta_type}/year/#{year}//#{PAGE_SIZE}"
+      } ]
+    end
+  end
 
   # Read the persisted status (boot + periodic).  Returns nil if the
   # warmer hasn't run yet this boot.
@@ -63,8 +89,8 @@ class CacheWarmer
   end
 
   def warm_all
-    warm_catalogs
-    warm_metadata_for_cached_titles
+    titles = warm_catalogs
+    warm_metadata_for_titles(titles)
   end
 
   # Instrumented wrapper used by the initializer so the status registry
@@ -101,57 +127,47 @@ class CacheWarmer
   # Calls the uncached fetcher + upserts directly so a re-warm refreshes
   # the entry instead of reading the fresh cache and no-opping.
   def warm_catalogs
-    this_year = Date.today.year
+    titles = {}
 
-    %w[movie show].each do |type|
-      cinemeta_type = type == "show" ? "series" : type
-
-      # Popular: 2 pages × PAGE_SIZE ≈ top 100.
-      2.times do |i|
-        skip = i * PAGE_SIZE
-        key = "cinemeta:catalog/#{cinemeta_type}/top///#{PAGE_SIZE}"
-        warm_slice(key) do
-          path = @service.build_catalog_path(cinemeta_type, "top", nil, skip)
-          @service.fetch_catalog_uncached(path, type, PAGE_SIZE)
-        end
+    self.class.catalog_slices.each do |slice|
+      payload = warm_slice(slice[:key]) do
+        path = @service.build_catalog_path(
+          slice[:cinemeta_type], slice[:catalog_id], slice[:genre], slice[:skip]
+        )
+        @service.fetch_catalog_uncached(path, slice[:type], PAGE_SIZE)
       end
-
-      # New releases for the current year (1 page ≈ top 100 by recency).
-      key = "cinemeta:catalog/#{cinemeta_type}/year/#{this_year}//#{PAGE_SIZE}"
-      warm_slice(key) do
-        path = @service.build_catalog_path(cinemeta_type, "year", this_year.to_s, nil)
-        @service.fetch_catalog_uncached(path, type, PAGE_SIZE)
-      end
+      collect_titles!(titles, payload)
     end
+
+    titles
   end
 
-  # Walk every cached catalog page and warm/refresh title metadata for
-  # each imdb_id it references.
-  def warm_metadata_for_cached_titles
-    imdb_ids = collect_imdb_ids_from_catalogs
-    Rails.logger.info("[CacheWarmer] warming metadata for #{imdb_ids.size} titles")
+  # Warm only titles from the six bounded catalog slices fetched in this
+  # run. Scanning every historical/search catalog row made upstream work
+  # grow forever as users browsed new filters.
+  def warm_metadata_for_titles(titles)
+    Rails.logger.info("[CacheWarmer] warming metadata for #{titles.size} titles")
 
-    imdb_ids.each do |imdb_id, type|
+    titles.each do |imdb_id, type|
       cinemeta_type = type == "show" ? "series" : type
       key = "cinemeta:meta:#{cinemeta_type}/#{imdb_id}"
-      warm_slice(key) do
-        @service.fetch_metadata_uncached(imdb_id, type)
-      end
+      # Catalogs are polled every three hours to discover movement, but title
+      # metadata has a one-day TTL. Avoid re-fetching hundreds of still-fresh
+      # records on every catalog poll.
+      next if ApiCache.find_by(key: key)&.fresh?(TorrentioService::METADATA_CACHE_TTL)
+
+      warm_slice(key) { @service.fetch_metadata_uncached(imdb_id, type) }
     end
   end
 
-  # Scan cached catalog payloads for imdb_ids and their content type.
-  def collect_imdb_ids_from_catalogs
-    seen = {}
-    ApiCache.where("key LIKE ?", "cinemeta:catalog/%").find_each do |record|
-      payload = record.payload
-      next unless payload.is_a?(Array)
-      payload.each do |item|
-        id = item["imdb_id"]
-        seen[id] = item["type"] if id.present?
-      end
+  def collect_titles!(titles, payload)
+    Array(payload).each do |item|
+      imdb_id = item["imdb_id"] || item[:imdb_id]
+      type = item["type"] || item[:type]
+      next unless imdb_id.to_s.match?(/\Att\d+\z/) && type.to_s.in?(%w[movie show])
+
+      titles[imdb_id] = type
     end
-    seen
   end
 
   # Fetch + upsert one slice, isolating failures.  nil payloads (fetch
@@ -159,8 +175,14 @@ class CacheWarmer
   # clobber a previously-good cache entry with an empty/error result.
   def warm_slice(key)
     payload = yield
-    ApiCache.upsert(key, payload) unless payload.nil?
+    # The uncached catalog fetcher returns [] on upstream failure. Never let
+    # a transient outage replace a previously-good hot entry with emptiness.
+    return nil if payload.blank?
+
+    ApiCache.upsert(key, payload)
+    payload
   rescue StandardError => e
     Rails.logger.error("[CacheWarmer] slice failed for #{key}: #{e.message}")
+    nil
   end
 end

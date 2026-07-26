@@ -165,26 +165,10 @@ class ContentController < ApplicationController
 
   private
 
-  # Trigger a full per-account stream cache warm in the background
-  # (once per TTL).  cached_fetch no-ops on fresh entries, so this is
-  # cheap for returning users.
+  # Home and Content can be requested together; enqueue_for claims the user
+  # row before scheduling so both paths cannot start duplicate full warms.
   def prefetch_stream_cache
-    return unless current_user.has_realdebrid_key?
-    return if current_user.streams_warmed_at.present? &&
-               current_user.streams_warmed_at > ApiCache::FRESH_TTL.ago
-
-    Thread.new do
-      ActiveRecord::Base.connection_pool.with_connection do
-        StreamPrefetcher.new(
-          rd_api_key: current_user.realdebrid_api_key,
-          preferred_languages: current_user.preferred_stream_languages,
-          default_language: current_user.default_stream_language
-        ).warm_all
-        current_user.update_column(:streams_warmed_at, Time.current)
-      end
-    rescue StandardError => e
-      Rails.logger.error("[ContentController] stream prefetch error: #{e.message}")
-    end
+    StreamPrefetchJob.enqueue_for(current_user)
   end
 
   # Fetch streams from all configured providers in parallel, merging results.

@@ -22,20 +22,28 @@ class ApiCache < ApplicationRecord
   # Insert or update a cache entry in one round-trip.  Clears the
   # advisory lock and any prior error.
   def self.upsert(key, payload)
+    raise ArgumentError, "cache key is required" if key.blank?
+
     now = Time.current
-    record = find_or_initialize_by(key: key)
-    record.payload = payload
-    record.cached_at = now
-    record.fetching = false
-    record.fetch_error = nil
-    record.save!
-    record
-  rescue ActiveRecord::RecordNotUnique
-    # Lost the create race (two threads initialised the same missing key
-    # concurrently) — reload the winning record and update it.
-    record = find_by!(key: key)
-    record.update!(payload: payload, cached_at: now, fetching: false, fetch_error: nil)
-    record
+    # A find_or_initialize_by + save pair is not atomic: the model-level
+    # uniqueness validation can race before PostgreSQL raises RecordNotUnique.
+    # Use one INSERT ... ON CONFLICT statement so a live request and a warmer
+    # can safely publish the same key concurrently.
+    upsert_all(
+      [ {
+        key: key,
+        payload: payload,
+        cached_at: now,
+        fetching: false,
+        fetch_error: nil,
+        created_at: now,
+        updated_at: now
+      } ],
+      unique_by: :index_api_caches_on_key,
+      update_only: %i[payload cached_at fetching fetch_error updated_at],
+      record_timestamps: false
+    )
+    find_by!(key: key)
   end
 
   # Atomically claim the refresh lock for a record so only one thread
