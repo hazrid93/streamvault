@@ -55,6 +55,14 @@ class Rack::Attack
     authenticated_user_id(request)
   end
 
+  # Cast preparation starts an FFmpeg HLS session and may retain a local
+  # torrent lease, so bound repeated device-picker retries per user.
+  throttle("cast_start/user", limit: 3, period: 10.seconds) do |request|
+    next unless request.path == "/cast_sessions" && request.post?
+
+    authenticated_user_id(request)
+  end
+
   # Lazy provider frames are intentionally concurrent, but still bounded so an
   # authenticated client cannot turn the app into an outbound provider flood.
   throttle("stream_results/user", limit: 30, period: 1.minute) do |request|

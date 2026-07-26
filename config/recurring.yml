@@ -21,3 +21,6 @@ production:
   cleanup_hls_sessions:
     command: "HlsSession.cleanup_expired"
     schedule: every 5 minutes
+  cleanup_local_playback:
+    class: LocalPlaybackCleanupJob
+    schedule: every minute

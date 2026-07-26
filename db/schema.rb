@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_26_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_27_000000) do
   create_table "api_caches", force: :cascade do |t|
     t.datetime "cached_at", null: false
     t.datetime "created_at", null: false
@@ -21,6 +21,28 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_26_000000) do
     t.datetime "updated_at", null: false
     t.index ["cached_at"], name: "index_api_caches_on_cached_at"
     t.index ["key"], name: "index_api_caches_on_key", unique: true
+  end
+
+  create_table "cast_sessions", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "device_name"
+    t.datetime "expires_at", null: false
+    t.string "hls_session_id", null: false
+    t.datetime "last_heartbeat_at", null: false
+    t.bigint "local_torrent_lease_id"
+    t.integer "position_seconds", default: 0, null: false
+    t.string "poster_url"
+
+    t.string "state", default: "active", null: false
+    t.string "title"
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["hls_session_id"], name: "index_cast_sessions_on_hls_session_id", unique: true
+    t.index ["last_heartbeat_at"], name: "index_cast_sessions_on_last_heartbeat_at"
+    t.index ["local_torrent_lease_id"], name: "index_cast_sessions_on_local_torrent_lease_id"
+
+    t.index ["state", "expires_at"], name: "index_cast_sessions_on_state_and_expires_at"
+    t.index ["user_id"], name: "index_cast_sessions_on_user_id"
   end
 
   create_table "episode_progresses", force: :cascade do |t|
@@ -66,6 +88,24 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_26_000000) do
     t.index ["user_id", "imdb_id"], name: "index_library_entries_on_user_id_and_imdb_id", unique: true
     t.index ["user_id"], name: "index_library_entries_on_user_id"
     t.index ["watch_status"], name: "index_library_entries_on_watch_status"
+  end
+
+  create_table "local_torrent_leases", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.integer "file_idx"
+    t.string "filename"
+    t.string "info_hash", limit: 40, null: false
+    t.string "kind", default: "browser", null: false
+    t.datetime "last_heartbeat_at", null: false
+    t.string "lease_token", null: false
+    t.datetime "released_at"
+    t.string "title"
+    t.datetime "updated_at", null: false
+    t.bigint "user_id"
+    t.index ["info_hash", "released_at"], name: "index_local_torrent_leases_on_info_hash_and_released_at"
+    t.index ["last_heartbeat_at"], name: "index_local_torrent_leases_on_last_heartbeat_at"
+    t.index ["lease_token"], name: "index_local_torrent_leases_on_lease_token", unique: true
+    t.index ["user_id"], name: "index_local_torrent_leases_on_user_id"
   end
 
   create_table "recommendations", force: :cascade do |t|
@@ -271,9 +311,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_26_000000) do
     t.index ["user_id"], name: "index_wishlist_entries_on_user_id"
   end
 
+  add_foreign_key "cast_sessions", "local_torrent_leases"
+  add_foreign_key "cast_sessions", "users"
   add_foreign_key "episode_progresses", "users"
   add_foreign_key "hls_sessions", "users"
   add_foreign_key "library_entries", "users"
+  add_foreign_key "local_torrent_leases", "users"
   add_foreign_key "recommendations", "users"
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_claimed_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

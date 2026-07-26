@@ -123,7 +123,11 @@ StreamVault relies on several external services. Here's what each one does and h
 
 - **RealDebrid** is the *resolver*. Torrentio or Comet uses your configured RealDebrid key to resolve the selected source, and StreamVault verifies that the resulting playback URL belongs to RealDebrid before fetching it. StreamVault does not add the source file to a persistent local media library, but its bytes pass through the server on demand and may be buffered temporarily during proxying or transcoding.
 
-> **Can StreamVault play without RealDebrid?** Yes. The optional TorrServer sidecar streams the selected torrent by info hash through a private Docker-only origin. It uses a 10 GiB rolling disk cache, so titles larger than 10 GiB still play as old pieces are evicted. RealDebrid remains the preferred fast-start path in Automatic mode, with local torrent playback as fallback. Arbitrary HTTP URLs remain blocked to prevent SSRF and open-proxy abuse.
+> **Can StreamVault play without RealDebrid?** Yes. The private TorrServer sidecar streams selected info hashes under a 15 GiB aggregate budget. Each distinct torrent has a 2 GiB rolling window, so titles larger than either value still play as old pieces are evicted. Concurrent viewers of the same release share one torrent; different releases coexist while the storage budget permits. RealDebrid remains the preferred fast-start path in Automatic mode. Arbitrary HTTP URLs remain blocked to prevent SSRF and open-proxy abuse.
+
+### Nearby-device playback
+
+The custom player exposes one feature-detected device button: AirPlay on iPhone/iPad/Safari, Google Cast's Default Media Receiver on Android/desktop Chrome, and the standard Remote Playback picker as fallback. Chromecast receives a public cookie-free HLS URL generated specifically for that receiver; TorrServer and RealDebrid credentials never leave Rails. Receiver segment requests heartbeat their cast/local leases, allowing TV playback to continue after the sender tab leaves.
 
 - **FFmpeg** is the *translator*. StreamVault bypasses it for sources the browser can play directly. Otherwise FFmpeg copies compatible video when safe, normalises audio to AAC with timestamp correction, or re-encodes incompatible/UHD video to browser-friendly 1080p H.264. It also produces HLS for iPhone playback and burns image-based subtitles that browsers cannot render.
 
@@ -226,10 +230,15 @@ docker compose up -d --build
 | `LOCAL_TORRENT_ENABLED` | Enable the private TorrServer local-playback alternative | `true` |
 | `TORRSERVER_USERNAME` | Basic-auth username on the private Rails↔TorrServer control network | `streamvault` |
 | `TORRSERVER_PASSWORD` | Random sidecar password (`openssl rand -hex 32`) | required |
-| `LOCAL_TORRENT_CACHE_BYTES` | Rolling temporary torrent cache size (not a maximum title size) | `10737418240` (10 GiB) |
+| `LOCAL_TORRENT_GLOBAL_CACHE_BYTES` | Aggregate budget shared by every concurrent local torrent | `16106127360` (15 GiB) |
+| `LOCAL_TORRENT_PER_TORRENT_CACHE_BYTES` | Rolling window reserved per distinct torrent; not a title-size limit | `2147483648` (2 GiB) |
+| `LOCAL_TORRENT_HEARTBEAT_TIMEOUT` | Seconds without a viewer/receiver heartbeat before its lease expires | `600` |
 | `LOCAL_TORRENT_MIN_FREE_BYTES` | Refuse new local playback below this server free-space reserve | `5368709120` (5 GiB) |
 | `LOCAL_TORRENT_DISCONNECT_TIMEOUT` | Seconds after the final reader disconnects before its cache is removed | `60` |
 | `LOCAL_TORRENT_UPLOAD_LIMIT_KBPS` | BitTorrent upload limit in KiB/s (`0` is unlimited) | `512` |
+| `CAST_SESSION_TTL_SECONDS` | Maximum lifetime of a TV receiver session | `21600` (6 h) |
+| `CAST_SESSION_STALE_SECONDS` | Receiver inactivity/paused grace before cast cleanup | `1800` (30 min) |
+| `SOLID_QUEUE_IN_PUMA` | Run recurring HLS/local/cast cleanup in this single-server deployment | `true` |
 | `STREAM_PROVIDER` | Which stream provider to use: `torrentio`, `comet`, or `auto` (see below) | `torrentio` |
 | `TORRENTIO_API_BASE_URL` | Torrentio API base URL | `https://torrentio.strem.fun` |
 | `COMET_URL` | URL of your self-hosted Comet instance | Optional |

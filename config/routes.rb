@@ -80,6 +80,7 @@ Rails.application.routes.draw do
   get "direct_stream", to: "direct_stream#show", as: :direct_stream
   get "local_torrent/status", to: "local_torrent_status#show", as: :local_torrent_status
   post "local_torrent/stop", to: "local_torrent_status#stop", as: :stop_local_torrent
+  resources :cast_sessions, only: %i[create destroy]
 
   # Health check
   get "up" => "rails/health#show", as: :rails_health_check

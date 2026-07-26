@@ -83,6 +83,19 @@ test("native video transitions do not clean an actively playing local source", (
   testDocument.visibilityState = "visible"
 })
 
+test("cast button opens the native AirPlay target picker on Apple browsers", async () => {
+  const player = new VideoPlayerController()
+  let pickerCalls = 0
+  const video = { webkitShowPlaybackTargetPicker() { pickerCalls += 1 } }
+  Object.defineProperty(player, "videoTarget", { value: video })
+  player.airPlayAvailable = true
+  player.googleCastAvailable = false
+
+  await player.castToDevice()
+
+  assert.equal(pickerCalls, 1)
+})
+
 test("native direct play uses absolute media time while fragment streams add their offset", () => {
   const player = new VideoPlayerController()
   player.videoTarget = { currentTime: 300 }

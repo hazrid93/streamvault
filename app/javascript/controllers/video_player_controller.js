@@ -59,7 +59,7 @@ export default class extends Controller {
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
-      "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton"
+      "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton", "castButton"
     ]
   }
   static get values() {
@@ -70,7 +70,8 @@ export default class extends Controller {
       defaultLanguage: String, preferredLanguages: String,
       tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
       nextEpisodeTitle: String, hasNextEpisode: Boolean,
-      localTorrentHash: String, localTorrentSession: String, localStatusUrl: String, localStopUrl: String
+      localTorrentHash: String, localTorrentSession: String, localStatusUrl: String, localStopUrl: String,
+      castSessionsUrl: String
     }
   }
 
@@ -171,6 +172,7 @@ export default class extends Controller {
     this.sourceUrlTarget.textContent = this.streamingUrlValue
     this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
     this.startLocalTorrentStatus()
+    this.initializeCasting()
     this.handleLocalVisibilityChange = () => this.scheduleHiddenLocalCleanup()
     if (this.localTorrentHashValue) document.addEventListener("visibilitychange", this.handleLocalVisibilityChange)
     this.showOverlayUi()
@@ -271,6 +273,122 @@ export default class extends Controller {
     // main thread, delaying the new page from rendering.  The browser
     // tears down the video element during unload.
     if (!this.navigatingAway) this.pauseAndDetachVideo()
+  }
+
+  initializeCasting() {
+    if (!this.hasCastButtonTarget) return
+
+    this.airPlayAvailable = typeof this.videoTarget.webkitShowPlaybackTargetPicker === "function"
+    this.remotePlaybackAvailable = typeof this.videoTarget.remote?.prompt === "function"
+
+    const userAgent = navigator.userAgent || ""
+    this.chromiumCastSender = !/iPhone|iPad|iPod/i.test(userAgent) && /Chrome|Chromium|CriOS/i.test(userAgent)
+    // Chromium's native Remote Playback prompt cannot cast this player's
+    // normal MSE blob source. Wait for the Google SDK instead of showing an
+    // early button that opens a non-functional picker.
+    if (this.airPlayAvailable || (this.remotePlaybackAvailable && !this.chromiumCastSender)) this.showCastButton()
+    if (!this.chromiumCastSender) return
+
+    window.__onGCastApiAvailable = (available) => {
+      if (!available || !window.cast?.framework || !window.chrome?.cast) return
+      try {
+        window.cast.framework.CastContext.getInstance().setOptions({
+          receiverApplicationId: window.chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+          autoJoinPolicy: window.chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+        })
+        this.googleCastAvailable = true
+        this.showCastButton()
+      } catch (error) {
+        console.warn("Google Cast initialization failed:", error)
+      }
+    }
+
+    if (!document.getElementById("google-cast-sender")) {
+      const script = document.createElement("script")
+      script.id = "google-cast-sender"
+      script.async = true
+      script.src = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"
+      document.head.appendChild(script)
+    }
+  }
+
+  showCastButton() {
+    this.castButtonTarget.classList.remove("hidden")
+    this.castButtonTarget.classList.add("inline-flex")
+  }
+
+  async castToDevice() {
+    // iOS/iPadOS and Safari use Apple's native target picker. The current
+    // iPhone source is already cookie-less HLS, so AirPlay can fetch it.
+    if (this.airPlayAvailable) {
+      this.videoTarget.webkitShowPlaybackTargetPicker()
+      return
+    }
+
+    if (this.googleCastAvailable) {
+      await this.startGoogleCast()
+      return
+    }
+
+    if (this.remotePlaybackAvailable) {
+      try { await this.videoTarget.remote.prompt() } catch (_) { /* picker cancelled */ }
+    }
+  }
+
+  async startGoogleCast() {
+    try {
+      const context = window.cast.framework.CastContext.getInstance()
+      await context.requestSession()
+      const response = await fetch(this.castSessionsUrlValue, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')?.content || ""
+        },
+        body: JSON.stringify({
+          url: this.streamingUrlValue,
+          position: this.currentAbsoluteTime(),
+          title: this.titleValue,
+          poster_url: this.posterUrlValue,
+          local_torrent_hash: this.localTorrentHashValue,
+          local_torrent_session: this.localTorrentSessionValue
+        })
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || "Cast stream could not be prepared")
+
+      const mediaInfo = new window.chrome.cast.media.MediaInfo(payload.media_url, payload.content_type)
+      const metadata = new window.chrome.cast.media.GenericMediaMetadata()
+      metadata.title = payload.title || this.titleValue
+      if (payload.poster_url) metadata.images = [{ url: payload.poster_url }]
+      mediaInfo.metadata = metadata
+      mediaInfo.streamType = window.chrome.cast.media.StreamType.BUFFERED
+
+      const request = new window.chrome.cast.media.LoadRequest(mediaInfo)
+      request.currentTime = 0 // HLS was generated from the selected resume point.
+      const session = context.getCurrentSession()
+      await session.loadMedia(request)
+      this.activeCastSessionId = payload.id
+      this.videoTarget.pause()
+      this.castButtonTarget.classList.add("text-sv-highlight")
+    } catch (error) {
+      if (!/cancel/i.test(error?.message || "")) {
+        console.warn("Cast failed:", error)
+        this.showPlayerNotice(error?.message || "Unable to cast to that device")
+      }
+    }
+  }
+
+  showPlayerNotice(message) {
+    if (!this.hasStartupOverlayTarget) return
+    const label = this.startupOverlayTarget.querySelector("span.text-white")
+    const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
+    if (label) label.textContent = "Cast unavailable"
+    if (sub) sub.textContent = message
+    this.startupOverlayTarget.classList.remove("hidden")
+    setTimeout(() => this.startupOverlayTarget.classList.add("hidden"), 4000)
   }
 
   startLocalTorrentStatus() {
@@ -489,12 +607,11 @@ export default class extends Controller {
     }, { once: true })
   }
 
-  // iPhone and iPod Touch don't support MediaSource Extensions.
-  // iPad (iPadOS 17.1+) supports ManagedMediaSource, so the MSE
-  // path works there — exclude it explicitly.
+  // Use cookie-free native HLS across iPhone, iPad, and iPod. Modern iPads
+  // can run ManagedMediaSource, but native HLS is the interoperable source
+  // AirPlay targets can fetch after the device picker hands playback off.
   isIOS() {
-    const ua = navigator.userAgent
-    return /iPhone|iPod/.test(ua) && !/iPad/.test(ua)
+    return /iPhone|iPad|iPod/.test(navigator.userAgent)
   }
 
   // True when using native HLS playback (iOS).  All MSE-specific

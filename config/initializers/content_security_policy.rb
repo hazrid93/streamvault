@@ -16,7 +16,7 @@ Rails.application.configure do
     # bootstrap and an inline importmap JSON — both carry the per-request
     # nonce (see content_security_policy_nonce_generator below).  Stimulus
     # controllers themselves load from :self via the importmap.
-    policy.script_src  :self
+    policy.script_src  :self, "https://www.gstatic.com"
     # Tailwind + per-element inline style="" attributes require
     # unsafe-inline for styles until the inline styles are extracted.
     policy.style_src   :self, :unsafe_inline

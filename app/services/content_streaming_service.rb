@@ -51,7 +51,7 @@ class ContentStreamingService
   def resolve_single(resolve_url, filename:, imdb_id:, type:, season: nil, episode: nil,
                      source_mode: nil, info_hash: nil, file_idx: nil, title: nil, poster_url: nil)
     if effective_source_mode(source_mode) == "local"
-      return LocalTorrentService.new.start(
+      return LocalTorrentService.new(user: @user).start(
         info_hash: info_hash,
         file_idx: file_idx,
         filename: filename,
@@ -80,7 +80,7 @@ class ContentStreamingService
     if result
       stream_result(result, imdb_id: imdb_id, type: type, season: season, episode: episode)
     elsif automatic_source?(source_mode) && LocalTorrentService.enabled? && info_hash.present?
-      LocalTorrentService.new.start(
+      LocalTorrentService.new(user: @user).start(
         info_hash: info_hash,
         file_idx: file_idx,
         filename: filename,
@@ -124,7 +124,7 @@ class ContentStreamingService
     stream = streams.find { |candidate| candidate[:info_hash].present? }
     return ServiceResult.failure("No local torrent source is available for this title") unless stream
 
-    result = LocalTorrentService.new.start(
+    result = LocalTorrentService.new(user: @user).start(
       info_hash: stream[:info_hash],
       file_idx: stream[:file_idx],
       filename: stream[:filename],

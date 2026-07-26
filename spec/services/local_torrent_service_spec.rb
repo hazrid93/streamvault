@@ -84,12 +84,32 @@ RSpec.describe LocalTorrentService do
       "http://torrserver:8090/stream/Movie.2026.mkv?link=#{info_hash}&index=2&play="
     )
     expect(WebMock).to have_requested(:post, "http://torrserver:8090/settings")
-      .with { |request| JSON.parse(request.body).dig("sets", "CacheSize") == 10.gigabytes }
+      .with { |request| JSON.parse(request.body).dig("sets", "CacheSize") == 2.gigabytes }
     expect(WebMock).to have_requested(:post, "http://torrserver:8090/torrents")
       .with(body: hash_including("action" => "add", "poster" => ""))
   end
 
-  it "replaces the previous local torrent when another title starts" do
+  it "shares one torrent across multiple viewers of the same title" do
+    torrent = { hash: info_hash, file_stats: [{ id: 1, path: "Shared.mp4", length: 1.gigabyte }] }
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "list"))
+      .to_return(status: 200, body: [torrent].to_json, headers: json_headers)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "get", "hash" => info_hash))
+      .to_return(status: 200, body: torrent.to_json, headers: json_headers)
+
+    first = service.start(info_hash: info_hash, filename: "Shared.mp4")
+    second = service.start(info_hash: info_hash, filename: "Shared.mp4")
+
+    expect(first).to be_success
+    expect(second).to be_success
+    expect(first.data[:session_token]).not_to eq(second.data[:session_token])
+    expect(LocalTorrentLease.active.where(info_hash: info_hash).count).to eq(2)
+    expect(WebMock).not_to have_requested(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "add"))
+  end
+
+  it "keeps an existing torrent active when another title starts" do
     previous_hash = "f" * 40
     stub_request(:post, "http://torrserver:8090/torrents")
       .with(body: hash_including("action" => "list"))
@@ -107,11 +127,11 @@ RSpec.describe LocalTorrentService do
     result = service.start(info_hash: info_hash, filename: "New.mp4")
 
     expect(result).to be_success
-    expect(WebMock).to have_requested(:post, "http://torrserver:8090/torrents")
+    expect(WebMock).not_to have_requested(:post, "http://torrserver:8090/torrents")
       .with(body: hash_including("action" => "rem", "hash" => previous_hash))
   end
 
-  it "serializes concurrent handoffs so only the newest torrent keeps the cache" do
+  it "serializes budget updates while allowing both concurrent torrents to remain" do
     active_hashes = []
     state_lock = Mutex.new
     allow_any_instance_of(described_class).to receive(:ensure_settings!).and_return(true)
@@ -135,12 +155,33 @@ RSpec.describe LocalTorrentService do
 
     expect(results.count(&:success?)).to eq(2)
     expect(results.count(&:failure?)).to eq(0)
-    expect(active_hashes.size).to eq(1)
+    expect(active_hashes.size).to eq(2)
+  end
+
+  it "keeps a shared torrent until its final viewer leaves" do
+    first = LocalTorrentLease.create!(lease_token: "1" * 48, info_hash: info_hash, kind: "browser", last_heartbeat_at: Time.current)
+    second = LocalTorrentLease.create!(lease_token: "2" * 48, info_hash: info_hash, kind: "browser", last_heartbeat_at: Time.current)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => info_hash))
+      .to_return(status: 200)
+
+    expect(service.stop(info_hash: info_hash, session_token: first.lease_token)).to be_success
+    expect(WebMock).not_to have_requested(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem"))
+
+    expect(service.stop(info_hash: info_hash, session_token: second.lease_token)).to be_success
+    expect(WebMock).to have_requested(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => info_hash)).once
   end
 
   it "stops only the session holding the current hash token" do
     token = "a" * 48
-    Rails.cache.write("local_torrent_session:#{info_hash}", token)
+    LocalTorrentLease.create!(
+      lease_token: token,
+      info_hash: info_hash,
+      kind: "browser",
+      last_heartbeat_at: Time.current
+    )
     stub_request(:post, "http://torrserver:8090/torrents")
       .with(body: hash_including("action" => "rem", "hash" => info_hash))
       .to_return(status: 200)

@@ -116,7 +116,19 @@ RSpec.describe "HLS streaming", type: :request do
         get "/hls/#{session_id}/playlist.m3u8"
         expect(response).to have_http_status(:ok)
         expect(response.content_type).to include("application/vnd.apple.mpegurl")
+        expect(response.headers["Access-Control-Allow-Origin"]).to eq("*")
         expect(response.body).to start_with("#EXTM3U")
+      end
+
+      it "heartbeats a TV receiver session when it fetches the playlist" do
+        cast = CastSession.create!(
+          user: user, hls_session_id: session_id,
+          last_heartbeat_at: 10.minutes.ago, expires_at: 6.hours.from_now
+        )
+
+        get "/hls/#{session_id}/playlist.m3u8"
+
+        expect(cast.reload.last_heartbeat_at).to be > 1.minute.ago
       end
 
       it "works without authentication (iOS media requests don't send cookies)" do
@@ -160,6 +172,7 @@ RSpec.describe "HLS streaming", type: :request do
       get "/hls/#{session_id}/0.ts"
       expect(response).to have_http_status(:ok)
       expect(response.content_type).to include("video/mp2t")
+      expect(response.headers["Access-Control-Allow-Origin"]).to eq("*")
     end
 
     it "works without authentication (iOS media requests don't send cookies)" do

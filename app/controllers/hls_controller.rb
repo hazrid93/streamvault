@@ -66,6 +66,7 @@ class HlsController < ApplicationController
     end
 
     HlsSession.touch_activity(session.id)
+    touch_cast_session(session.id)
 
     # Playlist not ready yet — either the file doesn't exist, or
     # ffmpeg has written the #EXTM3U header but no segment entries
@@ -77,6 +78,7 @@ class HlsController < ApplicationController
     end
 
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["X-Accel-Buffering"] = "no"
     # The session ID in the URL path is an unguessable bearer token.
     # Prevent it leaking to third-party hosts via a Referer header if
@@ -102,6 +104,7 @@ class HlsController < ApplicationController
       return
     end
     HlsSession.touch_activity(session.id)
+    touch_cast_session(session.id)
 
     segment_index = params[:segment].to_i
     path = session.segment_path(segment_index)
@@ -138,6 +141,7 @@ class HlsController < ApplicationController
     end
 
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Referrer-Policy"] = "no-referrer"
     send_file path, type: "video/mp2t", disposition: :inline
   end
@@ -149,6 +153,12 @@ class HlsController < ApplicationController
   end
 
   private
+
+  def touch_cast_session(hls_session_id)
+    CastSession.active.find_by(hls_session_id: hls_session_id)&.heartbeat!
+  rescue StandardError => error
+    Rails.logger.debug("[Cast] Heartbeat failed: #{error.class}: #{error.message}")
+  end
 
   def ffmpeg_finished?(session)
     playlist = session.playlist_path

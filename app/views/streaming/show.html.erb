@@ -23,7 +23,8 @@
      data-video-player-local-torrent-hash-value="<%= @local_torrent_hash %>"
      data-video-player-local-torrent-session-value="<%= @local_torrent_session %>"
      data-video-player-local-status-url-value="<%= @local_torrent_hash.present? ? local_torrent_status_path : "" %>"
-     data-video-player-local-stop-url-value="<%= @local_torrent_hash.present? ? stop_local_torrent_path : "" %>">
+     data-video-player-local-stop-url-value="<%= @local_torrent_hash.present? ? stop_local_torrent_path : "" %>"
+     data-video-player-cast-sessions-url-value="<%= cast_sessions_path %>">
 
   <%# Back button %>
   <div class="absolute top-4 left-4 z-50 opacity-100 transition-opacity duration-500" data-video-player-target="backButton"
@@ -53,7 +54,7 @@
 
   <%# Video element — no native controls, custom UI below %>
   <video data-video-player-target="video" id="stream-player"
-         autoplay playsinline
+         autoplay playsinline x-webkit-airplay="allow"
          class="w-full h-full"
          style="object-fit: contain; background: #000;">
   </video>
@@ -94,7 +95,7 @@
     </div>
 
     <%# Controls row %>
-    <div class="flex items-center gap-3 text-white text-sm">
+    <div class="flex min-w-0 items-center gap-2 text-white text-sm sm:gap-3">
       <%# Play/pause %>
       <button data-action="click->video-player#togglePlay" data-video-player-target="playButton" class="hover:text-indigo-400 transition-colors">
         <svg data-video-player-target="playIcon" class="w-6 h-6 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
@@ -114,6 +115,15 @@
       <span data-video-player-target="currentTime" class="tabular-nums"><%= player_time(@resume_at) %></span>
       <span class="text-white/40">/</span>
       <span data-video-player-target="durationDisplay" class="text-white/60 tabular-nums"><%= @duration.to_f.positive? ? player_time(@duration) : "--:--" %></span>
+
+      <%# AirPlay / Chromecast / Remote Playback — kept before the flexible
+           spacer so it remains visible on narrow phone controls. %>
+      <button type="button" data-video-player-target="castButton"
+              data-action="click->video-player#castToDevice"
+              class="hidden min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-white hover:text-sv-highlight transition-colors"
+              title="Play on a nearby TV or device" aria-label="Cast to nearby device">
+        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6.5A1.5 1.5 0 015.5 5h13A1.5 1.5 0 0120 6.5v9a1.5 1.5 0 01-1.5 1.5H16M4 17a3 3 0 013 3M4 13a7 7 0 017 7M4 9a11 11 0 0111 11"/></svg>
+      </button>
 
       <div class="flex-1"></div>
 
@@ -180,6 +190,8 @@
           </div>
         </div>
       </div>
+
+
 
       <%# Fullscreen — browser fullscreen via the standard Fullscreen API.
            Takes the whole player container (controls + subtitle overlay)

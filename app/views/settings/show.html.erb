@@ -173,7 +173,7 @@
       <div class="mt-3 grid gap-2 text-xs text-sv-text-muted sm:grid-cols-3">
         <span>Free on server: <strong class="text-white"><%= @local_torrent_status[:free_bytes] ? number_to_human_size(@local_torrent_status[:free_bytes]) : "Unknown" %></strong></span>
         <span>Safety reserve: <strong class="text-white"><%= number_to_human_size(@local_torrent_status[:minimum_free_bytes]) %></strong></span>
-        <span>Active streams: <strong class="text-white"><%= @local_torrent_status[:active_count] %></strong></span>
+        <span>Active torrents: <strong class="text-white"><%= @local_torrent_status[:active_count] %></strong> · Viewers: <strong class="text-white"><%= @local_torrent_status[:viewer_count].to_i %></strong></span>
       </div>
     </div>
 
@@ -182,7 +182,7 @@
         <% @local_torrent_status[:torrents].each do |torrent| %>
           <div class="flex items-center justify-between gap-3 rounded-xl bg-sv-bg/50 px-3 py-2">
             <div class="min-w-0"><p class="truncate text-sm font-medium text-white"><%= torrent[:title] %></p><p class="mt-0.5 text-xs text-sv-text-muted"><%= torrent[:state] %> · <%= number_to_human_size(torrent[:used_bytes]) %> cached · <%= number_to_human_size(torrent[:download_speed]) %>/s</p></div>
-            <span class="text-xs text-sv-text-muted"><%= torrent[:seeders] %> seeders</span>
+            <span class="text-xs text-sv-text-muted"><%= torrent[:viewer_count].to_i %> viewers · <%= torrent[:seeders] %> seeders</span>
           </div>
         <% end %>
       </div>
