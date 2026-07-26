@@ -3,6 +3,7 @@
 require "base64"
 require "cgi"
 require "open3"
+require "securerandom"
 require "zlib"
 
 # Internal client for the TorrServer sidecar. TorrServer is never exposed on a
@@ -60,9 +61,11 @@ class LocalTorrentService
     with_start_lock do
       ensure_settings!
       existing = list_torrents
-      other = existing.find { |torrent| torrent["hash"].to_s.downcase != hash }
-      if other
-        return ServiceResult.failure("Another local torrent is still active. Stop it or clear temporary media in Settings first.")
+      # Local playback is a single rolling slot. Starting a different title is
+      # an intentional handoff: stop stale/previous torrents immediately
+      # instead of making the user wait for the disconnect timeout.
+      existing.reject { |torrent| torrent["hash"].to_s.casecmp?(hash) }.each do |torrent|
+        remove_torrent(torrent["hash"])
       end
 
       add_torrent(hash, title: title, poster_url: poster_url) unless existing.any? { |torrent| torrent["hash"].to_s.casecmp?(hash) }
@@ -72,11 +75,15 @@ class LocalTorrentService
       selected_file = select_file(torrent["file_stats"], file_idx: file_idx, filename: filename)
       return ServiceResult.failure("No playable video file was found in this torrent") unless selected_file
 
+      session_token = SecureRandom.hex(24)
+      Rails.cache.write(session_cache_key(hash), session_token, expires_in: 12.hours)
+
       ServiceResult.success(
         streaming_url: stream_url(hash, selected_file),
         filename: File.basename(selected_file.fetch("path")),
         info_hash: hash,
         file_idx: selected_file.fetch("id"),
+        session_token: session_token,
         source: "local"
       )
     end
@@ -88,12 +95,30 @@ class LocalTorrentService
     ServiceResult.failure("Local torrent playback could not be started")
   end
 
-  def live_status(info_hash)
+  def stop(info_hash:, session_token:)
+    hash = normalize_hash(info_hash)
+    return ServiceResult.failure("Invalid torrent") unless hash && valid_session_token?(hash, session_token)
+
+    with_start_lock do
+      remove_torrent(hash)
+      Rails.cache.delete(session_cache_key(hash))
+    end
+    ServiceResult.success(true)
+  rescue StandardError => error
+    Rails.logger.warn("[LocalTorrent] Stop failed: #{error.class}: #{error.message}")
+    ServiceResult.failure("Local torrent could not be stopped")
+  end
+
+  def live_status(info_hash, session_token: nil)
     hash = normalize_hash(info_hash)
     return ServiceResult.failure("Invalid torrent") unless hash
 
     torrent = list_torrents.find { |item| item["hash"].to_s.casecmp?(hash) }
     return ServiceResult.failure("Local torrent is no longer active") unless torrent
+
+    if session_token.present? && valid_session_token?(hash, session_token)
+      Rails.cache.write(session_cache_key(hash), session_token, expires_in: 12.hours)
+    end
 
     ServiceResult.success(torrent_status(torrent))
   rescue StandardError => error
@@ -197,6 +222,12 @@ class LocalTorrentService
     raise "TorrServer rejected torrent" unless response.success?
   end
 
+  def remove_torrent(hash)
+    response = post_json("/torrents", action: "rem", hash: hash.to_s.downcase, delete: true)
+    Rails.cache.delete(session_cache_key(hash))
+    raise "TorrServer could not stop the previous torrent" unless response.success? || response.status == 404
+  end
+
   def wait_for_metadata(hash)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + METADATA_TIMEOUT
     loop do
@@ -246,6 +277,16 @@ class LocalTorrentService
 
   def post_json(path, body)
     @connection.post(path, body)
+  end
+
+  def session_cache_key(hash)
+    "local_torrent_session:#{hash.to_s.downcase}"
+  end
+
+  def valid_session_token?(hash, candidate)
+    expected = Rails.cache.read(session_cache_key(hash)).to_s
+    supplied = candidate.to_s
+    expected.present? && supplied.bytesize == expected.bytesize && ActiveSupport::SecurityUtils.secure_compare(supplied, expected)
   end
 
   def normalize_hash(value)

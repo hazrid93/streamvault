@@ -70,7 +70,7 @@ export default class extends Controller {
       defaultLanguage: String, preferredLanguages: String,
       tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
       nextEpisodeTitle: String, hasNextEpisode: Boolean,
-      localTorrentHash: String, localStatusUrl: String
+      localTorrentHash: String, localTorrentSession: String, localStatusUrl: String, localStopUrl: String
     }
   }
 
@@ -171,6 +171,8 @@ export default class extends Controller {
     this.sourceUrlTarget.textContent = this.streamingUrlValue
     this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
     this.startLocalTorrentStatus()
+    this.handleLocalPageHide = () => this.stopLocalTorrent()
+    if (this.localTorrentHashValue) window.addEventListener("pagehide", this.handleLocalPageHide)
     this.showOverlayUi()
     this.element.addEventListener("mousemove", this.mouseMoveHandler)
     document.addEventListener("keydown", this.keydownHandler)
@@ -222,6 +224,8 @@ export default class extends Controller {
     this.stopProgressTracking()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
     this.localStatusInterval = null
+    if (this.handleLocalPageHide) window.removeEventListener("pagehide", this.handleLocalPageHide)
+    this.stopLocalTorrent()
     // Save progress only if navigateBack hasn't already done it.
     if (!this.navigatingAway) this.saveProgressSync()
     this.clearUiHideTimer()
@@ -273,7 +277,10 @@ export default class extends Controller {
 
     const refresh = async () => {
       try {
-        const query = new URLSearchParams({ info_hash: this.localTorrentHashValue })
+        const query = new URLSearchParams({
+          info_hash: this.localTorrentHashValue,
+          session_token: this.localTorrentSessionValue
+        })
         const response = await fetch(`${this.localStatusUrlValue}?${query}`, { headers: { Accept: "application/json" } })
         if (!response.ok) return
         const status = await response.json()
@@ -287,6 +294,28 @@ export default class extends Controller {
 
     refresh()
     this.localStatusInterval = setInterval(refresh, 5000)
+  }
+
+  stopLocalTorrent() {
+    if (this.localStopSent || !this.localTorrentHashValue || !this.localTorrentSessionValue || !this.localStopUrlValue) return
+    this.localStopSent = true
+    if (this.localStatusInterval) clearInterval(this.localStatusInterval)
+
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content
+    fetch(this.localStopUrlValue, {
+      method: "POST",
+      keepalive: true,
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
+      },
+      body: JSON.stringify({
+        info_hash: this.localTorrentHashValue,
+        session_token: this.localTorrentSessionValue
+      })
+    }).catch(() => {})
   }
 
   formatByteRate(value) {
@@ -2168,6 +2197,7 @@ export default class extends Controller {
     this.stopHlsSession()
     this.stopProgressTracking()
     this.saveProgressSync()
+    this.stopLocalTorrent()
     this.navigatingAway = true
     this.invalidateMsePipeline()
   }

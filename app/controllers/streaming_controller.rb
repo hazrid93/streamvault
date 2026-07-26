@@ -68,7 +68,8 @@ class StreamingController < ApplicationController
         resume_at: resume_at,
         duration: duration,
         source: result.data[:source],
-        local_torrent_hash: result.data[:info_hash]
+        local_torrent_hash: result.data[:info_hash],
+        local_torrent_session: result.data[:session_token]
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -85,6 +86,7 @@ class StreamingController < ApplicationController
     @poster_url = params[:poster_url]
     @stream_source = params[:source]
     @local_torrent_hash = params[:local_torrent_hash]
+    @local_torrent_session = params[:local_torrent_session]
     @resume_at = params[:resume_at]
     @duration = normalized_duration_seconds(params[:duration])
     @default_language = current_user.default_stream_language
@@ -168,7 +170,8 @@ class StreamingController < ApplicationController
         resume_at: resume_at,
         duration: target[:duration_seconds].to_i,
         source: result.data[:source],
-        local_torrent_hash: result.data[:info_hash]
+        local_torrent_hash: result.data[:info_hash],
+        local_torrent_session: result.data[:session_token]
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message

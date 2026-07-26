@@ -79,6 +79,7 @@ Rails.application.routes.draw do
   # Direct stream proxy (bypass ffmpeg for browser-compatible content)
   get "direct_stream", to: "direct_stream#show", as: :direct_stream
   get "local_torrent/status", to: "local_torrent_status#show", as: :local_torrent_status
+  post "local_torrent/stop", to: "local_torrent_status#stop", as: :stop_local_torrent
 
   # Health check
   get "up" => "rails/health#show", as: :rails_health_check

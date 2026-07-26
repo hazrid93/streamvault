@@ -19,8 +19,12 @@ class TestVTTCue {
 const testDocument = {
   fullscreenElement: null,
   webkitFullscreenElement: null,
-  exitFullscreen() {}
+  exitFullscreen() {},
+  querySelector(selector) {
+    return selector === 'meta[name="csrf-token"]' ? { content: "csrf-token" } : null
+  }
 }
+const fetchRequests = []
 
 const context = vm.createContext({
   AbortController,
@@ -29,12 +33,37 @@ const context = vm.createContext({
   clearTimeout,
   console,
   document: testDocument,
+  fetch: async (...args) => { fetchRequests.push(args); return { ok: true } },
   navigator: { userAgent: "Mozilla/5.0 Chrome/138.0" },
   setTimeout,
   window: { location: { origin: "https://streamvault.test" }, VTTCue: TestVTTCue }
 })
 vm.runInContext(source, context)
 const VideoPlayerController = context.VideoPlayerController
+
+test("leaving a local player sends one authenticated keepalive stop", () => {
+  fetchRequests.length = 0
+  const player = new VideoPlayerController()
+  player.localTorrentHashValue = "a".repeat(40)
+  player.localTorrentSessionValue = "session-token"
+  player.localStopUrlValue = "/local_torrent/stop"
+  player.localStopSent = false
+  player.localStatusInterval = null
+
+  player.stopLocalTorrent()
+  player.stopLocalTorrent()
+
+  assert.equal(fetchRequests.length, 1)
+  const [url, options] = fetchRequests[0]
+  assert.equal(url, "/local_torrent/stop")
+  assert.equal(options.method, "POST")
+  assert.equal(options.keepalive, true)
+  assert.equal(options.headers["X-CSRF-Token"], "csrf-token")
+  assert.deepEqual(JSON.parse(options.body), {
+    info_hash: "a".repeat(40),
+    session_token: "session-token"
+  })
+})
 
 test("native direct play uses absolute media time while fragment streams add their offset", () => {
   const player = new VideoPlayerController()

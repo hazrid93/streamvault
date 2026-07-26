@@ -19,7 +19,7 @@
               <div class="min-w-0 flex-1">
                 <div class="flex min-w-0 items-center gap-1.5">
                   <% if stream[:rd_plus] %><span class="badge badge-success shrink-0">RD+</span><% end %>
-                  <span class="truncate text-xs font-medium text-white"><%= stream[:title] || stream[:name] %></span>
+                  <span class="line-clamp-2 min-w-0 text-xs font-medium leading-5 text-white sm:block sm:truncate"><%= stream[:title] || stream[:name] %></span>
                 </div>
                 <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.68rem] text-sv-text-muted">
                   <span class="badge badge-accent"><%= stream[:quality] %></span>
@@ -29,7 +29,7 @@
                 </div>
               </div>
 
-              <div class="flex flex-wrap items-center gap-1.5 shrink-0">
+              <div class="stream-actions shrink-0">
                 <% common_params = { imdb_id: @imdb_id, type: @type, season: @season, episode: @episode, title: @stream_title, poster_url: @poster_url, duration: @duration, filename: stream[:filename], info_hash: stream[:info_hash], file_idx: stream[:file_idx] } %>
                 <% if current_user.streaming_preference != "local" && current_user.has_realdebrid_key? && stream[:resolve_url].present? %>
                   <%= button_to "RD", streaming_index_path,
@@ -44,7 +44,7 @@
               </div>
             </div>
 
-            <details class="mt-2 border-t border-sv-border/50 pt-1.5 text-[0.68rem] text-sv-text-muted">
+            <details class="stream-details mt-2 border-t border-sv-border/50 pt-2 text-[0.68rem] text-sv-text-muted">
               <summary class="w-fit cursor-pointer select-none font-medium transition-colors hover:text-white">Stream info</summary>
               <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
                 <div><dt class="text-sv-text-muted">Reported seeders</dt><dd class="font-mono text-white"><%= stream[:seeders] || "Unknown" %></dd></div>

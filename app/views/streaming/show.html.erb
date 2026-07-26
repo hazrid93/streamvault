@@ -21,7 +21,9 @@
      data-video-player-next-episode-title-value="<%= @next_episode&.dig(:title) || "" %>"
      data-video-player-has-next-episode-value="<%= @next_episode.present? ? "true" : "false" %>"
      data-video-player-local-torrent-hash-value="<%= @local_torrent_hash %>"
-     data-video-player-local-status-url-value="<%= @local_torrent_hash.present? ? local_torrent_status_path : "" %>">
+     data-video-player-local-torrent-session-value="<%= @local_torrent_session %>"
+     data-video-player-local-status-url-value="<%= @local_torrent_hash.present? ? local_torrent_status_path : "" %>"
+     data-video-player-local-stop-url-value="<%= @local_torrent_hash.present? ? stop_local_torrent_path : "" %>">
 
   <%# Back button %>
   <div class="absolute top-4 left-4 z-50 opacity-100 transition-opacity duration-500" data-video-player-target="backButton"

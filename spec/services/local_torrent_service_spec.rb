@@ -6,6 +6,7 @@ RSpec.describe LocalTorrentService do
   subject(:service) { described_class.new }
 
   let(:info_hash) { "0123456789abcdef0123456789abcdef01234567" }
+  let(:memory_cache) { ActiveSupport::Cache::MemoryStore.new }
   let(:settings) do
     {
       "CacheSize" => 64.megabytes,
@@ -31,6 +32,8 @@ RSpec.describe LocalTorrentService do
   end
 
   before do
+    allow(Rails).to receive(:cache).and_return(memory_cache)
+    Rails.cache.clear
     stub_request(:post, "http://torrserver:8090/settings")
       .with(body: hash_including("action" => "get"))
       .to_return(status: 200, body: settings.to_json, headers: json_headers)
@@ -86,22 +89,29 @@ RSpec.describe LocalTorrentService do
       .with(body: hash_including("action" => "add", "poster" => ""))
   end
 
-  it "prevents a second local torrent from exceeding the single-stream cache budget" do
+  it "replaces the previous local torrent when another title starts" do
+    previous_hash = "f" * 40
     stub_request(:post, "http://torrserver:8090/torrents")
       .with(body: hash_including("action" => "list"))
-      .to_return(
-        status: 200,
-        body: [{ hash: "f" * 40, title: "Already playing", stat_string: "Torrent working" }].to_json,
-        headers: json_headers
-      )
+      .to_return(status: 200, body: [{ hash: previous_hash, title: "Already playing" }].to_json, headers: json_headers)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => previous_hash))
+      .to_return(status: 200)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "add"))
+      .to_return(status: 200, body: { hash: info_hash }.to_json, headers: json_headers)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "get", "hash" => info_hash))
+      .to_return(status: 200, body: { hash: info_hash, file_stats: [{ id: 1, path: "New.mp4", length: 1.gigabyte }] }.to_json, headers: json_headers)
 
-    result = service.start(info_hash: info_hash)
+    result = service.start(info_hash: info_hash, filename: "New.mp4")
 
-    expect(result).to be_failure
-    expect(result.error_message).to include("Another local torrent")
+    expect(result).to be_success
+    expect(WebMock).to have_requested(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => previous_hash))
   end
 
-  it "serializes concurrent starts so only one torrent can claim the cache" do
+  it "serializes concurrent handoffs so only the newest torrent keeps the cache" do
     active_hashes = []
     state_lock = Mutex.new
     allow_any_instance_of(described_class).to receive(:ensure_settings!).and_return(true)
@@ -112,6 +122,9 @@ RSpec.describe LocalTorrentService do
       state_lock.synchronize { active_hashes << hash }
       sleep 0.05
     end
+    allow_any_instance_of(described_class).to receive(:remove_torrent) do |_instance, hash|
+      state_lock.synchronize { active_hashes.delete(hash) }
+    end
     allow_any_instance_of(described_class).to receive(:wait_for_metadata) do |_instance, hash|
       { "hash" => hash, "file_stats" => [{ "id" => 1, "path" => "Movie.mp4", "length" => 1.gigabyte }] }
     end
@@ -120,9 +133,25 @@ RSpec.describe LocalTorrentService do
       Thread.new { described_class.new.start(info_hash: hash, filename: "Movie.mp4") }
     end.map(&:value)
 
-    expect(results.count(&:success?)).to eq(1)
-    expect(results.count(&:failure?)).to eq(1)
+    expect(results.count(&:success?)).to eq(2)
+    expect(results.count(&:failure?)).to eq(0)
     expect(active_hashes.size).to eq(1)
+  end
+
+  it "stops only the session holding the current hash token" do
+    token = "a" * 48
+    Rails.cache.write("local_torrent_session:#{info_hash}", token)
+    stub_request(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => info_hash))
+      .to_return(status: 200)
+
+    stale = service.stop(info_hash: info_hash, session_token: "stale")
+    current = service.stop(info_hash: info_hash, session_token: token)
+
+    expect(stale).to be_failure
+    expect(current).to be_success
+    expect(WebMock).to have_requested(:post, "http://torrserver:8090/torrents")
+      .with(body: hash_including("action" => "rem", "hash" => info_hash)).once
   end
 
   it "refuses to clear media while a local stream is active" do
