@@ -15,6 +15,8 @@ const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const HLS_MAX_RATE_LIMIT_RETRIES = 2
 const HLS_RETRY_AFTER_MAX_SECONDS = 10
+const HLS_MAX_UNSUPPORTED_RECOVERIES = 2
+const HLS_UNSUPPORTED_RECOVERY_DELAY_MS = 1500
 const BUFFER_AHEAD_SECONDS = 30
 const INITIAL_MSE_AHEAD_SECONDS = 10
 const MSE_APPEND_BACKLOG_HIGH_WATER = 8
@@ -962,13 +964,21 @@ export default class extends Controller {
       const p = this.videoTarget.play()
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
       if (p?.catch) p.catch((err) => {
+        if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
+        // A freshly opened local torrent can make iOS reject its first HLS
+        // playlist while TorrServer is still warming. This is a media-source
+        // failure, not an autoplay gesture failure: rebuild automatically
+        // instead of trapping the viewer in an endless tap-to-retry loop.
+        if (err?.name === "NotSupportedError") {
+          this.recoverUnsupportedHls(playbackToken, abortController)
+          return
+        }
         // iOS autoplay policy may block play() when not in a user
         // gesture context (the async fetch broke the gesture chain).
         // Show a tap-to-play overlay — the user's tap provides the
         // gesture needed to start playback.  Keep the spinner visible
         // so the user sees something is loading, and show the spinner
         // again after the tap while play() resolves.
-        if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
         console.warn('HLS: autoplay blocked, showing tap-to-play', err)
         if (this.hasStartupOverlayTarget) {
           this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
@@ -993,12 +1003,17 @@ export default class extends Controller {
               // the gap between play() resolving and the first frame.
               this.startupOverlayTarget.removeEventListener("click", onTap)
             }).catch((playErr) => {
-              console.warn('HLS: play() failed after tap, will retry', playErr)
+              console.warn('HLS: play() failed after tap', playErr)
+              if (playErr?.name === "NotSupportedError") {
+                this.startupOverlayTarget.removeEventListener("click", onTap)
+                this.recoverUnsupportedHls(playbackToken, abortController)
+                return
+              }
               this.reportStall(`hls_tap_play_rejected_${playErr?.name || 'unknown'}`)
               if (spinner) spinner.style.display = "none"
               if (label) label.textContent = "Tap to retry"
               if (sub) sub.textContent = "Tap anywhere to try again"
-              // Keep the listener — user can tap again
+              // Keep the listener for an autoplay-policy rejection.
             })
           }
           this.startupOverlayTarget.addEventListener("click", onTap)
@@ -1009,6 +1024,40 @@ export default class extends Controller {
       console.warn('HLS: start error', e)
       this.hlsPlaybackActive = false
     }
+  }
+
+  recoverUnsupportedHls(playbackToken, abortController) {
+    if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
+
+    this.hlsUnsupportedRecoveries = (this.hlsUnsupportedRecoveries || 0) + 1
+    this.reportStall("hls_not_supported_auto_recovery")
+    if (this.hlsUnsupportedRecoveries > HLS_MAX_UNSUPPORTED_RECOVERIES) {
+      this.stopHlsSession()
+      if (this.hasStartupOverlayTarget) {
+        const spinner = this.startupOverlayTarget.querySelector(".animate-spin")
+        const label = this.startupOverlayTarget.querySelector("span.text-white")
+        const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
+        if (spinner) spinner.style.display = "none"
+        if (label) label.textContent = "Local stream could not start"
+        if (sub) sub.textContent = "Go back and choose a different release"
+      }
+      return
+    }
+
+    if (this.hasStartupOverlayTarget) {
+      this.startupOverlayTarget.classList.remove("hidden", "opacity-0", "pointer-events-none")
+      this.startupOverlayTarget.setAttribute("aria-hidden", "false")
+      const label = this.startupOverlayTarget.querySelector("span.text-white")
+      const sub = this.startupOverlayTarget.querySelector("span.text-sv-text-muted")
+      if (label) label.textContent = "Warming local stream"
+      if (sub) sub.textContent = "Reconnecting automatically..."
+    }
+
+    const restartAt = Math.max(this.startSecondsValue || 0, this.currentAbsoluteTime?.() || 0)
+    setTimeout(() => {
+      if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
+      this.restartHlsSession(restartAt)
+    }, HLS_UNSUPPORTED_RECOVERY_DELAY_MS)
   }
 
   // Rack::Attack may briefly reject a burst of iOS seeks/recovery starts.
@@ -2495,6 +2544,7 @@ export default class extends Controller {
 
     if (this.isHls()) {
       this.playbackStarted = true
+      this.hlsUnsupportedRecoveries = 0
       clearTimeout(this.bufferingOverlayTimer)
       this.bufferingOverlayTimer = null
       this.isStalled = false

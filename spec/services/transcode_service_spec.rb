@@ -156,6 +156,30 @@ RSpec.describe TranscodeService do
       expect(commands).to all(include("-c:v", "copy"))
     end
 
+    it "retries an empty local torrent probe and caches only the usable result" do
+      empty_output = { "streams" => [] }.to_json
+      ready_output = {
+        "streams" => [
+          { "codec_name" => "hevc", "width" => 3840, "height" => 1634, "pix_fmt" => "yuv420p10le" }
+        ]
+      }.to_json
+      calls = 0
+      allow(described_class).to receive(:local_torrent_input?).and_return(true)
+      allow(described_class).to receive(:sleep)
+      allow(described_class).to receive(:capture_command) do |_cmd, **_kwargs|
+        calls += 1
+        capture_result(calls == 1 ? empty_output : ready_output)
+      end
+
+      first = described_class.probe_video_stream("http://torrserver:8090/stream/movie.mkv")
+      cached = described_class.probe_video_stream("http://torrserver:8090/stream/movie.mkv")
+
+      expect(calls).to eq(2)
+      expect(first).to include(codec_name: "hevc", width: 3840, height: 1634)
+      expect(cached).to eq(first)
+      expect(described_class).to have_received(:sleep).once
+    end
+
     it "does not share a cached video probe across authorization headers" do
       alpha_output = {
         "streams" => [
@@ -542,7 +566,9 @@ RSpec.describe TranscodeService do
       hls_command = described_class.send(:build_ffmpeg_command,
         "https://example.test/video.mkv",
         headers: {},
-        start_seconds: 0,
+        # A non-zero seek forces H.264 re-encoding, so HLS can enforce its
+        # four-second keyframe cadence rather than copying the source GOP.
+        start_seconds: 1,
         output_spec: :hls,
         segment_dir: "/tmp/hls/timestamps"
       )
@@ -556,6 +582,10 @@ RSpec.describe TranscodeService do
         expect(argument_pairs(command)).to include([ "-fflags", "+genpts" ])
         expect(command.index("-fflags")).to be < command.index("-i")
       end
+      expect(argument_pairs(hls_command)).to include(
+        [ "-force_key_frames", "expr:gte(t,n_forced*#{described_class::HLS_SEGMENT_DURATION})" ]
+      )
+      expect(fmp4_command).not_to include("-force_key_frames")
     end
   end
 

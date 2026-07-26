@@ -132,6 +132,13 @@ class TranscodeService
   @probe_inflight = {}
   PROBE_CACHE_TTL = 60
   PROBE_CACHE_MAX_SIZE = 500
+  # TorrServer can expose the selected file before its opening pieces are
+  # warm enough for ffprobe. Starting FFmpeg from that empty probe produced a
+  # one-segment playlist that iOS rejected with NotSupportedError. Retry the
+  # local probe briefly; each read also asks TorrServer to prioritize the
+  # beginning of the selected file.
+  LOCAL_VIDEO_PROBE_ATTEMPTS = 10
+  LOCAL_VIDEO_PROBE_INTERVAL_SECONDS = 1
 
   class TranscodeError < StandardError; end
 
@@ -841,6 +848,13 @@ class TranscodeService
     end
     cmd += [ "-sn", "-dn" ]
     cmd += video_args
+    # -hls_time is only a target: without forced keyframes x264's default GOP
+    # produced ~8.3s segments from 29.97fps UHD input. Four-second keyframes
+    # halve iOS local-play startup time and ensure the first playlist is not
+    # exposed with one oversized segment.
+    if output_spec == :hls && video_args != [ "-c:v", "copy" ]
+      cmd += [ "-force_key_frames", "expr:gte(t,n_forced*#{HLS_SEGMENT_DURATION})" ]
+    end
     # Normalize every audio codec to AAC and continuously reconcile samples
     # with the source timestamps.  Copying AAC bypassed synchronization for
     # timestamp gaps/discontinuities, while async=1 on other codecs only did
@@ -1278,15 +1292,47 @@ class TranscodeService
         input_url
       ]
 
-      result = capture_command(cmd, timeout_seconds: 10)
-      stream = result.status&.success? ? extract_video_stream(result.stdout) : {}
-      cache_store(input_url, headers: headers, video_stream: stream)
-      stream
+      local_input = local_torrent_input?(input_url)
+      attempts = local_input ? LOCAL_VIDEO_PROBE_ATTEMPTS : 1
+
+      attempts.times do |attempt|
+        result = capture_command(cmd, timeout_seconds: 10)
+        stream = result.status&.success? ? extract_video_stream(result.stdout) : {}
+        if usable_video_probe?(stream)
+          cache_store(input_url, headers: headers, video_stream: stream)
+          return stream
+        end
+
+        break if attempt == attempts - 1
+        Rails.logger.info("[Transcode] Local stream is warming; retrying video probe (#{attempt + 2}/#{attempts})") if defined?(Rails)
+        sleep LOCAL_VIDEO_PROBE_INTERVAL_SECONDS
+      end
+
+      # Preserve the short negative cache for ordinary remote failures, but
+      # never cache an empty TorrServer probe: a later recovery should probe
+      # the now-warm local file immediately.
+      cache_store(input_url, headers: headers, video_stream: {}) unless local_input
+      {}
     end
   rescue StandardError
     {}
   end
   public_class_method :probe_video_stream
+
+  def self.local_torrent_input?(input_url)
+    return false unless defined?(LocalTorrentService) && LocalTorrentService.enabled?
+
+    uri = URI.parse(input_url.to_s)
+    uri.host.to_s.casecmp?(LocalTorrentService.internal_host.to_s)
+  rescue URI::InvalidURIError
+    false
+  end
+  private_class_method :local_torrent_input?
+
+  def self.usable_video_probe?(stream)
+    stream.is_a?(Hash) && stream[:codec_name].present? && stream[:width].to_i.positive? && stream[:height].to_i.positive?
+  end
+  private_class_method :usable_video_probe?
 
   def self.extract_video_stream(output)
     data = JSON.parse(output)

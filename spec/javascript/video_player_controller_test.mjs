@@ -96,6 +96,33 @@ test("cast button opens the native AirPlay target picker on Apple browsers", asy
   assert.equal(pickerCalls, 1)
 })
 
+test("an iOS NotSupported HLS response automatically rebuilds instead of showing tap to retry", () => {
+  const originalSetTimeout = context.setTimeout
+  let scheduled
+  context.setTimeout = (callback) => { scheduled = callback; return 1 }
+  try {
+    const player = new VideoPlayerController()
+    const abortController = new AbortController()
+    player.hlsPlaybackToken = 4
+    player.hlsStartAbortController = abortController
+    player.startSecondsValue = 58
+    player.hasStartupOverlayTarget = false
+    player.reportStall = () => {}
+    player.currentAbsoluteTime = () => 58
+    let restartedAt = null
+    player.restartHlsSession = (position) => { restartedAt = position }
+
+    player.recoverUnsupportedHls(4, abortController)
+
+    assert.equal(player.hlsUnsupportedRecoveries, 1)
+    assert.equal(typeof scheduled, "function")
+    scheduled()
+    assert.equal(restartedAt, 58)
+  } finally {
+    context.setTimeout = originalSetTimeout
+  }
+})
+
 test("native direct play uses absolute media time while fragment streams add their offset", () => {
   const player = new VideoPlayerController()
   player.videoTarget = { currentTime: 300 }
