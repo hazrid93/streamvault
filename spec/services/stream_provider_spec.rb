@@ -25,8 +25,17 @@ RSpec.describe StreamProvider, type: :service do
       expect(providers.first).to be_a(TorrentioService)
     end
 
-    it 'returns Comet + Torrentio when set to comet' do
+    it 'returns only Comet when set to comet' do
       ENV["STREAM_PROVIDER"] = "comet"
+      ENV["COMET_URL"] = "https://comet.example.com"
+
+      providers = described_class.providers(rd_api_key: 'test_key')
+      expect(providers.length).to eq(1)
+      expect(providers.first).to be_a(CometService)
+    end
+
+    it 'returns Comet + Torrentio when set to auto and Comet is configured' do
+      ENV["STREAM_PROVIDER"] = "auto"
       ENV["COMET_URL"] = "https://comet.example.com"
 
       providers = described_class.providers(rd_api_key: 'test_key')

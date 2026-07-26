@@ -306,10 +306,10 @@ A lightweight forward proxy that routes Torrentio and Cinemeta requests through 
 
 #### 2. Comet (self-hosted stream provider)
 
-A self-hosted alternative to Torrentio that uses its own scrapers (Jackett + Zilean) instead of the Torrentio API. No Cloudflare dependency, no rate limits, no peak-hour congestion.
+A self-hosted alternative to Torrentio with independent Jackett, Zilean, DMM, Bitmagnet, TorrentsDB, Peerflix, MediaFusion, and anime sources. It does not require the Torrentio API, avoiding Torrentio's Cloudflare block.
 
 - **When you need it:** Torrentio is unreliable (frequent blocks, rate limits, downtime) or you want a more stable stream source.
-- **How it works:** Comet runs on your VPS and scrapes torrent indexers directly. StreamVault queries Comet first (`STREAM_PROVIDER=auto`), falling back to Torrentio only if Comet is unavailable.
+- **How it works:** Comet runs on your VPS and queries its sources concurrently. Use `STREAM_PROVIDER=comet` when Torrentio blocks the server IP; use `auto` only when both providers are reachable.
 - **Setup:** See [`proxy/comet/README.md`](proxy/comet/README.md) for full instructions, including Jackett indexer configuration.
 
 #### 3. Tailscale Proxy (VPS → home)
@@ -333,8 +333,8 @@ If you run StreamVault on your home computer (which has a residential IP that Re
 | Value | Primary | Fallback | When to use |
 |-------|---------|----------|-------------|
 | `torrentio` | Torrentio | — | Default, simplest setup (no Comet needed) |
-| `comet` | Comet | Torrentio | Explicit Comet-first with Torrentio fallback |
-| `auto` | Comet (if `COMET_URL` set) | Torrentio | **Recommended** — best of both worlds |
+| `comet` | Comet | — | **Recommended on blocked VPS IPs** — no empty Torrentio frame |
+| `auto` | Comet + Torrentio in parallel | Torrentio if Comet absent | Use only when Torrentio is reachable |
 
 ## Testing
 

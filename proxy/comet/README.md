@@ -4,7 +4,7 @@ Self-hosted [Comet](https://github.com/g0ldyy/comet) — a fast torrent/debrid s
 
 ## Why
 
-Torrentio (the public instance at `torrentio.strem.fun`) is frequently down, Cloudflare-blocked, or rate-limited — especially during evening peak hours. A self-hosted Comet instance on your VPS eliminates all three problems by using its own scrapers (Jackett + Zilean) instead of the Torrentio API:
+Torrentio (the public instance at `torrentio.strem.fun`) is frequently down, Cloudflare-blocked, or rate-limited — especially during evening peak hours. A self-hosted Comet instance on your VPS eliminates all three problems by using independent Jackett, Zilean, DMM, Bitmagnet, TorrentsDB, Peerflix, MediaFusion, and anime scrapers instead of depending on the Torrentio API:
 
 | Problem | Public Torrentio | Self-hosted Comet |
 |---------|------------------|-------------------|
@@ -19,8 +19,10 @@ StreamVault uses Comet as the primary stream source with Torrentio as fallback. 
 
 ```
 StreamVault → Comet (self-hosted, VPS)              ← primary
-               ├─ Jackett (self-hosted scrapers)     ← 1337x, TPB, etc.
-               └─ Zilean (DMM hashlist index)        ← pre-computed hashes
+               ├─ Jackett (self-hosted scrapers)     ← TPB, YTS, etc.
+               ├─ Zilean + DMM + Bitmagnet           ← pre-computed/DHT hashes
+               ├─ TorrentsDB + Peerflix + MediaFusion
+               └─ Nyaa + AnimeTosho + NekoBT + SeaDex ← anime
             ↘ Torrentio (public, via Tinyproxy)      ← fallback only
 ```
 
@@ -113,7 +115,7 @@ COMET_URL=http://<vps-tailscale-ip>:8000
 STREAM_PROVIDER=auto
 ```
 
-Restart StreamVault. Stream listings now come from Comet (via Jackett + Zilean) first, falling back to Torrentio only if Comet is unavailable.
+Restart StreamVault. With `STREAM_PROVIDER=comet`, listings come only from Comet's independent sources and the blocked Torrentio frame is omitted. Use `STREAM_PROVIDER=auto` only when this server can also reach Torrentio.
 
 ### 6. (Optional) Enable background scraper
 

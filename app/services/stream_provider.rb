@@ -28,12 +28,17 @@ module StreamProvider
   def provider_entries(rd_api_key:)
     setting = ENV.fetch("STREAM_PROVIDER", "torrentio").to_s.downcase
     entries = []
-    if setting.in?(%w[comet auto]) && CometService.comet_url.present?
-      entries << { id: "comet", label: "Comet", service: CometService.new(rd_api_key: rd_api_key) }
-    end
-    if entries.empty? || setting.in?(%w[comet auto torrentio])
+
+    case setting
+    when "comet"
+      entries << { id: "comet", label: "Comet", service: CometService.new(rd_api_key: rd_api_key) } if CometService.comet_url.present?
+    when "auto"
+      entries << { id: "comet", label: "Comet", service: CometService.new(rd_api_key: rd_api_key) } if CometService.comet_url.present?
+      entries << { id: "torrentio", label: "Torrentio", service: TorrentioService.new(rd_api_key: rd_api_key) }
+    else
       entries << { id: "torrentio", label: "Torrentio", service: TorrentioService.new(rd_api_key: rd_api_key) }
     end
+
     entries
   end
 
