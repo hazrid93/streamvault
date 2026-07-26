@@ -46,6 +46,14 @@ class Rack::Attack
     authenticated_user_id(request)
   end
 
+  # Seek thumbnails each start a short-lived FFmpeg process. Debounced dragging
+  # remains responsive while sustained extraction abuse is bounded per user.
+  throttle("transcode_thumbnail/user", limit: 30, period: 1.minute) do |request|
+    next unless request.path == "/transcode/thumbnail" && request.get?
+
+    authenticated_user_id(request)
+  end
+
   # iOS HLS starts are also used for seeking and automatic stall recovery.
   # Keep abuse protection without blocking a legitimate seek + three recovery
   # attempts in the same ten-second window.

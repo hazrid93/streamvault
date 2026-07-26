@@ -11,7 +11,7 @@ Rails.application.routes.draw do
   root "home#index"
 
   # Search
-  resources :search, only: [:index]
+  resources :search, only: [ :index ]
 
   # Browse by category / genre / sort
   get "browse", to: "browse#index", as: :browse
@@ -27,17 +27,17 @@ Rails.application.routes.draw do
   get "content/:type/:imdb_id/similar_results", to: "content#similar_results", as: :content_similar_results
 
   # Library
-  resources :library, only: [:index, :create, :update, :destroy]
+  resources :library, only: [ :index, :create, :update, :destroy ]
 
   # Wishlist
-  resources :wishlist, only: [:index, :create, :destroy] do
+  resources :wishlist, only: [ :index, :create, :destroy ] do
     member do
       post :move_to_library
     end
   end
 
   # Watch History
-  resources :watch_history, only: [:index, :destroy] do
+  resources :watch_history, only: [ :index, :destroy ] do
     collection do
       delete :clear_all
     end
@@ -47,7 +47,7 @@ Rails.application.routes.draw do
   get "episodes/:show_imdb_id", to: "episodes#index", as: :episodes
 
   # Streaming
-  resources :streaming, only: [:create, :show] do
+  resources :streaming, only: [ :create, :show ] do
     collection do
       get :resume
       post :stall_telemetry
@@ -61,6 +61,7 @@ Rails.application.routes.draw do
   get "transcode/duration", to: "transcode_duration#show", as: :transcode_duration
   get "transcode/tracks", to: "transcode_tracks#show", as: :transcode_tracks
   get "transcode/subtitles", to: "transcode_subtitles#show", as: :transcode_subtitles
+  get "transcode/thumbnail", to: "transcode_thumbnail#show", as: :transcode_thumbnail
   get "transcode", to: "transcode#stream", as: :transcode_stream
 
   # HLS streaming (iOS fallback — iPhone Safari lacks MSE support)
