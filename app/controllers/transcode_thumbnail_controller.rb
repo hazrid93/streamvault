@@ -7,7 +7,7 @@ class TranscodeThumbnailController < ApplicationController
   include StreamUrlValidation
 
   MAX_TIMESTAMP_SECONDS = 24 * 60 * 60
-  PRIVATE_CACHE_SECONDS = 5.minutes.to_i
+  PRIVATE_CACHE_SECONDS = 2.hours.to_i
 
   before_action :authenticate_user!
 

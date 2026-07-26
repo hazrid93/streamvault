@@ -146,13 +146,15 @@ class TranscodeService
   # 4K path while the global capture slots still bound server load.
   THUMBNAIL_TIMEOUT_SECONDS = 20
   THUMBNAIL_MAX_BYTES = 512.kilobytes
-  THUMBNAIL_CACHE_TTL_SECONDS = 5.minutes.to_i
-  THUMBNAIL_CACHE_MAX_SIZE = 100
+  THUMBNAIL_CACHE_TTL_SECONDS = 2.hours.to_i
+  THUMBNAIL_CACHE_MAX_SIZE = 500
+  THUMBNAIL_CACHE_MAX_BYTES = 64.megabytes
   THUMBNAIL_MAX_CONCURRENT_CAPTURES = 2
   THUMBNAIL_FILTER =
     "scale=w=320:h=100:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
 
   @thumbnail_cache = {}
+  @thumbnail_cache_bytes = 0
   @thumbnail_inflight = {}
   @thumbnail_active_captures = 0
   @thumbnail_cache_mutex = Mutex.new
@@ -1654,7 +1656,10 @@ class TranscodeService
     @thumbnail_cache_mutex.synchronize do
       prune_thumbnail_cache
       cached = @thumbnail_cache[cache_key]
-      return [ cached[:jpeg], nil, false ] if cached
+      if cached
+        cached[:last_accessed_at] = monotonic_now
+        return [ cached[:jpeg], nil, false ]
+      end
 
       flight = @thumbnail_inflight[cache_key]
       return [ nil, flight, false ] if flight
@@ -1690,18 +1695,36 @@ class TranscodeService
   def self.store_thumbnail(cache_key, jpeg)
     @thumbnail_cache_mutex.synchronize do
       prune_thumbnail_cache
-      while @thumbnail_cache.size >= THUMBNAIL_CACHE_MAX_SIZE
-        oldest_key, = @thumbnail_cache.min_by { |_key, entry| entry[:stored_at] }
-        @thumbnail_cache.delete(oldest_key)
+      if (replaced = @thumbnail_cache.delete(cache_key))
+        @thumbnail_cache_bytes -= replaced[:byte_size]
       end
-      @thumbnail_cache[cache_key] = { jpeg: jpeg.freeze, stored_at: monotonic_now }
+      while @thumbnail_cache.any? && (
+        @thumbnail_cache.size >= THUMBNAIL_CACHE_MAX_SIZE ||
+        @thumbnail_cache_bytes + jpeg.bytesize > THUMBNAIL_CACHE_MAX_BYTES
+      )
+        oldest_key, oldest = @thumbnail_cache.min_by { |_key, entry| entry[:last_accessed_at] }
+        @thumbnail_cache.delete(oldest_key)
+        @thumbnail_cache_bytes -= oldest[:byte_size]
+      end
+      now = monotonic_now
+      @thumbnail_cache[cache_key] = {
+        jpeg: jpeg.freeze,
+        stored_at: now,
+        last_accessed_at: now,
+        byte_size: jpeg.bytesize
+      }
+      @thumbnail_cache_bytes += jpeg.bytesize
     end
   end
   private_class_method :store_thumbnail
 
   def self.prune_thumbnail_cache
     cutoff = monotonic_now - THUMBNAIL_CACHE_TTL_SECONDS
-    @thumbnail_cache.delete_if { |_key, entry| entry[:stored_at] < cutoff }
+    @thumbnail_cache.delete_if do |_key, entry|
+      expired = entry[:stored_at] < cutoff
+      @thumbnail_cache_bytes -= entry[:byte_size] if expired
+      expired
+    end
   end
   private_class_method :prune_thumbnail_cache
 

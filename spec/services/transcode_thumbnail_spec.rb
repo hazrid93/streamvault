@@ -9,6 +9,7 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
 
   before do
     described_class.instance_variable_set(:@thumbnail_cache, {})
+    described_class.instance_variable_set(:@thumbnail_cache_bytes, 0)
     described_class.instance_variable_set(:@thumbnail_inflight, {})
     described_class.instance_variable_set(:@thumbnail_active_captures, 0)
   end
@@ -116,7 +117,17 @@ RSpec.describe TranscodeService, ".extract_thumbnail" do
     expect(described_class.instance_variable_get(:@thumbnail_cache).size).to eq(3)
   end
 
-  it "expires cached frames after the short TTL" do
+  it "bounds the cache by total JPEG bytes" do
+    stub_const("TranscodeService::THUMBNAIL_CACHE_MAX_BYTES", jpeg.bytesize * 2)
+    allow(described_class).to receive(:capture_command).and_return(capture_result(jpeg))
+
+    3.times { |timestamp| described_class.extract_thumbnail(input_url, timestamp: timestamp) }
+
+    expect(described_class.instance_variable_get(:@thumbnail_cache).size).to eq(2)
+    expect(described_class.instance_variable_get(:@thumbnail_cache_bytes)).to eq(jpeg.bytesize * 2)
+  end
+
+  it "expires cached frames after the TTL" do
     now = 100.0
     calls = 0
     allow(described_class).to receive(:monotonic_now) { now }

@@ -58,7 +58,7 @@ RSpec.describe "Transcode thumbnails", type: :request do
       expect(response).to have_http_status(:ok)
       expect(response.media_type).to eq("image/jpeg")
       expect(response.headers["Content-Disposition"]).to include("inline")
-      expect(response.headers["Cache-Control"].split(", ")).to contain_exactly("private", "max-age=300")
+      expect(response.headers["Cache-Control"].split(", ")).to contain_exactly("private", "max-age=7200")
       expect(response.body.b).to eq(jpeg)
     end
 

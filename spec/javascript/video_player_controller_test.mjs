@@ -71,6 +71,11 @@ test("returning to mobile Chrome reloads subtitles at the resumed absolute posit
   let cleared = 0
   let reloadedAt = null
   let leaseRefreshes = 0
+  let prefetchPauses = 0
+  let prefetchStarts = 0
+  player.videoTarget = { paused: false }
+  player.pauseThumbnailPrefetch = () => { prefetchPauses += 1 }
+  player.startThumbnailPrefetch = () => { prefetchStarts += 1 }
   player.textSubtitleSelected = () => true
   player.currentPlaybackPosition = () => 187.25
   player.clearSubtitleCues = () => { cleared += 1 }
@@ -85,6 +90,8 @@ test("returning to mobile Chrome reloads subtitles at the resumed absolute posit
   testDocument.visibilityState = "visible"
   player.onVisibilityChange()
   assert.equal(leaseRefreshes, 2)
+  assert.equal(prefetchPauses, 1)
+  assert.equal(prefetchStarts, 1)
   assert.equal(cleared, 1)
   assert.equal(reloadedAt, 187.25)
 })
@@ -260,6 +267,7 @@ test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
   player.pendingSeekSeconds = null
   player.hideStartupOverlay = () => {}
   player.scheduleUiHide = () => { uiHideScheduled += 1 }
+  player.startThumbnailPrefetch = () => {}
   player.hideSeekingOverlay = () => { bufferingHidden += 1; player.isStalled = false }
   player.resetProgressBaseline = () => {}
   player.startProgressWatchdog = () => { watchdogStarted += 1 }
@@ -539,6 +547,7 @@ test("all play and pause icons stay synchronized", () => {
   player.pauseIconTargets = pauseIcons
   player.stopProgressWatchdog = () => {}
   player.startProgressWatchdog = () => {}
+  player.pauseThumbnailPrefetch = () => {}
 
   player.videoTarget = { paused: true }
   player.updatePlayIcon()
@@ -589,16 +598,105 @@ test("seek preview shows the selected time and stays clamped above the slider", 
   player.seekPreviewPointerTarget = { style: {} }
   player.seekPreviewTimeTarget = { textContent: "" }
   player.scheduleSeekThumbnail = (second) => { scheduledSecond = second }
+  player.pauseThumbnailPrefetch = () => {}
 
   player.showSeekPreview(0.98)
 
   assert.equal(classes.has("hidden"), false)
   assert.equal(attributes.get("aria-hidden"), "false")
   assert.equal(player.seekPreviewTimeTarget.textContent, "16:20")
-  assert.equal(scheduledSecond, 980)
+  assert.equal(scheduledSecond, 960)
   assert.equal(player.seekPreviewTarget.style.left, "150px")
   assert.equal(player.seekPreviewPointerTarget.style.left, "90px")
   assert.equal(player.controlsTarget.style.zIndex, "25")
+})
+
+test("thumbnail prefetch prioritizes timeline anchors and retains one minute frames", async () => {
+  const player = new VideoPlayerController()
+  const scheduledDelays = []
+  let requestedUrl = ""
+  player.knownDuration = 185
+  player.thumbnailUrlValue = "/transcode/thumbnail"
+  player.extractRawUrl = () => "https://download.real-debrid.com/video.mkv"
+  player.currentPlaybackPosition = () => 95
+  player.videoTarget = { paused: false }
+  player.isStalled = false
+  player.thumbnailRequestInFlight = false
+  player.thumbnailPrefetchTimer = null
+  player.thumbnailPrefetchAbortController = null
+  player.thumbnailPrefetchRequestTimer = null
+  player.thumbnailPrefetchActiveSecond = null
+  player.thumbnailPrefetchGeneration = 0
+  player.thumbnailPrefetchQueue = []
+  player.thumbnailPrefetchedSeconds = new Set()
+  player.thumbnailPrefetchRetries = new Map()
+  player.thumbnailPrefetchCache = new Map()
+  player.thumbnailPrefetchCacheBytes = 0
+  player.thumbnailPrefetchKey = null
+  player.scheduleThumbnailPrefetch = (delay = 6000) => scheduledDelays.push(delay)
+  player.fetchThumbnailForPrefetch = async (url) => {
+    requestedUrl = url
+    return { dataUrl: "data:image/jpeg;base64,preview", byteSize: 128 }
+  }
+
+  player.startThumbnailPrefetch()
+
+  assert.equal(scheduledDelays[0], 2000)
+  assert.equal(player.thumbnailPrefetchQueue[0], 120)
+  assert.deepEqual([...player.thumbnailPrefetchQueue].sort((a, b) => a - b), [0, 60, 120, 180])
+  assert.equal(player.thumbnailMinuteFor(31), 60)
+
+  player.runThumbnailPrefetch()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.match(requestedUrl, /timestamp=120/)
+  assert.equal(player.thumbnailPrefetchedSeconds.has(120), true)
+  assert.equal(player.thumbnailPrefetchCache.get(120).dataUrl, "data:image/jpeg;base64,preview")
+  assert.equal(scheduledDelays.at(-1), 6000)
+})
+
+test("seek preview uses a retained prefetched frame without a network request", () => {
+  const player = new VideoPlayerController()
+  const imageClasses = new Set(["hidden"])
+  const loadingClasses = new Set()
+  const errorClasses = new Set(["hidden"])
+  let imageSource = ""
+  player.thumbnailPrefetchCache = new Map([
+    [120, { dataUrl: "data:image/jpeg;base64,prefetched", byteSize: 128 }]
+  ])
+  player.thumbnailRequestInFlight = false
+  player.thumbnailRequestToken = 0
+  player.thumbnailDebounceTimer = null
+  player.seekPreviewImageTarget = {
+    onload: null,
+    onerror: null,
+    classList: {
+      add: (name) => imageClasses.add(name),
+      remove: (name) => imageClasses.delete(name)
+    },
+    set src(value) { imageSource = value },
+    getAttribute: () => imageSource
+  }
+  player.seekPreviewLoadingTarget = {
+    classList: {
+      add: (name) => loadingClasses.add(name),
+      remove: (name) => loadingClasses.delete(name)
+    }
+  }
+  player.seekPreviewErrorTarget = {
+    classList: {
+      add: (name) => errorClasses.add(name),
+      remove: (name) => errorClasses.delete(name)
+    }
+  }
+
+  player.scheduleSeekThumbnail(120)
+
+  assert.equal(imageSource, "data:image/jpeg;base64,prefetched")
+  assert.equal(player.displayedThumbnailSecond, 120)
+  assert.equal(imageClasses.has("hidden"), false)
+  assert.equal(loadingClasses.has("hidden"), true)
+  assert.equal(errorClasses.has("hidden"), true)
 })
 
 test("continuous seek movement still requests the latest frame on the throttle interval", async () => {
@@ -606,6 +704,7 @@ test("continuous seek movement still requests the latest frame on the throttle i
   const classes = { add() {}, remove() {} }
   const requested = []
   player.displayedThumbnailSecond = null
+  player.thumbnailPrefetchCache = new Map()
   player.thumbnailDebounceTimer = null
   player.thumbnailRequestInFlight = false
   player.thumbnailDesiredSecond = 10
@@ -661,6 +760,8 @@ test("seek thumbnail loading keeps only one request in flight and skips stale fr
   player.thumbnailPreviewActive = true
   player.thumbnailRequestInFlight = false
   player.thumbnailRequestToken = 0
+  player.thumbnailPrefetchCache = new Map()
+  player.thumbnailPrefetchedSeconds = new Set()
   player.thumbnailDesiredSecond = 10
   // Keep this unit test synchronous while still exercising the production
   // latest-only handoff (scheduleSeekThumbnail owns the real 250ms throttle).
@@ -1234,6 +1335,7 @@ test("MSE recovery budget survives raw network data and resets only when playbac
     }
     player.hideStartupOverlay = () => {}
     player.scheduleUiHide = () => {}
+    player.startThumbnailPrefetch = () => {}
     player.hideSeekingOverlay = () => {}
     player.stopProgressWatchdog = () => {}
     player.startProgressWatchdog = () => {}

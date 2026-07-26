@@ -13,6 +13,11 @@ const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const SEEK_THUMBNAIL_DEBOUNCE_MS = 250
+const THUMBNAIL_PREFETCH_START_DELAY_MS = 2000
+const THUMBNAIL_PREFETCH_GAP_MS = 6000
+const THUMBNAIL_PREFETCH_REQUEST_TIMEOUT_MS = 25000
+const THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS = 1000
+const THUMBNAIL_PREFETCH_CACHE_MAX_BYTES = 16 * 1024 * 1024
 const SEEK_PREVIEW_WIDTH_PX = 178
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
 const HLS_MAX_RATE_LIMIT_RETRIES = 2
@@ -131,6 +136,17 @@ export default class extends Controller {
     this.thumbnailDesiredSecond = null
     this.displayedThumbnailSecond = null
     this.thumbnailPreviewActive = false
+    this.thumbnailPrefetchTimer = null
+    this.thumbnailPrefetchAbortController = null
+    this.thumbnailPrefetchRequestTimer = null
+    this.thumbnailPrefetchActiveSecond = null
+    this.thumbnailPrefetchGeneration = 0
+    this.thumbnailPrefetchQueue = []
+    this.thumbnailPrefetchedSeconds = new Set()
+    this.thumbnailPrefetchRetries = new Map()
+    this.thumbnailPrefetchCache = new Map()
+    this.thumbnailPrefetchCacheBytes = 0
+    this.thumbnailPrefetchKey = null
     this.mediaSource = null
     this.sourceBuffer = null
     this.fetchController = null
@@ -248,6 +264,7 @@ export default class extends Controller {
     this.clearStartupOverlayTimer()
     this.clearSuppressSeekClickTimer()
     this.clearSeekThumbnailTimer()
+    this.stopThumbnailPrefetch()
     this.thumbnailRequestToken += 1
     this.seekPreviewImageTarget.onload = null
     this.seekPreviewImageTarget.onerror = null
@@ -444,7 +461,12 @@ export default class extends Controller {
     // it returns. Do not treat a backgrounded, OS-paused tab as an explicit
     // player exit; the user must be able to resume the same local torrent.
     this.refreshLocalTorrentStatus()
-    if (document.visibilityState !== "visible" || !this.textSubtitleSelected()) return
+    if (document.visibilityState !== "visible") {
+      this.pauseThumbnailPrefetch()
+      return
+    }
+    if (!this.videoTarget.paused) this.startThumbnailPrefetch()
+    if (!this.textSubtitleSelected()) return
 
     const position = this.currentPlaybackPosition()
     this.clearSubtitleCues()
@@ -494,6 +516,7 @@ export default class extends Controller {
         // Now that we know the duration, position the seek bar at the
         // current playback point (which starts at startSecondsValue).
         this.onTimeUpdate()
+        if (!this.videoTarget.paused) this.startThumbnailPrefetch()
       }
     } catch (e) {
       console.warn("Duration probe failed:", e)
@@ -2522,6 +2545,7 @@ export default class extends Controller {
       // Disarm the progress watchdog on a deliberate pause —
       // currentTime won't advance, but this is not a stall.
       this.stopProgressWatchdog()
+      this.pauseThumbnailPrefetch()
     } else {
       this.playIconTargets.forEach((icon) => icon.classList.add("hidden"))
       this.pauseIconTargets.forEach((icon) => icon.classList.remove("hidden"))
@@ -2545,6 +2569,7 @@ export default class extends Controller {
     // was still paused. Re-arm it on every real playback start/resume so
     // the center buttons never outlive the player menu.
     this.scheduleUiHide()
+    this.startThumbnailPrefetch()
 
     // After a user seek, hide the seeking overlay as soon as playback
     // resumes — the seeking overlay is not a buffering indicator, and
@@ -3714,14 +3739,16 @@ export default class extends Controller {
 
     const normalizedPercent = Math.max(0, Math.min(1, percent))
     const second = Math.floor(normalizedPercent * this.knownDuration)
+    const frameSecond = this.thumbnailMinuteFor(second)
     this.thumbnailPreviewActive = true
-    this.thumbnailDesiredSecond = second
+    this.thumbnailDesiredSecond = frameSecond
     this.controlsTarget.style.zIndex = "25"
     this.seekPreviewTarget.classList.remove("hidden")
     this.seekPreviewTarget.setAttribute("aria-hidden", "false")
     this.seekPreviewTimeTarget.textContent = this.formatTime(second)
     this.positionSeekPreview(normalizedPercent)
-    this.scheduleSeekThumbnail(second)
+    this.pauseThumbnailPrefetch()
+    this.scheduleSeekThumbnail(frameSecond)
   }
 
   positionSeekPreview(percent) {
@@ -3740,7 +3767,203 @@ export default class extends Controller {
     this.seekPreviewPointerTarget.style.left = `${pointerWithinPreview}px`
   }
 
+  thumbnailMinuteFor(second) {
+    const duration = Math.max(0, Math.floor(this.knownDuration || 0))
+    const lastMinute = Math.floor(duration / 60) * 60
+    const minute = Math.round(Math.max(0, second) / 60) * 60
+    return Math.min(lastMinute, minute)
+  }
+
+  thumbnailRequestUrl(second) {
+    const rawUrl = this.extractRawUrl()
+    if (!rawUrl || !this.thumbnailUrlValue || !Number.isFinite(second)) return null
+
+    const requestUrl = new URL(this.thumbnailUrlValue, window.location.origin)
+    requestUrl.searchParams.set("url", rawUrl)
+    requestUrl.searchParams.set("timestamp", Math.floor(second).toString())
+    return requestUrl.pathname + requestUrl.search
+  }
+
+  buildThumbnailPrefetchQueue() {
+    const duration = Math.max(0, Math.floor(this.knownDuration || 0))
+    if (!duration) return []
+
+    const minuteMarks = []
+    for (let second = 0; second <= duration; second += 60) minuteMarks.push(second)
+
+    const current = Math.max(0, Math.min(duration, this.currentPlaybackPosition()))
+    const anchors = [
+      this.thumbnailMinuteFor(current),
+      0,
+      this.thumbnailMinuteFor(duration * 0.25),
+      this.thumbnailMinuteFor(duration * 0.5),
+      this.thumbnailMinuteFor(duration * 0.75),
+      this.thumbnailMinuteFor(duration)
+    ]
+    const remaining = minuteMarks
+      .filter((second) => !anchors.includes(second))
+      .sort((left, right) => Math.abs(left - current) - Math.abs(right - current))
+
+    return [...new Set([...anchors, ...remaining])]
+  }
+
+  startThumbnailPrefetch() {
+    const rawUrl = this.extractRawUrl()
+    const duration = Math.max(0, Math.floor(this.knownDuration || 0))
+    if (!rawUrl || !this.thumbnailUrlValue || !duration || document.visibilityState === "hidden") return
+
+    const prefetchKey = `${rawUrl}\n${duration}`
+    if (this.thumbnailPrefetchKey === prefetchKey) {
+      if (this.thumbnailPrefetchQueue.length > 0 && !this.thumbnailPrefetchTimer && !this.thumbnailPrefetchAbortController) {
+        this.scheduleThumbnailPrefetch(THUMBNAIL_PREFETCH_START_DELAY_MS)
+      }
+      return
+    }
+
+    this.stopThumbnailPrefetch()
+    this.thumbnailPrefetchKey = prefetchKey
+    this.thumbnailPrefetchQueue = this.buildThumbnailPrefetchQueue()
+    this.scheduleThumbnailPrefetch(THUMBNAIL_PREFETCH_START_DELAY_MS)
+  }
+
+  scheduleThumbnailPrefetch(delay = THUMBNAIL_PREFETCH_GAP_MS) {
+    if (this.thumbnailPrefetchTimer) clearTimeout(this.thumbnailPrefetchTimer)
+    this.thumbnailPrefetchTimer = setTimeout(() => {
+      this.thumbnailPrefetchTimer = null
+      this.runThumbnailPrefetch()
+    }, delay)
+  }
+
+  runThumbnailPrefetch() {
+    if (!this.thumbnailPrefetchKey || this.thumbnailPrefetchQueue.length === 0) return
+    if (this.videoTarget.paused || this.isStalled || document.visibilityState === "hidden") return
+    if (this.thumbnailRequestInFlight) {
+      this.scheduleThumbnailPrefetch(THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS)
+      return
+    }
+
+    const second = this.thumbnailPrefetchQueue.shift()
+    if (this.thumbnailPrefetchedSeconds.has(second)) {
+      this.scheduleThumbnailPrefetch(0)
+      return
+    }
+
+    const requestUrl = this.thumbnailRequestUrl(second)
+    if (!requestUrl) return
+
+    const generation = this.thumbnailPrefetchGeneration
+    const controller = new AbortController()
+    this.thumbnailPrefetchAbortController = controller
+    this.thumbnailPrefetchActiveSecond = second
+    this.thumbnailPrefetchRequestTimer = setTimeout(
+      () => controller.abort(),
+      THUMBNAIL_PREFETCH_REQUEST_TIMEOUT_MS
+    )
+
+    this.fetchThumbnailForPrefetch(requestUrl, controller.signal)
+      .then((result) => this.finishThumbnailPrefetch(generation, second, result))
+      .catch((error) => this.failThumbnailPrefetch(generation, second, error))
+  }
+
+  async fetchThumbnailForPrefetch(requestUrl, signal) {
+    const response = await fetch(requestUrl, { credentials: "same-origin", signal })
+    if (!response.ok) {
+      const error = new Error(`Thumbnail prefetch failed (${response.status})`)
+      const retryAfter = Number(response.headers.get("Retry-After"))
+      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0
+      throw error
+    }
+
+    const blob = await response.blob()
+    if (blob.type !== "image/jpeg" || blob.size <= 0) throw new Error("Invalid thumbnail prefetch response")
+    return { dataUrl: await this.thumbnailBlobToDataUrl(blob), byteSize: blob.size }
+  }
+
+  thumbnailBlobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(reader.error || new Error("Thumbnail cache read failed"))
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  finishThumbnailPrefetch(generation, second, result) {
+    if (generation !== this.thumbnailPrefetchGeneration || second !== this.thumbnailPrefetchActiveSecond) return
+
+    this.clearThumbnailPrefetchRequest()
+    this.cachePrefetchedThumbnail(second, result)
+    this.thumbnailPrefetchedSeconds.add(second)
+    this.thumbnailPrefetchRetries.delete(second)
+    if (this.thumbnailPrefetchQueue.length > 0) this.scheduleThumbnailPrefetch()
+  }
+
+  failThumbnailPrefetch(generation, second, error) {
+    if (generation !== this.thumbnailPrefetchGeneration || second !== this.thumbnailPrefetchActiveSecond) return
+
+    this.clearThumbnailPrefetchRequest()
+    const retries = this.thumbnailPrefetchRetries.get(second) || 0
+    if (retries < 1) {
+      this.thumbnailPrefetchRetries.set(second, retries + 1)
+      this.thumbnailPrefetchQueue.push(second)
+    }
+    if (this.thumbnailPrefetchQueue.length > 0) {
+      this.scheduleThumbnailPrefetch(Math.max(THUMBNAIL_PREFETCH_GAP_MS, error.retryAfterMs || 0))
+    }
+  }
+
+  cachePrefetchedThumbnail(second, result) {
+    const existing = this.thumbnailPrefetchCache.get(second)
+    if (existing) this.thumbnailPrefetchCacheBytes -= existing.byteSize
+    this.thumbnailPrefetchCache.delete(second)
+    this.thumbnailPrefetchCache.set(second, result)
+    this.thumbnailPrefetchCacheBytes += result.byteSize
+
+    while (this.thumbnailPrefetchCacheBytes > THUMBNAIL_PREFETCH_CACHE_MAX_BYTES && this.thumbnailPrefetchCache.size > 1) {
+      const oldestSecond = this.thumbnailPrefetchCache.keys().next().value
+      const removed = this.thumbnailPrefetchCache.get(oldestSecond)
+      this.thumbnailPrefetchCache.delete(oldestSecond)
+      this.thumbnailPrefetchedSeconds.delete(oldestSecond)
+      this.thumbnailPrefetchCacheBytes -= removed.byteSize
+    }
+  }
+
+  clearThumbnailPrefetchRequest() {
+    if (this.thumbnailPrefetchRequestTimer) clearTimeout(this.thumbnailPrefetchRequestTimer)
+    this.thumbnailPrefetchRequestTimer = null
+    this.thumbnailPrefetchAbortController = null
+    this.thumbnailPrefetchActiveSecond = null
+  }
+
+  pauseThumbnailPrefetch() {
+    if (this.thumbnailPrefetchTimer) clearTimeout(this.thumbnailPrefetchTimer)
+    this.thumbnailPrefetchTimer = null
+    const activeSecond = this.thumbnailPrefetchActiveSecond
+    this.thumbnailPrefetchGeneration += 1
+    if (activeSecond != null && !this.thumbnailPrefetchedSeconds.has(activeSecond) && !this.thumbnailPrefetchQueue.includes(activeSecond)) {
+      this.thumbnailPrefetchQueue.unshift(activeSecond)
+    }
+    if (this.thumbnailPrefetchAbortController) this.thumbnailPrefetchAbortController.abort()
+    this.clearThumbnailPrefetchRequest()
+  }
+
+  stopThumbnailPrefetch() {
+    this.pauseThumbnailPrefetch()
+    this.thumbnailPrefetchQueue = []
+    this.thumbnailPrefetchedSeconds = new Set()
+    this.thumbnailPrefetchRetries = new Map()
+    this.thumbnailPrefetchCache = new Map()
+    this.thumbnailPrefetchCacheBytes = 0
+    this.thumbnailPrefetchKey = null
+  }
+
   scheduleSeekThumbnail(second) {
+    const cached = this.thumbnailPrefetchCache.get(second)
+    if (cached) {
+      this.displayCachedSeekThumbnail(second, cached.dataUrl)
+      return
+    }
+
     if (!this.thumbnailRequestInFlight && this.displayedThumbnailSecond === second && this.seekPreviewImageTarget.getAttribute("src")) {
       this.seekPreviewImageTarget.classList.remove("hidden")
       this.seekPreviewLoadingTarget.classList.add("hidden")
@@ -3761,16 +3984,26 @@ export default class extends Controller {
     }, SEEK_THUMBNAIL_DEBOUNCE_MS)
   }
 
+  displayCachedSeekThumbnail(second, dataUrl) {
+    this.clearSeekThumbnailTimer()
+    this.thumbnailRequestToken += 1
+    this.thumbnailRequestInFlight = false
+    this.thumbnailRequestedSecond = null
+    this.displayedThumbnailSecond = second
+    this.seekPreviewImageTarget.onload = null
+    this.seekPreviewImageTarget.onerror = null
+    this.seekPreviewImageTarget.src = dataUrl
+    this.seekPreviewImageTarget.classList.remove("hidden")
+    this.seekPreviewLoadingTarget.classList.add("hidden")
+    this.seekPreviewErrorTarget.classList.add("hidden")
+  }
+
   loadSeekThumbnail(second) {
     if (!this.thumbnailPreviewActive || !Number.isFinite(second)) return
     if (this.thumbnailRequestInFlight) return
 
-    const rawUrl = this.extractRawUrl()
-    if (!rawUrl || !this.thumbnailUrlValue) return
-
-    const requestUrl = new URL(this.thumbnailUrlValue, window.location.origin)
-    requestUrl.searchParams.set("url", rawUrl)
-    requestUrl.searchParams.set("timestamp", Math.floor(second).toString())
+    const requestUrl = this.thumbnailRequestUrl(second)
+    if (!requestUrl) return
 
     this.thumbnailRequestInFlight = true
     this.thumbnailRequestedSecond = Math.floor(second)
@@ -3781,7 +4014,7 @@ export default class extends Controller {
     const token = ++this.thumbnailRequestToken
     this.seekPreviewImageTarget.onload = () => this.finishSeekThumbnail(token, true)
     this.seekPreviewImageTarget.onerror = () => this.finishSeekThumbnail(token, false)
-    this.seekPreviewImageTarget.src = requestUrl.pathname + requestUrl.search
+    this.seekPreviewImageTarget.src = requestUrl
   }
 
   finishSeekThumbnail(token, succeeded) {
@@ -3826,6 +4059,7 @@ export default class extends Controller {
     this.clearSeekThumbnailTimer()
     this.seekPreviewTarget.classList.add("hidden")
     this.seekPreviewTarget.setAttribute("aria-hidden", "true")
+    if (!this.videoTarget.paused) this.startThumbnailPrefetch()
   }
 
   clearSeekThumbnailTimer() {
