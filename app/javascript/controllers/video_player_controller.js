@@ -171,8 +171,8 @@ export default class extends Controller {
     this.sourceUrlTarget.textContent = this.streamingUrlValue
     this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
     this.startLocalTorrentStatus()
-    this.handleLocalPageHide = () => this.stopLocalTorrent()
-    if (this.localTorrentHashValue) window.addEventListener("pagehide", this.handleLocalPageHide)
+    this.handleLocalVisibilityChange = () => this.scheduleHiddenLocalCleanup()
+    if (this.localTorrentHashValue) document.addEventListener("visibilitychange", this.handleLocalVisibilityChange)
     this.showOverlayUi()
     this.element.addEventListener("mousemove", this.mouseMoveHandler)
     document.addEventListener("keydown", this.keydownHandler)
@@ -224,7 +224,8 @@ export default class extends Controller {
     this.stopProgressTracking()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
     this.localStatusInterval = null
-    if (this.handleLocalPageHide) window.removeEventListener("pagehide", this.handleLocalPageHide)
+    if (this.handleLocalVisibilityChange) document.removeEventListener("visibilitychange", this.handleLocalVisibilityChange)
+    if (this.hiddenLocalCleanupTimer) clearTimeout(this.hiddenLocalCleanupTimer)
     this.stopLocalTorrent()
     // Save progress only if navigateBack hasn't already done it.
     if (!this.navigatingAway) this.saveProgressSync()
@@ -294,6 +295,22 @@ export default class extends Controller {
 
     refresh()
     this.localStatusInterval = setInterval(refresh, 5000)
+  }
+
+  scheduleHiddenLocalCleanup() {
+    if (this.hiddenLocalCleanupTimer) clearTimeout(this.hiddenLocalCleanupTimer)
+    this.hiddenLocalCleanupTimer = null
+    if (document.visibilityState !== "hidden") return
+
+    // iOS may briefly hide the document while entering native video/fullscreen.
+    // Never tear down an actively playing source during that transition. A
+    // genuinely abandoned paused/background tab is cleaned after a grace
+    // period; browser crashes still fall back to TorrServer's disconnect TTL.
+    this.hiddenLocalCleanupTimer = setTimeout(() => this.cleanupHiddenLocalPlayback(), 45000)
+  }
+
+  cleanupHiddenLocalPlayback() {
+    if (document.visibilityState === "hidden" && this.videoTarget.paused) this.stopLocalTorrent()
   }
 
   stopLocalTorrent() {
@@ -860,6 +877,7 @@ export default class extends Controller {
               this.startupOverlayTarget.removeEventListener("click", onTap)
             }).catch((playErr) => {
               console.warn('HLS: play() failed after tap, will retry', playErr)
+              this.reportStall(`hls_tap_play_rejected_${playErr?.name || 'unknown'}`)
               if (spinner) spinner.style.display = "none"
               if (label) label.textContent = "Tap to retry"
               if (sub) sub.textContent = "Tap anywhere to try again"
@@ -1721,6 +1739,7 @@ export default class extends Controller {
     fetch("/streaming/stall_telemetry", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": document.querySelector("[name='csrf-token']")?.content },
+      body,
       keepalive: true
     }).catch(() => {})
   }

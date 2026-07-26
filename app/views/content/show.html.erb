@@ -138,7 +138,7 @@
         </div>
 
         <% if @stream_providers.any? %>
-          <div class="grid gap-3">
+          <div class="grid min-w-0 max-w-full gap-3">
             <% @stream_providers.each do |provider| %>
               <%= render "content/stream_provider_loader",
                     provider: provider, imdb_id: @imdb_id, type: @type,

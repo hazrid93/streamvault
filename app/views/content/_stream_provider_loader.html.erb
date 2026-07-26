@@ -13,8 +13,8 @@
         season: season,
         episode: episode
       ),
-      loading: "eager" do %>
-  <section class="rounded-xl border border-sv-border/70 bg-sv-surface/60 p-3" aria-label="Loading <%= provider.fetch(:label) %> streams" aria-busy="true">
+      loading: "eager", class: "stream-provider-frame" do %>
+  <section class="stream-provider-card rounded-xl border border-sv-border/70 bg-sv-surface/60 p-3" aria-label="Loading <%= provider.fetch(:label) %> streams" aria-busy="true">
     <div class="mb-3 flex items-center justify-between"><span class="text-xs font-semibold text-sv-text-muted"><%= provider.fetch(:label) %></span><span class="font-mono text-[0.65rem] text-sv-text-muted">SEARCHING</span></div>
     <div class="space-y-2">
       <% 3.times do %>

@@ -110,7 +110,7 @@ RSpec.describe "Content", type: :request do
       get content_stream_results_path(type: "movie", imdb_id: "tt1375666", provider: "torrentio", title: "Inception")
 
       expect(response).to have_http_status(:ok)
-      expect(response.body).to include('turbo-frame id="stream_provider_torrentio_movie"')
+      expect(response.body).to include('id="stream_provider_torrentio_movie"')
       expect(response.body).to include("Inception 1080p")
       expect(response.body).to include("Stream info")
       expect(response.body).to include("Reported seeders")
@@ -121,7 +121,7 @@ RSpec.describe "Content", type: :request do
 
       expect(response).to have_http_status(:ok)
       expect(response.body).to include("This stream provider is not configured")
-      expect(response.body).to include('turbo-frame id="stream_provider_unknown_movie"')
+      expect(response.body).to include('id="stream_provider_unknown_movie"')
     end
   end
 

@@ -17,6 +17,7 @@ class TestVTTCue {
 }
 
 const testDocument = {
+  visibilityState: "visible",
   fullscreenElement: null,
   webkitFullscreenElement: null,
   exitFullscreen() {},
@@ -63,6 +64,23 @@ test("leaving a local player sends one authenticated keepalive stop", () => {
     info_hash: "a".repeat(40),
     session_token: "session-token"
   })
+})
+
+test("native video transitions do not clean an actively playing local source", () => {
+  const player = new VideoPlayerController()
+  let stops = 0
+  const video = { paused: false }
+  Object.defineProperty(player, "videoTarget", { value: video })
+  player.stopLocalTorrent = () => { stops += 1 }
+  testDocument.visibilityState = "hidden"
+
+  player.cleanupHiddenLocalPlayback()
+  assert.equal(stops, 0)
+
+  video.paused = true
+  player.cleanupHiddenLocalPlayback()
+  assert.equal(stops, 1)
+  testDocument.visibilityState = "visible"
 })
 
 test("native direct play uses absolute media time while fragment streams add their offset", () => {
