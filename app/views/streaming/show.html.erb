@@ -267,6 +267,26 @@
 
 
 
+      <%# HDR is offered only when the source is HDR10/HLG and this display
+          reports high dynamic range. It stays visible while disabled so the
+          viewer can switch HDR back on without leaving playback. %>
+      <div data-video-player-target="hdrControls" class="hidden">
+        <button type="button"
+                data-video-player-target="hdrButton"
+                data-action="click->video-player#toggleHdr"
+                class="group flex h-7 items-center gap-1 rounded-md border border-white/20 bg-black/60 px-1.5 text-[10px] font-black tracking-wider text-sv-text-muted transition-all hover:border-white/40 hover:text-white"
+                aria-pressed="false"
+                aria-label="Enable HDR"
+                title="Enable HDR">
+          <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/>
+          </svg>
+          <span>HDR</span>
+          <span data-video-player-target="hdrButtonState" class="sr-only">OFF</span>
+        </button>
+      </div>
+
       <%# Fullscreen — browser fullscreen via the standard Fullscreen API.
            Takes the whole player container (controls + subtitle overlay)
            into fullscreen as a single unit, so subtitles keep working. %>

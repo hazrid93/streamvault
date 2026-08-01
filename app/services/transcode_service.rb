@@ -7,9 +7,9 @@ require "shellwords"
 require "digest"
 
 # Remuxes/transcodes streams via FFmpeg for browser playback.
-# Browser-safe H.264 video is copied when possible; risky/unsupported
-# video, UHD video, and streams with burned-in subtitles are normalized
-# to 1080p H.264. Audio is always transcoded to AAC.
+# Browser-safe H.264 is copied when possible. HDR10/HLG HEVC is preserved
+# for explicitly capable clients; otherwise HDR is tone-mapped and risky or
+# unsupported video is normalized to 1080p H.264. Audio becomes AAC.
 #
 # The ffmpeg child runs in its own process group so the entire group
 # (ffmpeg + any helper processes) can be killed when the client
@@ -75,6 +75,15 @@ class TranscodeService
   MAX_VERYFAST_VIDEO_HEIGHT = 1080
   SAFE_VIDEO_FILTER =
     "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+  # HDR sources must be converted through linear light before producing SDR.
+  # Simply forcing a PQ/HLG source to yuv420p leaves the PQ transfer function
+  # in SDR output and produces the familiar dim, desaturated picture.
+  HDR_TONEMAP_FILTER =
+    "zscale=t=linear:npl=100,format=gbrpf32le," \
+    "tonemap=tonemap=hable:desat=0," \
+    "zscale=p=bt709:t=bt709:m=bt709:r=tv," \
+    "#{SAFE_VIDEO_FILTER}"
+  HDR_PASSTHROUGH_CODECS = %w[hevc h265].freeze
   # Keep the audio clock locked to its timestamps.  Values greater than 1
   # allow soft sample-rate compensation (up to this many samples/second),
   # while first_pts=0 pads or trims the beginning onto the same zero-based
@@ -218,9 +227,9 @@ class TranscodeService
   end
 
   # Stream transcoded/remuxed fMP4 from FFmpeg.
-  # Copies video only when the source is already browser-safe H.264 at
-  # 1080p or below. UHD/HEVC/remux sources are transcoded so the browser
-  # is not asked to decode crash-prone streams directly.
+  # Copies browser-safe H.264 or explicitly requested compatible HDR HEVC.
+  # Other UHD/HEVC sources are tone-mapped/transcoded so unsupported clients
+  # are not asked to decode them directly.
   #
   # Accepts optional headers hash, start_seconds for seeking, and audio
   # language/stream hints for choosing the source audio track before playback.
@@ -229,7 +238,7 @@ class TranscodeService
   # (bad URL, auth failure, expired link).  When the caller stops reading
   # (client disconnect → exception propagates through the yield), the
   # ensure block kills ffmpeg.
-  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], remux: false, &block)
+  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], remux: false, hdr: false, &block)
     cmd = build_ffmpeg_command(
       input_url,
       headers: headers,
@@ -238,7 +247,8 @@ class TranscodeService
       subtitle_stream: subtitle_stream,
       default_language: default_language,
       preferred_languages: preferred_languages,
-      remux: remux
+      remux: remux,
+      hdr: hdr
     )
 
     transcode_to_fmp4_internal(cmd, &block)
@@ -246,8 +256,9 @@ class TranscodeService
 
   # Transcode to HLS segments on disk for iOS Safari playback.
   #
-  # Unlike transcode_to_fmp4 (which pipes fMP4 to stdout), HLS output
-  # is written to files in segment_dir: playlist.m3u8 plus 0.ts, 1.ts, ...
+  # Unlike transcode_to_fmp4 (which pipes fMP4 to stdout), HLS output is
+  # written to segment_dir. SDR uses MPEG-TS segments; HDR passthrough uses
+  # an fMP4 init segment plus .m4s media segments, as required by iOS HEVC.
   # ffmpeg keeps running after this method returns — the caller owns
   # the process and must kill it (via HlsSession.stop) when playback ends.
   #
@@ -263,7 +274,7 @@ class TranscodeService
   # for monitoring ffmpeg and detecting failure — the client polls the
   # playlist endpoint until the playlist file appears.
   # Returns the pid so the caller can kill the group later.
-  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], wait_for_first_segment: true)
+  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], hdr: false, wait_for_first_segment: true)
     FileUtils.mkdir_p(segment_dir)
 
     cmd = build_ffmpeg_command(
@@ -275,7 +286,8 @@ class TranscodeService
       default_language: default_language,
       preferred_languages: preferred_languages,
       output_spec: :hls,
-      segment_dir: segment_dir
+      segment_dir: segment_dir,
+      hdr: hdr
     )
 
     err_rd, err_wr = IO.pipe
@@ -317,7 +329,7 @@ class TranscodeService
           # With short sources (or very fast machines), ffmpeg can
           # produce the first segment and exit between two iterations
           # of this loop, so the produced_segment flag hasn't been set yet.
-          if status.success? && File.exist?(playlist_path) && Dir.glob(File.join(segment_dir, "*.ts")).any?
+          if status.success? && File.exist?(playlist_path) && hls_segment_produced?(segment_dir)
             produced_segment = true
             break
           end
@@ -325,7 +337,7 @@ class TranscodeService
           break  # ffmpeg finished naturally after producing segments
         end
 
-        if File.exist?(playlist_path) && Dir.glob(File.join(segment_dir, "*.ts")).any?
+        if File.exist?(playlist_path) && hls_segment_produced?(segment_dir)
           produced_segment = true
           break
         end
@@ -347,6 +359,11 @@ class TranscodeService
 
     pid
   end
+
+  def self.hls_segment_produced?(segment_dir)
+    Dir.glob(File.join(segment_dir, "*.ts")).any? || Dir.glob(File.join(segment_dir, "*.m4s")).any?
+  end
+  private_class_method :hls_segment_produced?
 
   # Spawns a subprocess from the given command array, streams its stdout
   # to the block, and enforces first-data timeout. Raises TranscodeError if
@@ -835,7 +852,7 @@ class TranscodeService
   end
   private_class_method :format_vtt_timestamp
 
-  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil, remux: false)
+  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil, remux: false, hdr: false)
     header_str = ffmpeg_headers(headers)
     # Probe video stream and media tracks in parallel — these are
     # independent ffprobe calls that each take 1-3s on a cold cache.
@@ -869,21 +886,22 @@ class TranscodeService
     # Subtitle burn requires re-encoding video, so remux is ignored if a
     # burn subtitle track is selected — falls through to normal transcode.
     #
-    # A non-zero seek must also be decoded/re-encoded.  Fast input seeking
-    # starts a copied video stream at the preceding keyframe, while decoded
-    # audio is accurately trimmed to the requested time.  With a long GOP
-    # that puts audio seconds ahead of video after every resume, seek, or
-    # recovery.  Decoding video lets ffmpeg discard the same pre-roll from
-    # both streams and start them on one timeline.
-    effective_remux = remux && !selected_burn_subtitle_track
-    video_args = if selected_burn_subtitle_track
+    # Standard non-zero seeks are decoded/re-encoded. Fast input seeking starts
+    # copied video at the preceding keyframe while decoded audio is normally
+    # trimmed to the requested instant, which can desynchronize long GOPs.
+    # HDR is the exception: -noaccurate_seek below retains matching audio and
+    # video pre-roll so the 10-bit stream can remain untouched.
+    hdr_passthrough = hdr && hdr_passthrough_video?(video_stream) && !selected_burn_subtitle_track
+    effective_remux = (remux || (output_spec == :hls && hdr_passthrough)) && !selected_burn_subtitle_track
+    copy_video = (effective_remux && (seek_start_seconds.zero? || hdr_passthrough)) ||
+      (browser_safe_video?(video_stream) && seek_start_seconds.zero?)
+    output_video_filter = video_filter_for(video_stream)
+    video_args = if copy_video
+      [ "-c:v", "copy" ]
+    elsif selected_burn_subtitle_track
       transcode_args(video_stream: video_stream)
-    elsif effective_remux && seek_start_seconds.zero?
-      [ "-c:v", "copy" ]
-    elsif browser_safe_video?(video_stream) && seek_start_seconds.zero?
-      [ "-c:v", "copy" ]
     else
-      [ "-vf", SAFE_VIDEO_FILTER, *transcode_args(video_stream: video_stream) ]
+      [ "-vf", output_video_filter, *transcode_args(video_stream: video_stream) ]
     end
 
     if defined?(Rails)
@@ -935,10 +953,14 @@ class TranscodeService
     cmd += [ "-analyzeduration", "1000000", "-probesize", "1000000" ]
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     # Input seeking (before -i): fast, uses the container's seek table.
+    # Accurate input seeking discards decoded audio pre-roll but cannot discard
+    # copied HEVC frames before the requested point. For HDR passthrough,
+    # retain both streams from the same preceding keyframe instead.
+    cmd += [ "-noaccurate_seek" ] if hdr_passthrough && seek_start_seconds.positive?
     cmd += [ "-ss", seek_start_seconds.to_s ] if seek_start_seconds.positive?
     cmd += [ "-i", input_url ]
     if selected_burn_subtitle_track
-      cmd += [ "-filter_complex", subtitle_burn_filter(selected_burn_subtitle_track[:position]) ]
+      cmd += [ "-filter_complex", subtitle_burn_filter(selected_burn_subtitle_track[:position], output_video_filter) ]
       cmd += [ "-map", "[v]" ]
     else
       cmd += [ "-map", "0:v:0" ]
@@ -950,6 +972,12 @@ class TranscodeService
     end
     cmd += [ "-sn", "-dn" ]
     cmd += video_args
+    if hdr_video?(video_stream) && !copy_video
+      cmd += [ "-color_primaries", "bt709", "-color_trc", "bt709",
+               "-colorspace", "bt709", "-color_range", "tv" ]
+    end
+    # Apple platforms require an hvc1 sample entry for HEVC in MP4/HLS.
+    cmd += [ "-tag:v:0", "hvc1" ] if hdr_passthrough
     # -hls_time is only a target: without forced keyframes x264's default GOP
     # produced ~8.3s segments from 29.97fps UHD input. Four-second keyframes
     # halve iOS local-play startup time and ensure the first playlist is not
@@ -967,15 +995,28 @@ class TranscodeService
     cmd += case output_spec
     when :hls
       raise ArgumentError, "segment_dir is required for HLS output" if segment_dir.blank?
-      [
-        "-f", "hls",
-        "-hls_time", HLS_SEGMENT_DURATION.to_s,
-        "-hls_playlist_type", "event",
-        "-hls_segment_type", "mpegts",
-        "-hls_flags", HLS_FLAGS,
-        "-hls_segment_filename", File.join(segment_dir, "%d.ts"),
-        File.join(segment_dir, "playlist.m3u8")
-      ]
+      if hdr_passthrough
+        [
+          "-f", "hls",
+          "-hls_time", HLS_SEGMENT_DURATION.to_s,
+          "-hls_playlist_type", "event",
+          "-hls_segment_type", "fmp4",
+          "-hls_fmp4_init_filename", "init.mp4",
+          "-hls_flags", HLS_FLAGS,
+          "-hls_segment_filename", File.join(segment_dir, "%d.m4s"),
+          File.join(segment_dir, "playlist.m3u8")
+        ]
+      else
+        [
+          "-f", "hls",
+          "-hls_time", HLS_SEGMENT_DURATION.to_s,
+          "-hls_playlist_type", "event",
+          "-hls_segment_type", "mpegts",
+          "-hls_flags", HLS_FLAGS,
+          "-hls_segment_filename", File.join(segment_dir, "%d.ts"),
+          File.join(segment_dir, "playlist.m3u8")
+        ]
+      end
     else  # :fmp4 (default)
       [
         "-f", "mp4",
@@ -1094,8 +1135,8 @@ class TranscodeService
   end
   private_class_method :selected_burn_subtitle_track
 
-  def self.subtitle_burn_filter(subtitle_position)
-    "[0:v:0][0:s:#{subtitle_position}]overlay,#{SAFE_VIDEO_FILTER}[v]"
+  def self.subtitle_burn_filter(subtitle_position, video_filter = SAFE_VIDEO_FILTER)
+    "[0:v:0][0:s:#{subtitle_position}]overlay,#{video_filter}[v]"
   end
   private_class_method :subtitle_burn_filter
 
@@ -1389,7 +1430,7 @@ class TranscodeService
       cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
       cmd += [
         "-select_streams", "v:0",
-        "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames",
+        "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames,bits_per_raw_sample,color_space,color_transfer,color_primaries,color_range:stream_side_data=side_data_type,dv_profile",
         "-of", "json",
         input_url
       ]
@@ -1452,12 +1493,55 @@ class TranscodeService
       width: positive_integer(stream["width"]),
       height: positive_integer(stream["height"]),
       pix_fmt: stream["pix_fmt"].to_s.downcase,
+      bit_depth: video_bit_depth(stream),
+      color_space: stream["color_space"].to_s.downcase,
+      color_transfer: stream["color_transfer"].to_s.downcase,
+      color_primaries: stream["color_primaries"].to_s.downcase,
+      color_range: stream["color_range"].to_s.downcase,
+      hdr_type: hdr_type_for_stream(stream),
       has_b_frames: positive_integer(stream["has_b_frames"]).to_i > 0
     }
   rescue JSON::ParserError
     {}
   end
   private_class_method :extract_video_stream
+
+  def self.video_bit_depth(stream)
+    explicit_depth = positive_integer(stream["bits_per_raw_sample"])
+    return explicit_depth if explicit_depth
+
+    stream["pix_fmt"].to_s[/p(\d{2})(?:le|be)?\z/, 1]&.to_i || 8
+  end
+  private_class_method :video_bit_depth
+
+  def self.hdr_type_for_stream(stream)
+    side_data = Array(stream["side_data_list"])
+    return "dolby_vision" if side_data.any? { |entry| entry["side_data_type"].to_s.match?(/dovi|dolby vision/i) }
+
+    case stream["color_transfer"].to_s.downcase
+    when "smpte2084" then "hdr10"
+    when "arib-std-b67" then "hlg"
+    end
+  end
+  private_class_method :hdr_type_for_stream
+
+  def self.hdr_video?(stream)
+    stream.is_a?(Hash) && stream[:hdr_type].present?
+  end
+  public_class_method :hdr_video?
+
+  def self.hdr_passthrough_video?(stream)
+    hdr_video?(stream) &&
+      %w[hdr10 hlg].include?(stream[:hdr_type].to_s) &&
+      HDR_PASSTHROUGH_CODECS.include?(stream[:codec_name].to_s) &&
+      stream[:bit_depth].to_i == 10
+  end
+  public_class_method :hdr_passthrough_video?
+
+  def self.video_filter_for(stream)
+    hdr_video?(stream) ? HDR_TONEMAP_FILTER : SAFE_VIDEO_FILTER
+  end
+  private_class_method :video_filter_for
 
   def self.browser_safe_video?(stream)
     return false unless stream.is_a?(Hash)

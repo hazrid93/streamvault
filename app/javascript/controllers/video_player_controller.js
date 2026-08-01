@@ -50,6 +50,7 @@ const REBUFFER_STALL_TIMEOUT_MS = 20000
 // a slow source; the stall watchdog handles a genuinely dead source.
 const REBUFFER_MAX_WAIT_MS = 12000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
+const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // The subtitle overlay is pinned just above the controls bar while the
 // controls are visible, then dropped toward the bottom of the screen
 // when the controls auto-hide, so it doesn't float above an invisible
@@ -69,6 +70,7 @@ export default class extends Controller {
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
+      "hdrControls", "hdrButton", "hdrButtonState",
       "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton", "castButton"
     ]
   }
@@ -122,6 +124,9 @@ export default class extends Controller {
     this.pendingExternalSubtitleStream = null
     this.tracksData = null
     this.mediaTracksLoaded = false
+    this.hdrAvailable = false
+    this.hdrEnabled = false
+    this.hdrPreferenceEnabled = this.loadHdrPreference()
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
@@ -655,7 +660,8 @@ export default class extends Controller {
   // can run ManagedMediaSource, but native HLS is the interoperable source
   // AirPlay targets can fetch after the device picker hands playback off.
   isIOS() {
-    return /iPhone|iPad|iPod/.test(navigator.userAgent)
+    return /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+      (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
   }
 
   // True when using native HLS playback (iOS).  All MSE-specific
@@ -735,6 +741,9 @@ export default class extends Controller {
     if (this.streamRecoveryAttempts > 0) return false
     if (this.burnedSubtitleSelected()) return false
     if (!this.tracksData?.remux_direct_playable) return false
+    // Never pass an HDR source to an SDR display or when the viewer has
+    // switched HDR off. The normal transcode path tone-maps it to SDR.
+    if (this.tracksData?.hdr === true && !this.hdrPassthroughActive()) return false
     // Check browser can play the codec natively. HEVC requires
     // VideoToolbox (macOS Chrome/Edge/Safari). Firefox and Linux
     // Chrome don't support HEVC — skip remux for HEVC there.
@@ -783,7 +792,7 @@ export default class extends Controller {
     // Chrome 107+ enabled HEVC by default on macOS.
     if (/Mac OS X/.test(ua) && !/Windows/.test(ua)) return true
     // iPhone/iPad: native HEVC support (hardware decoder).
-    if (/iPhone|iPad|iPod/.test(ua)) return true
+    if (this.isIOS()) return true
     // Android: most modern devices have HEVC hardware decode.
     // Chrome on Android supports HEVC since Chrome 107.
     if (/Android/.test(ua)) return true
@@ -863,7 +872,7 @@ export default class extends Controller {
     // this, audio starts playing before the first video frame is
     // ready, causing a brief video freeze that catches up abruptly.
     this.videoTarget.addEventListener("loadeddata", () => {
-      this.videoTarget.play().catch(() => {})
+      if (!this.userPaused) this.videoTarget.play().catch(() => {})
     }, { once: true })
   }
 
@@ -883,12 +892,15 @@ export default class extends Controller {
     if (this.burnedSubtitleSelected()) {
       url.searchParams.set("subtitle_stream", this.selectedSubtitleStream)
     }
+    if (this.hdrPassthroughActive()) url.searchParams.set("hdr", "1")
+    else url.searchParams.delete("hdr")
     return url.pathname + url.search
   }
 
   appendSelectedHlsTracks(params) {
     if (this.selectedAudioStream) params.set('audio_stream', this.selectedAudioStream)
     if (this.burnedSubtitleSelected()) params.set('subtitle_stream', this.selectedSubtitleStream)
+    if (this.hdrPassthroughActive()) params.set('hdr', '1')
   }
 
   beginHlsOperation() {
@@ -990,6 +1002,13 @@ export default class extends Controller {
       }
       if (!playlistReady) {
         this.stopHlsSession()
+        if (this.hdrEnabled) {
+          console.warn('HLS: HDR playlist failed; retrying with SDR tone mapping')
+          this.hdrEnabled = false
+          this.renderHdrControls()
+          this.startHlsPlayback()
+          return
+        }
         console.warn('HLS: playlist not ready or ffmpeg failed')
         if (this.hasStartupOverlayTarget) {
           const label = this.startupOverlayTarget.querySelector("span.text-white")
@@ -1003,7 +1022,7 @@ export default class extends Controller {
       // Native HLS playback — iOS Safari handles the playlist natively.
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
-      const p = this.videoTarget.play()
+      const p = this.userPaused ? null : this.videoTarget.play()
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
       if (p?.catch) p.catch((err) => {
         if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
@@ -1071,6 +1090,11 @@ export default class extends Controller {
   recoverUnsupportedHls(playbackToken, abortController) {
     if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
 
+    if (this.hdrEnabled) {
+      console.warn("HLS: device rejected HDR playback; retrying as tone-mapped SDR")
+      this.hdrEnabled = false
+      this.renderHdrControls()
+    }
     this.hlsUnsupportedRecoveries = (this.hlsUnsupportedRecoveries || 0) + 1
     this.reportStall("hls_not_supported_auto_recovery")
     if (this.hlsUnsupportedRecoveries > HLS_MAX_UNSUPPORTED_RECOVERIES) {
@@ -1270,6 +1294,13 @@ export default class extends Controller {
       }
       if (!playlistReady) {
         this.stopHlsSession()
+        if (this.hdrEnabled) {
+          console.warn('HLS seek: HDR playlist failed; retrying with SDR tone mapping')
+          this.hdrEnabled = false
+          this.renderHdrControls()
+          this.restartHlsSession(startSeconds)
+          return
+        }
         console.warn('HLS seek: playlist not ready or ffmpeg failed')
         this.isSeeking = false
         this.hideSeekingOverlay()
@@ -1278,7 +1309,7 @@ export default class extends Controller {
 
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
-      const p = this.videoTarget.play()
+      const p = this.userPaused ? null : this.videoTarget.play()
       if (p?.catch) p.catch(() => {})
 
       // Hide the seeking overlay once playback actually starts.
@@ -2514,6 +2545,10 @@ export default class extends Controller {
 
     if (this.isDirectPlay()) {
       console.warn("Direct play failed — falling back to MSE/transcode.")
+      if (this.tracksData?.hdr === true && this.hdrEnabled) {
+        this.hdrEnabled = false
+        this.renderHdrControls()
+      }
       const targetSeconds = Math.floor(this.currentPlaybackPosition())
       this.directPlayActive = false
       this.remuxDirectPlay = false
@@ -2730,6 +2765,7 @@ export default class extends Controller {
         if (this.selectedSubtitleStream.startsWith("external:")) this.pendingExternalSubtitleStream = this.selectedSubtitleStream
         this.selectedSubtitleStream = null
       }
+      this.configureHdr()
       this.renderTrackControls()
     } catch (e) {
       console.warn("Track probe failed:", e)
@@ -2805,6 +2841,94 @@ export default class extends Controller {
   renderTrackControls() {
     this.renderAudioControls()
     this.renderSubtitleControls()
+    this.renderHdrControls()
+  }
+
+  loadHdrPreference() {
+    try {
+      return window.localStorage.getItem(HDR_PREFERENCE_KEY) !== "0"
+    } catch {
+      return true
+    }
+  }
+
+  deviceSupportsHdr() {
+    if (typeof window.matchMedia !== "function") return false
+    return ["(video-dynamic-range: high)", "(dynamic-range: high)"]
+      .some((query) => {
+        try { return window.matchMedia(query).matches } catch { return false }
+      })
+  }
+
+  configureHdr() {
+    const sourceSupportsPassthrough = this.tracksData?.hdr === true && this.tracksData?.hdr_passthrough === true
+    const codec = this.tracksData?.video_codec
+    this.hdrAvailable = sourceSupportsPassthrough && this.deviceSupportsHdr() && this.browserCanPlayCodec(codec)
+    this.hdrEnabled = this.hdrAvailable && this.hdrPreferenceEnabled
+  }
+
+  hdrPassthroughActive() {
+    return this.hdrEnabled && !this.burnedSubtitleSelected()
+  }
+
+  renderHdrControls() {
+    if (!this.hasHdrControlsTarget || !this.hasHdrButtonTarget || !this.hasHdrButtonStateTarget) return
+    this.hdrControlsTarget.classList.toggle("hidden", !this.hdrAvailable)
+    if (!this.hdrAvailable) return
+
+    const enabled = this.hdrPassthroughActive()
+    this.hdrButtonTarget.setAttribute("aria-pressed", enabled ? "true" : "false")
+    this.hdrButtonTarget.setAttribute("aria-label", enabled ? "Disable HDR" : "Enable HDR")
+    this.hdrButtonTarget.title = enabled ? "HDR is on — switch to SDR" : "HDR is off — enable HDR"
+    this.hdrButtonStateTarget.textContent = enabled ? "ON" : "OFF"
+    this.hdrButtonTarget.classList.toggle("border-amber-300/70", enabled)
+    this.hdrButtonTarget.classList.toggle("bg-amber-300/15", enabled)
+    this.hdrButtonTarget.classList.toggle("text-amber-200", enabled)
+    this.hdrButtonTarget.classList.toggle("shadow-[0_0_16px_rgba(252,211,77,0.18)]", enabled)
+    this.hdrButtonTarget.classList.toggle("border-white/20", !enabled)
+    this.hdrButtonTarget.classList.toggle("bg-black/60", !enabled)
+    this.hdrButtonTarget.classList.toggle("text-sv-text-muted", !enabled)
+  }
+
+  toggleHdr() {
+    if (!this.hdrAvailable) return
+
+    this.hdrPreferenceEnabled = !this.hdrEnabled
+    this.hdrEnabled = this.hdrPreferenceEnabled
+    try { window.localStorage.setItem(HDR_PREFERENCE_KEY, this.hdrEnabled ? "1" : "0") } catch {}
+    this.renderHdrControls()
+
+    const targetSeconds = this.currentPlaybackPosition()
+    const remainPaused = Boolean(this.userPaused)
+    this.startSecondsValue = targetSeconds
+    this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
+    this.isSeeking = true
+    this.showSeekingOverlay(this.hdrEnabled ? "Enabling HDR..." : "Switching to SDR...")
+
+    if (this.isIOS()) {
+      this.restartHlsSession(targetSeconds)
+    } else if (this.hdrEnabled && this.remuxDirectEligible()) {
+      this.startRemuxDirectPlay()
+      this.isSeeking = true
+      this.showSeekingOverlay("Enabling HDR...")
+    } else {
+      // Leave native/remux mode before rebuilding the MSE transcode source.
+      // The backend detects the HDR input and applies HDR-to-SDR tone mapping.
+      this.directPlayActive = false
+      this.remuxDirectPlay = false
+      this.restartPlaybackAt(targetSeconds)
+    }
+
+    // Source selection helpers normally resume playback. Preserve an explicit
+    // user pause when HDR is switched from the always-visible paused menu.
+    if (remainPaused) {
+      this.userPaused = true
+      this.videoTarget.addEventListener("loadeddata", () => {
+        this.isSeeking = false
+        this.hideSeekingOverlay()
+        this.showOverlayUi()
+      }, { once: true })
+    }
   }
 
   renderAudioControls() {
@@ -2896,6 +3020,7 @@ export default class extends Controller {
     this.subtitleRetryAfter = 0
     this.clearSubtitleCues()
     this.renderSubtitleControls()
+    this.renderHdrControls()
     this.closeTrackMenus()
 
     const targetSeconds = Math.floor(this.currentPlaybackPosition())

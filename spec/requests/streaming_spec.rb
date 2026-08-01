@@ -443,6 +443,13 @@ RSpec.describe "Streaming", type: :request do
       expect(loading_spinner.parent["class"]).to include("h-14", "w-14")
       expect(loading_message["class"]).to include("absolute", "top-full")
 
+      hdr_controls = player_document.at_css('[data-video-player-target="hdrControls"]')
+      hdr_button = hdr_controls.at_css('[data-video-player-target="hdrButton"]')
+      expect(hdr_controls["class"]).to include("hidden")
+      expect(hdr_button["data-action"]).to eq("click->video-player#toggleHdr")
+      expect(hdr_button["aria-pressed"]).to eq("false")
+      expect(hdr_button.text).to include("HDR", "OFF")
+
       expect(response.body).to include(%(click-&gt;video-player#navigateBack))
       expect(response.body).to include("toggleAudioMenu")
       expect(response.body).to include("toggleSubtitleMenu")

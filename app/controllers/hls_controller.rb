@@ -21,7 +21,7 @@ class HlsController < ApplicationController
   end
 
   # POST /hls/start
-  # Params: url, start_seconds, audio_stream, subtitle_stream
+  # Params: url, start_seconds, audio_stream, subtitle_stream, hdr
   # Returns: { session_id: "...", playlist_url: "/hls/<id>/playlist.m3u8" }
   def start
     input_url = params[:url].to_s
@@ -40,7 +40,8 @@ class HlsController < ApplicationController
       audio_stream: params[:audio_stream],
       subtitle_stream: params[:subtitle_stream],
       default_language: current_user.default_stream_language,
-      preferred_languages: current_user.preferred_stream_languages
+      preferred_languages: current_user.preferred_stream_languages,
+      hdr: params[:hdr] == "1"
     )
 
     render json: { session_id: session.id, playlist_url: "/hls/#{session.id}/playlist.m3u8" }
@@ -89,7 +90,7 @@ class HlsController < ApplicationController
               disposition: :inline
   end
 
-  # GET /hls/:id/:segment (e.g. 0.ts, 1.ts)
+  # GET /hls/:id/:segment (e.g. init.mp4, 0.m4s, 0.ts)
   #
   # iOS Safari's native HLS player requests segments by index as it
   # plays through the playlist. When ffmpeg is transcoding slower than 1×, it
@@ -106,8 +107,19 @@ class HlsController < ApplicationController
     HlsSession.touch_activity(session.id)
     touch_cast_session(session.id)
 
-    segment_index = params[:segment].to_i
-    path = session.segment_path(segment_index)
+    segment_name = params[:segment].to_s
+    path = case segment_name
+    when "init.mp4"
+      session.init_segment_path
+    when /\A(\d+)\.ts\z/
+      session.segment_path(Regexp.last_match(1).to_i)
+    when /\A(\d+)\.m4s\z/
+      session.segment_path(Regexp.last_match(1).to_i, format: :m4s)
+    end
+    unless path
+      head :not_found
+      return
+    end
 
     unless File.exist?(path)
       # Check if ffmpeg has already exited (playlist has #EXT-X-ENDLIST)
@@ -143,7 +155,12 @@ class HlsController < ApplicationController
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Referrer-Policy"] = "no-referrer"
-    send_file path, type: "video/mp2t", disposition: :inline
+    content_type = case File.extname(path)
+    when ".ts" then "video/mp2t"
+    when ".m4s", ".mp4" then "video/mp4"
+    else "application/octet-stream"
+    end
+    send_file path, type: content_type, disposition: :inline
   end
 
   # POST /hls/:id/stop

@@ -44,6 +44,23 @@ RSpec.describe "HLS streaming", type: :request do
       expect(captured_kwargs[:start_seconds]).to eq(86_400)
     end
 
+    it "forwards an explicit HDR passthrough request to the session" do
+      captured_kwargs = nil
+      session = instance_double(HlsSession, id: "hls-hdr")
+      allow(HlsSession).to receive(:create) do |**kwargs|
+        captured_kwargs = kwargs
+        session
+      end
+
+      post "/hls/start", params: {
+        url: "https://real-debrid.com/test-hdr.mkv",
+        hdr: "1"
+      }
+
+      expect(response).to have_http_status(:ok)
+      expect(captured_kwargs[:hdr]).to be(true)
+    end
+
     it "clamps invalid and negative start_seconds to zero before creating the session" do
       captured_kwargs = nil
       session = instance_double(HlsSession, id: "hls-start-zero")
@@ -179,6 +196,19 @@ RSpec.describe "HLS streaming", type: :request do
       sign_out user
       get "/hls/#{session_id}/0.ts"
       expect(response).to have_http_status(:ok)
+    end
+
+    it "serves fragmented MP4 init and media segments for HDR HLS" do
+      File.write(File.join(segment_dir, "init.mp4"), "dummy_init_data")
+      File.write(File.join(segment_dir, "0.m4s"), "dummy_fmp4_segment")
+
+      get "/hls/#{session_id}/init.mp4"
+      expect(response).to have_http_status(:ok)
+      expect(response.content_type).to include("video/mp4")
+
+      get "/hls/#{session_id}/0.m4s"
+      expect(response).to have_http_status(:ok)
+      expect(response.content_type).to include("video/mp4")
     end
 
     it "returns 503 for not-yet-produced segment on a live stream" do

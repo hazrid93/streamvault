@@ -1031,6 +1031,79 @@ test("HLS receives selected audio and bitmap subtitle tracks but not text overla
   assert.equal(textParams.has("subtitle_stream"), false)
 })
 
+test("HDR is enabled only for HDR media on a capable display and is sent to passthrough paths", () => {
+  const originalMatchMedia = context.window.matchMedia
+  context.window.matchMedia = () => ({ matches: true })
+  try {
+    const player = new VideoPlayerController()
+    player.videoTarget = { canPlayType: () => "probably" }
+    player.tracksData = {
+      hdr: true,
+      hdr_type: "hdr10",
+      hdr_passthrough: true,
+      video_codec: "hevc",
+      remux_direct_playable: true
+    }
+    player.hdrPreferenceEnabled = true
+    player.streamRecoveryAttempts = 0
+    player.burnedSubtitleSelected = () => false
+
+    player.configureHdr()
+
+    assert.equal(player.hdrAvailable, true)
+    assert.equal(player.hdrEnabled, true)
+    assert.equal(player.remuxDirectEligible(), true)
+
+    const hlsParams = new URLSearchParams()
+    player.appendSelectedHlsTracks(hlsParams)
+    assert.equal(hlsParams.get("hdr"), "1")
+
+    player.hdrEnabled = false
+    assert.equal(player.remuxDirectEligible(), false, "HDR-off must use the tone-mapped transcode path")
+  } finally {
+    context.window.matchMedia = originalMatchMedia
+  }
+})
+
+test("HDR remains unavailable when the active display reports standard dynamic range", () => {
+  const originalMatchMedia = context.window.matchMedia
+  context.window.matchMedia = () => ({ matches: false })
+  try {
+    const player = new VideoPlayerController()
+    player.videoTarget = { canPlayType: () => "probably" }
+    player.tracksData = { hdr: true, hdr_passthrough: true, video_codec: "hevc" }
+    player.hdrPreferenceEnabled = true
+
+    player.configureHdr()
+
+    assert.equal(player.hdrAvailable, false)
+    assert.equal(player.hdrEnabled, false)
+  } finally {
+    context.window.matchMedia = originalMatchMedia
+  }
+})
+
+test("HDR toggle restarts playback at the absolute playhead", () => {
+  const player = new VideoPlayerController()
+  player.hdrAvailable = true
+  player.hdrEnabled = true
+  player.hdrPreferenceEnabled = true
+  player.element = { dataset: {} }
+  player.currentPlaybackPosition = () => 127.5
+  player.renderHdrControls = () => {}
+  player.showSeekingOverlay = (message) => { player.overlayMessage = message }
+  player.isIOS = () => false
+  let restartedAt = null
+  player.restartPlaybackAt = (position) => { restartedAt = position }
+
+  player.toggleHdr()
+
+  assert.equal(player.hdrEnabled, false)
+  assert.equal(player.startSecondsValue, 127.5)
+  assert.equal(restartedAt, 127.5)
+  assert.equal(player.overlayMessage, "Switching to SDR...")
+})
+
 test("iOS loads track metadata before starting HLS playback", async () => {
   const player = new VideoPlayerController()
   const calls = []

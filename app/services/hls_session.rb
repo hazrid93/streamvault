@@ -33,7 +33,7 @@ class HlsSession
 
   attr_reader :id, :pid, :segment_dir, :user_id
 
-  def self.create(user_id:, input_url:, headers:, start_seconds:, audio_stream:, subtitle_stream:, default_language:, preferred_languages:)
+  def self.create(user_id:, input_url:, headers:, start_seconds:, audio_stream:, subtitle_stream:, default_language:, preferred_languages:, hdr: false)
     session_id = SecureRandom.hex(16)
     dir = Rails.root.join("tmp", "hls", session_id).to_s
     pid = nil
@@ -51,6 +51,7 @@ class HlsSession
         subtitle_stream: subtitle_stream,
         default_language: default_language,
         preferred_languages: preferred_languages,
+        hdr: hdr,
         wait_for_first_segment: false
       )
 
@@ -191,7 +192,7 @@ class HlsSession
 
   def self.first_segment_produced?(dir)
     playlist_path = File.join(dir, "playlist.m3u8")
-    File.exist?(playlist_path) && Dir.glob(File.join(dir, "*.ts")).any?
+    File.exist?(playlist_path) && (Dir.glob(File.join(dir, "*.ts")).any? || Dir.glob(File.join(dir, "*.m4s")).any?)
   end
 
   def self.fail_before_first_segment(session_id, pid, dir, message)
@@ -215,8 +216,13 @@ class HlsSession
     File.join(segment_dir, "playlist.m3u8")
   end
 
-  def segment_path(index)
-    File.join(segment_dir, "#{index}.ts")
+  def segment_path(index, format: :ts)
+    extension = format == :m4s ? "m4s" : "ts"
+    File.join(segment_dir, "#{index.to_i}.#{extension}")
+  end
+
+  def init_segment_path
+    File.join(segment_dir, "init.mp4")
   end
 
   # Returns true if the playlist file exists AND contains at least

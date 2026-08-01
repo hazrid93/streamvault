@@ -79,6 +79,21 @@ RSpec.describe "Transcode", type: :request do
       expect(captured_kwargs[:start_seconds]).to eq(86_400) # 24*60*60
     end
 
+    it "forwards HDR passthrough only when explicitly requested" do
+      captured_kwargs = nil
+      allow(TranscodeService).to receive(:transcode_to_fmp4) do |*_args, **kwargs|
+        captured_kwargs = kwargs
+        raise TranscodeService::TranscodeError, "stub"
+      end
+
+      get transcode_stream_path, params: {
+        url: "https://download.real-debrid.com/d/file123/video.mkv",
+        hdr: "1", remux: "1"
+      }
+
+      expect(captured_kwargs).to include(hdr: true, remux: true)
+    end
+
     it "clamps negative start_seconds to 0" do
       captured_kwargs = nil
       allow(TranscodeService).to receive(:transcode_to_fmp4) do |*_args, **kwargs|
@@ -143,6 +158,27 @@ RSpec.describe "Transcode", type: :request do
       expect(body["remux_direct_playable"]).to be(true)
       expect(body["direct_stream_url"]).to start_with("/direct_stream?url=")
       expect(body["remux_direct_url"]).to start_with("/transcode?url=")
+    end
+
+    it "returns HDR capability and color metadata for HDR10 HEVC" do
+      allow(TranscodeService).to receive(:probe_media_tracks).and_return(audio: [], subtitles: [])
+      allow(TranscodeService).to receive(:probe_video_stream).and_return(
+        codec_name: "hevc", width: 3840, height: 2160, pix_fmt: "yuv420p10le",
+        bit_depth: 10, hdr_type: "hdr10", color_space: "bt2020nc",
+        color_transfer: "smpte2084", color_primaries: "bt2020"
+      )
+      allow(ExternalSubtitleService).to receive(:search).and_return([])
+
+      get transcode_tracks_path, params: {
+        url: "https://download.real-debrid.com/d/file123/HDR.Movie.mkv",
+        include_external_subtitles: "0"
+      }
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body).to include(
+        "hdr" => true, "hdr_type" => "hdr10", "hdr_passthrough" => true,
+        "video_bit_depth" => 10, "color_transfer" => "smpte2084"
+      )
     end
 
     it "uses fullscreen-safe external text subtitles instead of bitmap tracks for UHD playback" do

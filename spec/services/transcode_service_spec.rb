@@ -71,6 +71,29 @@ RSpec.describe TranscodeService do
       expect(tracks[:subtitles].first).to include(quality: "full", partial: false, quality_score: 0)
     end
 
+    it "detects HDR10 color metadata and ten-bit depth" do
+      output = {
+        "streams" => [
+          {
+            "codec_name" => "hevc", "width" => 3840, "height" => 2160,
+            "pix_fmt" => "yuv420p10le", "color_space" => "bt2020nc",
+            "color_transfer" => "smpte2084", "color_primaries" => "bt2020"
+          }
+        ]
+      }.to_json
+
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      stream = described_class.probe_video_stream("https://example.test/hdr10.mkv")
+
+      expect(stream).to include(
+        codec_name: "hevc", bit_depth: 10, hdr_type: "hdr10",
+        color_space: "bt2020nc", color_transfer: "smpte2084", color_primaries: "bt2020"
+      )
+      expect(described_class.hdr_video?(stream)).to be(true)
+      expect(described_class.hdr_passthrough_video?(stream)).to be(true)
+    end
+
     it "marks forced subtitle tracks as partial" do
       output = {
         "streams" => [
@@ -319,6 +342,53 @@ RSpec.describe TranscodeService do
       expect(argument_pairs(command)).not_to include([ "-c:v", "copy" ])
     end
 
+    it "preserves HDR10 HEVC through a non-zero seek when HDR is requested" do
+      output = {
+        "streams" => [
+          {
+            "codec_name" => "hevc", "width" => 3840, "height" => 2160,
+            "pix_fmt" => "yuv420p10le", "color_space" => "bt2020nc",
+            "color_transfer" => "smpte2084", "color_primaries" => "bt2020"
+          }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video-hdr10.mkv",
+        headers: {}, start_seconds: 42.5, remux: true, hdr: true
+      )
+
+      expect(argument_pairs(command)).to include([ "-c:v", "copy" ])
+      expect(argument_pairs(command)).to include([ "-tag:v:0", "hvc1" ])
+      expect(command).to include("-noaccurate_seek")
+      expect(command).not_to include("-vf", "libx264")
+    end
+
+    it "tone-maps HDR sources to tagged SDR when HDR passthrough is disabled" do
+      output = {
+        "streams" => [
+          {
+            "codec_name" => "hevc", "width" => 3840, "height" => 2160,
+            "pix_fmt" => "yuv420p10le", "color_space" => "bt2020nc",
+            "color_transfer" => "smpte2084", "color_primaries" => "bt2020"
+          }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video-hdr10-sdr.mkv",
+        headers: {}, start_seconds: 0, hdr: false
+      )
+
+      expect(argument_pairs(command)).to include([ "-c:v", "libx264" ])
+      expect(command.fetch(command.index("-vf") + 1)).to include("zscale=t=linear", "tonemap=tonemap=hable")
+      expect(argument_pairs(command)).to include(
+        [ "-color_primaries", "bt709" ], [ "-color_trc", "bt709" ], [ "-colorspace", "bt709" ]
+      )
+    end
+
     it "transcodes when video probing fails closed" do
       allow(described_class).to receive(:capture_command).and_return(capture_result("", success: false))
 
@@ -517,9 +587,35 @@ RSpec.describe TranscodeService do
       expect(argument_pairs(command)).to include([ "-hls_flags", "temp_file" ])
       expect(argument_pairs(command)).to include([ "-hls_segment_filename", "/tmp/hls/session1/%d.ts" ])
       expect(command).to include("/tmp/hls/session1/playlist.m3u8")
-      # fMP4 output must NOT appear on the HLS path
+      # fMP4 output must NOT appear on the standard SDR HLS path
       expect(command).not_to include("pipe:1")
       expect(argument_pairs(command)).not_to include([ "-movflags", anything ])
+    end
+
+    it "uses fragmented MP4 HLS when preserving HDR HEVC" do
+      hdr_output = {
+        "streams" => [
+          {
+            "codec_name" => "hevc", "width" => 3840, "height" => 2160,
+            "pix_fmt" => "yuv420p10le", "color_transfer" => "smpte2084",
+            "color_primaries" => "bt2020", "color_space" => "bt2020nc"
+          }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command).and_return(capture_result(hdr_output))
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/hdr-video.mkv",
+        headers: {}, start_seconds: 120, output_spec: :hls,
+        segment_dir: "/tmp/hls/hdr-session", hdr: true
+      )
+
+      expect(argument_pairs(command)).to include([ "-c:v", "copy" ])
+      expect(argument_pairs(command)).to include([ "-hls_segment_type", "fmp4" ])
+      expect(argument_pairs(command)).to include([ "-hls_fmp4_init_filename", "init.mp4" ])
+      expect(argument_pairs(command)).to include([ "-hls_segment_filename", "/tmp/hls/hdr-session/%d.m4s" ])
+      expect(command).to include("-noaccurate_seek")
+      expect(command).not_to include("mpegts")
     end
 
     it "defaults to fMP4 output when output_spec is omitted" do

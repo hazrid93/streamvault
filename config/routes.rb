@@ -67,7 +67,8 @@ Rails.application.routes.draw do
   # HLS streaming (iOS fallback — iPhone Safari lacks MSE support)
   post "hls/start", to: "hls#start", as: :hls_start
   get "hls/:id/playlist.m3u8", to: "hls#playlist", as: :hls_playlist
-  get "hls/:id/:segment", to: "hls#segment", as: :hls_segment, constraints: { segment: /\d+\.ts/ }
+  get "hls/:id/init.mp4", to: "hls#segment", defaults: { segment: "init.mp4" }, as: :hls_init_segment
+  get "hls/:id/:segment", to: "hls#segment", as: :hls_segment, constraints: { segment: /\d+\.(?:ts|m4s)/ }
   post "hls/:id/stop", to: "hls#stop", as: :hls_stop
 
   # Settings
