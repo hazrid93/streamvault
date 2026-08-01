@@ -130,7 +130,8 @@
     <%# Seek bar %>
     <div data-video-player-target="seekBar"
          data-action="click->video-player#seek mousedown->video-player#startSeekDrag mouseup->video-player#stopSeekDrag touchstart->video-player#startSeekDrag touchend->video-player#stopSeekDrag touchcancel->video-player#cancelSeekDrag"
-         class="group relative h-1.5 bg-white/20 rounded-full cursor-pointer mb-3 hover:h-2.5 transition-all">
+         class="group relative h-1.5 bg-white/20 rounded-full cursor-pointer mb-3 hover:h-2.5 transition-all"
+         style="touch-action: none; -webkit-user-select: none; user-select: none;">
       <%# A real frame from the selected source timeline. The controller keeps
           this box clamped to the seek bar while its pointer follows the finger. %>
       <div data-video-player-target="seekPreview"
@@ -289,9 +290,14 @@
 
   <%# Loading overlay (shown while ffmpeg restarts after a seek, subtitles catch up, or the stream buffers). bg-black/80 so the spinner is visible — with MSE, when the buffer runs dry Chrome shows black, not a frozen frame, so a transparent overlay would be invisible. %>
   <div data-video-player-target="seekingOverlay" class="hidden absolute inset-0 flex items-center justify-center bg-black/80 z-20">
-    <div class="flex flex-col items-center gap-4">
-      <div class="w-14 h-14 border-4 border-white/20 border-t-indigo-500 rounded-full animate-spin"></div>
-      <span data-video-player-target="seekingOverlayMessage" class="text-white text-sm font-medium" style="text-shadow: 0 2px 8px rgba(0,0,0,0.95);">Seeking...</span>
+    <%# Keep the spinner itself on the exact player center point. The status
+        text is absolutely positioned below it so it does not shift the
+        spinner above the centered play/pause button. %>
+    <div class="relative h-14 w-14">
+      <div data-player-loading-spinner class="absolute inset-0 border-4 border-white/20 border-t-indigo-500 rounded-full animate-spin" aria-hidden="true"></div>
+      <span data-video-player-target="seekingOverlayMessage"
+            class="absolute left-1/2 top-full mt-4 -translate-x-1/2 whitespace-nowrap text-white text-sm font-medium"
+            style="text-shadow: 0 2px 8px rgba(0,0,0,0.95);">Seeking...</span>
     </div>
   </div>
 

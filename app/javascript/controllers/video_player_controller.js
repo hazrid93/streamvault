@@ -127,6 +127,7 @@ export default class extends Controller {
     this.dragMoveHandler = null
     this.dragEndHandler = null
     this.dragCancelHandler = null
+    this.dragTouchIdentifier = null
     this.suppressNextSeekClick = false
     this.suppressSeekClickTimer = null
     this.thumbnailDebounceTimer = null
@@ -3679,12 +3680,20 @@ export default class extends Controller {
   startSeekDrag(event) {
     this.cancelSeekDrag()
     this.isDragging = true
+    this.dragTouchIdentifier = this.touchFromList(event.changedTouches || event.touches)?.identifier ?? null
     event.preventDefault()
+
+    // A scrub can last longer than the normal four-second controls timeout.
+    // Keep the timeline and its preview visible until the initiating pointer
+    // is released instead of letting the parent controls fade mid-drag.
+    this.showOverlayUi()
+    this.clearUiHideTimer()
+
     this.dragMoveHandler = (e) => this.onSeekDragMove(e)
     this.dragEndHandler = (e) => this.stopSeekDrag(e)
-    this.dragCancelHandler = () => this.cancelSeekDrag()
+    this.dragCancelHandler = (e) => this.cancelSeekDrag(e)
     document.addEventListener("mousemove", this.dragMoveHandler)
-    document.addEventListener("touchmove", this.dragMoveHandler)
+    document.addEventListener("touchmove", this.dragMoveHandler, { passive: false })
     document.addEventListener("mouseup", this.dragEndHandler)
     document.addEventListener("touchend", this.dragEndHandler)
     document.addEventListener("touchcancel", this.dragCancelHandler)
@@ -3692,7 +3701,7 @@ export default class extends Controller {
   }
 
   onSeekDragMove(event) {
-    if (!this.isDragging) return
+    if (!this.isDragging || !this.eventContainsActiveTouch(event, event.touches)) return
     event.preventDefault?.()
     this.updateSeekDrag(event)
   }
@@ -3704,7 +3713,7 @@ export default class extends Controller {
   }
 
   stopSeekDrag(event) {
-    if (!this.isDragging) return
+    if (!this.isDragging || !this.eventContainsActiveTouch(event, event.changedTouches)) return
     const percent = this.seekPercentFromEvent(event)
     this.cancelSeekDrag()
     this.suppressNextSeekClick = true
@@ -3714,9 +3723,16 @@ export default class extends Controller {
       this.suppressSeekClickTimer = null
     }, 250)
     this.performSeek(percent)
+    this.scheduleUiHide()
   }
 
-  cancelSeekDrag() {
+  cancelSeekDrag(event) {
+    // Ignore another finger ending or being cancelled while the finger that
+    // began the scrub is still down. Without this, an incidental second
+    // touch can dismiss the preview and commit/cancel the wrong position.
+    if (event && !this.eventContainsActiveTouch(event, event.changedTouches)) return
+
+    const resumeUiHide = Boolean(event && this.isDragging)
     this.isDragging = false
     this.hideSeekPreview()
 
@@ -3732,6 +3748,22 @@ export default class extends Controller {
     this.dragMoveHandler = null
     this.dragEndHandler = null
     this.dragCancelHandler = null
+    this.dragTouchIdentifier = null
+    if (resumeUiHide) this.scheduleUiHide()
+  }
+
+  touchFromList(touches, identifier = null) {
+    if (!touches) return null
+    for (let index = 0; index < touches.length; index += 1) {
+      const touch = touches[index]
+      if (identifier === null || touch.identifier === identifier) return touch
+    }
+    return null
+  }
+
+  eventContainsActiveTouch(event, touches) {
+    if (this.dragTouchIdentifier === null || !event?.changedTouches) return true
+    return Boolean(this.touchFromList(touches, this.dragTouchIdentifier))
   }
 
   showSeekPreview(percent) {
@@ -4078,7 +4110,8 @@ export default class extends Controller {
 
   seekPercentFromEvent(event) {
     const rect = this.seekBarTarget.getBoundingClientRect()
-    const point = event.changedTouches?.[0] || event.touches?.[0] || event
+    const point = this.touchFromList(event.touches, this.dragTouchIdentifier) ||
+      this.touchFromList(event.changedTouches, this.dragTouchIdentifier) || event
     const clientX = point.clientX ?? rect.left
     const percent = (clientX - rect.left) / rect.width
     return Math.max(0, Math.min(1, percent))
@@ -4378,7 +4411,7 @@ export default class extends Controller {
   }
 
   hideOverlayUi() {
-    if (!this.videoTarget.paused && !this.trackMenuOpen()) {
+    if (!this.videoTarget.paused && !this.trackMenuOpen() && !this.isDragging) {
       this.backButtonTarget.style.opacity = "0"
       this.backButtonTarget.style.pointerEvents = "none"
       this.sourceInfoTarget.style.opacity = "0"

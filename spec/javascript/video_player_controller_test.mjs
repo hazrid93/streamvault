@@ -21,6 +21,8 @@ const testDocument = {
   fullscreenElement: null,
   webkitFullscreenElement: null,
   exitFullscreen() {},
+  addEventListener() {},
+  removeEventListener() {},
   querySelector(selector) {
     return selector === 'meta[name="csrf-token"]' ? { content: "csrf-token" } : null
   }
@@ -527,6 +529,54 @@ test("tap controls and subtitles follow the overlay visibility state", () => {
     player.subtitleOverlayTarget.style.bottom,
     "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)"
   )
+
+  player.showOverlayUi()
+  player.isDragging = true
+  player.hideOverlayUi()
+  assert.equal(player.controlsTarget.style.opacity, "1", "timeline must not fade during a seek drag")
+  assert.equal(player.controlsTarget.style.pointerEvents, "auto")
+  assert.equal(player.topControlsTarget.style.opacity, "1")
+})
+
+test("starting a touch scrub disarms auto-hide until the finger is released", () => {
+  const player = new VideoPlayerController()
+  let overlayShows = 0
+  let hideTimerClears = 0
+  let dragUpdates = 0
+  player.cancelSeekDrag = () => {}
+  player.showOverlayUi = () => { overlayShows += 1 }
+  player.clearUiHideTimer = () => { hideTimerClears += 1 }
+  player.updateSeekDrag = () => { dragUpdates += 1 }
+
+  player.startSeekDrag({
+    changedTouches: [{ identifier: 7, clientX: 120 }],
+    preventDefault() {}
+  })
+
+  assert.equal(player.isDragging, true)
+  assert.equal(player.dragTouchIdentifier, 7)
+  assert.equal(overlayShows, 1)
+  assert.equal(hideTimerClears, 1)
+  assert.equal(dragUpdates, 1)
+})
+
+test("an unrelated touch ending does not dismiss an active seek preview", () => {
+  const player = new VideoPlayerController()
+  let seeks = 0
+  player.isDragging = true
+  player.dragTouchIdentifier = 7
+  player.performSeek = () => { seeks += 1 }
+
+  player.stopSeekDrag({
+    changedTouches: [{ identifier: 8, clientX: 40 }]
+  })
+  player.cancelSeekDrag({
+    changedTouches: [{ identifier: 8, clientX: 40 }]
+  })
+
+  assert.equal(player.isDragging, true)
+  assert.equal(player.dragTouchIdentifier, 7)
+  assert.equal(seeks, 0)
 })
 
 test("all play and pause icons stay synchronized", () => {

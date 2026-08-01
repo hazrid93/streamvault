@@ -414,9 +414,11 @@ RSpec.describe "Streaming", type: :request do
       expect(seek_preview.at_css('[data-video-player-target="seekPreviewTime"]')).to be_present
       expect(seek_preview.at_css('[data-video-player-target="seekPreviewError"]')).to be_present
       expect(preview_image.parent["class"]).to include("h-[100px]")
-      seek_actions = player_document.at_css('[data-video-player-target="seekBar"]')["data-action"]
+      seek_bar = player_document.at_css('[data-video-player-target="seekBar"]')
+      seek_actions = seek_bar["data-action"]
       expect(seek_actions).to include("touchcancel->video-player#cancelSeekDrag")
       expect(seek_actions).not_to include("mouseleave->video-player#stopSeekDrag")
+      expect(seek_bar["style"]).to include("touch-action: none")
 
       top_controls = player_document.at_css('[data-video-player-target="topControls"]')
       expect(top_controls).to be_present
@@ -433,6 +435,13 @@ RSpec.describe "Streaming", type: :request do
       expect(top_controls.css("button").map { |button| button["data-action"] }).to eq([
         "click->video-player#skipBack", "click->video-player#togglePlay", "click->video-player#skipForward"
       ])
+
+      loading_overlay = player_document.at_css('[data-video-player-target="seekingOverlay"]')
+      loading_spinner = loading_overlay.at_css("[data-player-loading-spinner]")
+      loading_message = loading_overlay.at_css('[data-video-player-target="seekingOverlayMessage"]')
+      expect(loading_spinner["class"]).to include("absolute", "inset-0")
+      expect(loading_spinner.parent["class"]).to include("h-14", "w-14")
+      expect(loading_message["class"]).to include("absolute", "top-full")
 
       expect(response.body).to include(%(click-&gt;video-player#navigateBack))
       expect(response.body).to include("toggleAudioMenu")
