@@ -160,6 +160,26 @@ RSpec.describe "Transcode", type: :request do
       expect(body["remux_direct_url"]).to start_with("/transcode?url=")
     end
 
+    it "offers native remux for SDR AV1 and VP9 when the browser supports them" do
+      allow(TranscodeService).to receive(:probe_media_tracks).and_return(audio: [], subtitles: [])
+      allow(ExternalSubtitleService).to receive(:search).and_return([])
+
+      %w[av1 vp9].each do |codec|
+        allow(TranscodeService).to receive(:probe_video_stream).and_return(
+          codec_name: codec, width: 1920, height: 1080, pix_fmt: "yuv420p", bit_depth: 8
+        )
+        get transcode_tracks_path, params: {
+          url: "https://download.real-debrid.com/d/file123/#{codec}.mkv",
+          include_external_subtitles: "0"
+        }
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body).to include(
+          "video_codec" => codec, "remux_direct_playable" => true
+        )
+      end
+    end
+
     it "returns HDR capability and color metadata for HDR10 HEVC" do
       allow(TranscodeService).to receive(:probe_media_tracks).and_return(audio: [], subtitles: [])
       allow(TranscodeService).to receive(:probe_video_stream).and_return(

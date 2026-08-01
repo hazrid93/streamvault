@@ -27,12 +27,14 @@ class TranscodeService
   FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
-  # HLS segment duration in seconds — balances latency against overhead.
-  # 4s (up from 2s) gives iOS Safari a deeper natural buffer per
-  # segment, reducing the periodic black-screen underruns that happen
-  # when the transcode throughput dips between segment writes.  Fewer
-  # segment requests also means less playlist re-fetching overhead.
-  HLS_SEGMENT_DURATION = 4
+  # Two-second HLS segments publish the first playable media sooner. The
+  # player waits for two transcoded segments before starting, retaining a
+  # four-second safety buffer without paying the latency of two 4s segments.
+  HLS_SEGMENT_DURATION = 2
+  # fMP4 is flushed only at keyframes. x264's default GOP can exceed eight
+  # seconds, making every start/seek wait for a huge first fragment. Force a
+  # short GOP for low-latency MSE delivery without fragmenting on non-keyframes.
+  FMP4_KEYFRAME_INTERVAL_SECONDS = 2
   # HLS flags: temp_file writes segments via a .tmp~ sidecar and renames
   # them only once complete, so clients never read a partial segment.
   HLS_FLAGS = "temp_file".freeze
@@ -133,13 +135,14 @@ class TranscodeService
     "TURKISH" => %w[tur tr turkish],
     "SWEDISH" => %w[swe sv swedish]
   }.freeze
-  # Cache probes per URL and sanitized request credentials. The short lifetime
-  # avoids repeat ffprobe work across concurrent seeks without sharing media
-  # metadata between users authenticated to the same URL.
+  # Cache immutable stream metadata per URL and sanitized credential identity.
+  # A movie session commonly lasts hours; the old 60s TTL forced two remote
+  # ffprobe launches on nearly every later seek. Keeping metadata for two
+  # hours makes seeks start FFmpeg immediately without crossing user keys.
   @probe_cache = {}
   @probe_cache_mutex = Mutex.new
   @probe_inflight = {}
-  PROBE_CACHE_TTL = 60
+  PROBE_CACHE_TTL = 2.hours.to_i
   PROBE_CACHE_MAX_SIZE = 500
   # TorrServer can expose the selected file before its opening pieces are
   # warm enough for ffprobe. Starting FFmpeg from that empty probe produced a
@@ -886,11 +889,11 @@ class TranscodeService
     # Subtitle burn requires re-encoding video, so remux is ignored if a
     # burn subtitle track is selected — falls through to normal transcode.
     #
-    # Standard non-zero seeks are decoded/re-encoded. Fast input seeking starts
-    # copied video at the preceding keyframe while decoded audio is normally
-    # trimmed to the requested instant, which can desynchronize long GOPs.
-    # HDR is the exception: -noaccurate_seek below retains matching audio and
-    # video pre-roll so the 10-bit stream can remain untouched.
+    # Standard remux seeks re-encode with the short-GOP low-latency path so
+    # playback begins at the exact requested timestamp. Stream-copy seeking
+    # can only start at the preceding keyframe, which desynchronizes the UI
+    # and subtitles on long GOPs. HDR remains the exception because preserving
+    # ten-bit video is more important than GOP-sized seek precision.
     hdr_passthrough = hdr && hdr_passthrough_video?(video_stream) && !selected_burn_subtitle_track
     effective_remux = (remux || (output_spec == :hls && hdr_passthrough)) && !selected_burn_subtitle_track
     copy_video = (effective_remux && (seek_start_seconds.zero? || hdr_passthrough)) ||
@@ -954,8 +957,8 @@ class TranscodeService
     cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
     # Input seeking (before -i): fast, uses the container's seek table.
     # Accurate input seeking discards decoded audio pre-roll but cannot discard
-    # copied HEVC frames before the requested point. For HDR passthrough,
-    # retain both streams from the same preceding keyframe instead.
+    # copied HDR frames before the requested point. For HDR passthrough retain
+    # both streams from the same preceding keyframe instead.
     cmd += [ "-noaccurate_seek" ] if hdr_passthrough && seek_start_seconds.positive?
     cmd += [ "-ss", seek_start_seconds.to_s ] if seek_start_seconds.positive?
     cmd += [ "-i", input_url ]
@@ -976,14 +979,16 @@ class TranscodeService
       cmd += [ "-color_primaries", "bt709", "-color_trc", "bt709",
                "-colorspace", "bt709", "-color_range", "tv" ]
     end
-    # Apple platforms require an hvc1 sample entry for HEVC in MP4/HLS.
-    cmd += [ "-tag:v:0", "hvc1" ] if hdr_passthrough
-    # -hls_time is only a target: without forced keyframes x264's default GOP
-    # produced ~8.3s segments from 29.97fps UHD input. Four-second keyframes
-    # halve iOS local-play startup time and ensure the first playlist is not
-    # exposed with one oversized segment.
-    if output_spec == :hls && video_args != [ "-c:v", "copy" ]
-      cmd += [ "-force_key_frames", "expr:gte(t,n_forced*#{HLS_SEGMENT_DURATION})" ]
+    # Apple platforms require an hvc1 sample entry for copied HEVC in MP4/HLS.
+    copied_hevc = copy_video && HDR_PASSTHROUGH_CODECS.include?(video_stream[:codec_name].to_s)
+    cmd += [ "-tag:v:0", "hvc1" ] if copied_hevc
+    # Both output modes publish media only when a fragment/segment closes.
+    # Force short keyframe intervals on transcoded video so first data is
+    # available after about two seconds of content rather than x264's default
+    # 8-10 second GOP. Stream-copy paths retain source keyframes.
+    if video_args != [ "-c:v", "copy" ]
+      keyframe_interval = output_spec == :hls ? HLS_SEGMENT_DURATION : FMP4_KEYFRAME_INTERVAL_SECONDS
+      cmd += [ "-force_key_frames", "expr:gte(t,n_forced*#{keyframe_interval})" ]
     end
     # Normalize every audio codec to AAC and continuously reconcile samples
     # with the source timestamps.  Copying AAC bypassed synchronization for

@@ -140,6 +140,31 @@ RSpec.describe TranscodeService do
     end
   end
   describe "metadata probe cache" do
+    it "reuses warmed metadata for later seeks in the same viewing session" do
+      video_output = {
+        "streams" => [
+          { "codec_name" => "h264", "width" => 1920, "height" => 1080, "pix_fmt" => "yuv420p" }
+        ]
+      }.to_json
+      track_output = { "streams" => [] }.to_json
+      calls = 0
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        calls += 1
+        capture_result(cmd.include?("-select_streams") ? video_output : track_output)
+      end
+
+      [ 0, 1800 ].each do |start_seconds|
+        described_class.send(:build_ffmpeg_command,
+          "https://example.test/long-movie.mkv",
+          headers: { "Authorization" => "Bearer session-token" },
+          start_seconds: start_seconds
+        )
+      end
+
+      expect(calls).to eq(2)
+      expect(described_class::PROBE_CACHE_TTL).to be >= 2.hours.to_i
+    end
+
     it "single-flights concurrent command construction for the same authenticated input" do
       video_output = {
         "streams" => [
@@ -294,7 +319,7 @@ RSpec.describe TranscodeService do
       expect(command).not_to include("libx264")
     end
 
-    it "transcodes browser-safe video after a seek on standard and requested-remux paths" do
+    it "keeps standard and requested-remux seeks exact on the short-GOP transcode path" do
       output = {
         "streams" => [
           { "codec_name" => "h264", "width" => 1920, "height" => 1080, "pix_fmt" => "yuv420p" }
@@ -306,15 +331,17 @@ RSpec.describe TranscodeService do
       commands = [ false, true ].map do |remux|
         described_class.send(:build_ffmpeg_command,
           "https://example.test/video-h264-1080p.mkv",
-          headers: {},
-          start_seconds: 42.5,
-          remux: remux
+          headers: {}, start_seconds: 42.5, remux: remux
         )
       end
 
       commands.each do |command|
-        expect(argument_pairs(command)).to include([ "-ss", "42.5" ])
-        expect(argument_pairs(command)).to include([ "-c:v", "libx264" ])
+        expect(argument_pairs(command)).to include(
+          [ "-ss", "42.5" ],
+          [ "-c:v", "libx264" ],
+          [ "-force_key_frames", "expr:gte(t,n_forced*#{described_class::FMP4_KEYFRAME_INTERVAL_SECONDS})" ]
+        )
+        expect(command).not_to include("-noaccurate_seek")
         expect(argument_pairs(command)).not_to include([ "-c:v", "copy" ])
       end
     end
@@ -581,7 +608,7 @@ RSpec.describe TranscodeService do
       )
 
       expect(argument_pairs(command)).to include([ "-f", "hls" ])
-      expect(argument_pairs(command)).to include([ "-hls_time", "4" ])
+      expect(argument_pairs(command)).to include([ "-hls_time", "2" ])
       expect(argument_pairs(command)).to include([ "-hls_playlist_type", "event" ])
       expect(argument_pairs(command)).to include([ "-hls_segment_type", "mpegts" ])
       expect(argument_pairs(command)).to include([ "-hls_flags", "temp_file" ])
@@ -696,8 +723,8 @@ RSpec.describe TranscodeService do
       hls_command = described_class.send(:build_ffmpeg_command,
         "https://example.test/video.mkv",
         headers: {},
-        # A non-zero seek forces H.264 re-encoding, so HLS can enforce its
-        # four-second keyframe cadence rather than copying the source GOP.
+        # A non-zero standard seek forces H.264 re-encoding, so HLS can
+        # enforce its short keyframe cadence rather than copying the GOP.
         start_seconds: 1,
         output_spec: :hls,
         segment_dir: "/tmp/hls/timestamps"
@@ -705,7 +732,7 @@ RSpec.describe TranscodeService do
       fmp4_command = described_class.send(:build_ffmpeg_command,
         "https://example.test/video.mkv",
         headers: {},
-        start_seconds: 0
+        start_seconds: 1
       )
 
       [ hls_command, fmp4_command ].each do |command|
@@ -715,7 +742,9 @@ RSpec.describe TranscodeService do
       expect(argument_pairs(hls_command)).to include(
         [ "-force_key_frames", "expr:gte(t,n_forced*#{described_class::HLS_SEGMENT_DURATION})" ]
       )
-      expect(fmp4_command).not_to include("-force_key_frames")
+      expect(argument_pairs(fmp4_command)).to include(
+        [ "-force_key_frames", "expr:gte(t,n_forced*#{described_class::FMP4_KEYFRAME_INTERVAL_SECONDS})" ]
+      )
     end
   end
 

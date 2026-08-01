@@ -683,7 +683,9 @@ test("thumbnail prefetch prioritizes timeline anchors and retains one minute fra
   player.thumbnailPrefetchCache = new Map()
   player.thumbnailPrefetchCacheBytes = 0
   player.thumbnailPrefetchKey = null
-  player.scheduleThumbnailPrefetch = (delay = 6000) => scheduledDelays.push(delay)
+  player.playbackStarted = true
+  player.bufferedAheadOfCurrent = () => 30
+  player.scheduleThumbnailPrefetch = (delay = 12000) => scheduledDelays.push(delay)
   player.fetchThumbnailForPrefetch = async (url) => {
     requestedUrl = url
     return { dataUrl: "data:image/jpeg;base64,preview", byteSize: 128 }
@@ -691,7 +693,7 @@ test("thumbnail prefetch prioritizes timeline anchors and retains one minute fra
 
   player.startThumbnailPrefetch()
 
-  assert.equal(scheduledDelays[0], 2000)
+  assert.equal(scheduledDelays[0], 8000)
   assert.equal(player.thumbnailPrefetchQueue[0], 120)
   assert.deepEqual([...player.thumbnailPrefetchQueue].sort((a, b) => a - b), [0, 60, 120, 180])
   assert.equal(player.thumbnailMinuteFor(31), 60)
@@ -702,7 +704,28 @@ test("thumbnail prefetch prioritizes timeline anchors and retains one minute fra
   assert.match(requestedUrl, /timestamp=120/)
   assert.equal(player.thumbnailPrefetchedSeconds.has(120), true)
   assert.equal(player.thumbnailPrefetchCache.get(120).dataUrl, "data:image/jpeg;base64,preview")
-  assert.equal(scheduledDelays.at(-1), 6000)
+  assert.equal(scheduledDelays.at(-1), 12000)
+})
+
+test("thumbnail prefetch yields bandwidth until playback has a healthy buffer", () => {
+  const player = new VideoPlayerController()
+  const scheduled = []
+  let requested = false
+  player.thumbnailPrefetchKey = "movie"
+  player.thumbnailPrefetchQueue = [60]
+  player.videoTarget = { paused: false }
+  player.playbackStarted = true
+  player.isSeeking = false
+  player.isStalled = false
+  player.bufferedAheadOfCurrent = () => 8
+  player.scheduleThumbnailPrefetch = (delay) => scheduled.push(delay)
+  player.fetchThumbnailForPrefetch = () => { requested = true }
+
+  player.runThumbnailPrefetch()
+
+  assert.equal(requested, false)
+  assert.deepEqual(scheduled, [3000])
+  assert.deepEqual(player.thumbnailPrefetchQueue, [60])
 })
 
 test("seek preview uses a retained prefetched frame without a network request", () => {
@@ -1104,6 +1127,24 @@ test("HDR toggle restarts playback at the absolute playhead", () => {
   assert.equal(player.overlayMessage, "Switching to SDR...")
 })
 
+test("native remux capability probes use MP4 codec strings for AV1 and VP9", () => {
+  const player = new VideoPlayerController()
+  const checkedTypes = []
+  player.videoTarget = {
+    canPlayType: (mime) => {
+      checkedTypes.push(mime)
+      return "probably"
+    }
+  }
+
+  assert.equal(player.browserCanPlayCodec("av1"), true)
+  assert.equal(player.browserCanPlayCodec("vp9"), true)
+  assert.deepEqual(checkedTypes, [
+    'video/mp4; codecs="av01.0.08M.08"',
+    'video/mp4; codecs="vp09.00.10.08"'
+  ])
+})
+
 test("iOS loads track metadata before starting HLS playback", async () => {
   const player = new VideoPlayerController()
   const calls = []
@@ -1115,6 +1156,26 @@ test("iOS loads track metadata before starting HLS playback", async () => {
   await player.ensureVideoSource()
 
   assert.deepEqual(calls, ["tracks", "hls"])
+})
+
+test("HDR HLS starts with one complete source-keyframe segment", async () => {
+  const player = new VideoPlayerController()
+  const previousFetch = context.fetch
+  let playlistFetches = 0
+  player.hlsPlaybackToken = 4
+  player.hdrPassthroughActive = () => true
+  context.fetch = async () => {
+    playlistFetches += 1
+    return { status: 200, text: async () => "#EXTINF:6,\n0.m4s" }
+  }
+
+  try {
+    const ready = await player.waitForPlaylist("/hls/hdr/playlist.m3u8", 4)
+    assert.equal(ready, true)
+    assert.equal(playlistFetches, 1)
+  } finally {
+    context.fetch = previousFetch
+  }
 })
 
 test("stale HLS playlist polls stop before touching the current session", async () => {
@@ -1165,6 +1226,26 @@ test("MSE startup deadline starts playback below the buffer target", () => {
   assert.equal(player.playbackStarted, true)
   assert.equal(player.bufferAheadDeadline, null)
   assert.equal(player.bufferAheadTimer, null)
+})
+
+test("MSE resumes a stall after three two-second fragments are buffered", () => {
+  const player = new VideoPlayerController()
+  let played = 0
+  player.videoTarget = {
+    currentTime: 0,
+    ended: false,
+    play: () => { played += 1; return Promise.resolve() }
+  }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 6 } }
+  player.playbackStarted = true
+  player.isStalled = true
+  player.userPaused = false
+  player.isSeeking = false
+
+  player.maybeStartPlayback()
+
+  assert.equal(played, 1)
+  assert.equal(player.isStalled, false)
 })
 
 test("MSE rebuffer deadline resumes playback without another append event", () => {
@@ -1389,7 +1470,7 @@ test("MSE retries the rejected quota fragment after eviction and bounds reader b
   assert.equal(await capacity, true)
 })
 
-test("MSE starts at the initial 10 second budget and preserves pause and seek guards", () => {
+test("MSE starts at four seconds and preserves user pause and subtitle-hold guards", () => {
   const player = new VideoPlayerController()
   let plays = 0
   player.videoTarget = {
@@ -1397,7 +1478,7 @@ test("MSE starts at the initial 10 second budget and preserves pause and seek gu
     ended: false,
     play: () => { plays += 1; return Promise.resolve() }
   }
-  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 10 } }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 4 } }
   player.playbackStarted = false
   player.userPaused = false
   player.isSeeking = false
@@ -1414,8 +1495,33 @@ test("MSE starts at the initial 10 second budget and preserves pause and seek gu
 
   player.userPaused = false
   player.isSeeking = true
+  player.subtitlePlaybackHoldToken = null
   player.maybeStartPlayback()
-  assert.equal(plays, 1)
+  assert.equal(plays, 2, "an ordinary seek should start as soon as its buffer is ready")
+
+  player.playbackStarted = false
+  player.subtitlePlaybackHoldToken = 9
+  player.maybeStartPlayback()
+  assert.equal(plays, 2, "subtitle loading should retain its explicit playback hold")
+})
+
+test("a paused MSE seek dismisses its loading overlay after the first frame is buffered", () => {
+  const player = new VideoPlayerController()
+  let hidden = 0
+  let shown = 0
+  player.userPaused = true
+  player.isSeeking = true
+  player.subtitlePlaybackHoldToken = null
+  player.videoTarget = { currentTime: 0 }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 2 } }
+  player.hideSeekingOverlay = () => { hidden += 1; player.isSeeking = false }
+  player.showOverlayUi = () => { shown += 1 }
+
+  player.finishPausedMseSeekIfReady()
+
+  assert.equal(hidden, 1)
+  assert.equal(shown, 1)
+  assert.equal(player.isSeeking, false)
 })
 
 test("MSE recovery budget survives raw network data and resets only when playback is ready", async () => {
@@ -1557,7 +1663,7 @@ test("a newer HLS seek aborts stale bootstrap work and stops its late session", 
       return Promise.resolve({ ok: true, json: async () => ({ session_id: "latest", playlist_url: "/hls/latest/playlist.m3u8" }) })
     }
     if (path === "/hls/latest/playlist.m3u8") {
-      return Promise.resolve({ status: 200, text: async () => "#EXTINF:4,\nsegment-1.ts\n#EXTINF:4,\nsegment-2.ts" })
+      return Promise.resolve({ status: 200, text: async () => "#EXTINF:2,\nsegment-1.ts\n#EXTINF:2,\nsegment-2.ts" })
     }
     return Promise.resolve({ ok: true })
   }

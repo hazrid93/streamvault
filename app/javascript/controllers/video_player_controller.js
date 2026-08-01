@@ -13,10 +13,11 @@ const STREAM_STALL_TIMEOUT_MS = 60000
 const PROGRESS_STALL_TIMEOUT_MS = 20000
 const PROGRESS_WATCHDOG_INTERVAL_MS = 3000
 const SEEK_THUMBNAIL_DEBOUNCE_MS = 250
-const THUMBNAIL_PREFETCH_START_DELAY_MS = 2000
-const THUMBNAIL_PREFETCH_GAP_MS = 6000
+const THUMBNAIL_PREFETCH_START_DELAY_MS = 8000
+const THUMBNAIL_PREFETCH_GAP_MS = 12000
 const THUMBNAIL_PREFETCH_REQUEST_TIMEOUT_MS = 25000
-const THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS = 1000
+const THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS = 3000
+const THUMBNAIL_PREFETCH_MIN_BUFFER_SECONDS = 20
 const THUMBNAIL_PREFETCH_CACHE_MAX_BYTES = 16 * 1024 * 1024
 const SEEK_PREVIEW_WIDTH_PX = 178
 const STREAM_MAX_RECOVERY_ATTEMPTS = 3
@@ -24,18 +25,16 @@ const HLS_MAX_RATE_LIMIT_RETRIES = 2
 const HLS_RETRY_AFTER_MAX_SECONDS = 10
 const HLS_MAX_UNSUPPORTED_RECOVERIES = 2
 const HLS_UNSUPPORTED_RECOVERY_DELAY_MS = 1500
-const BUFFER_AHEAD_SECONDS = 30
-const INITIAL_MSE_AHEAD_SECONDS = 10
+// Transcoded fMP4 now closes fragments every two seconds. Starting after
+// two complete fragments keeps a useful cushion while cutting the old 10s
+// startup/seek gate by more than half.
+const INITIAL_MSE_AHEAD_SECONDS = 4
 const MSE_APPEND_BACKLOG_HIGH_WATER = 8
-const BUFFER_AHEAD_MAX_WAIT_MS = 15000
-// After a stall, rebuild a meaningful buffer before resuming so ffmpeg
-// can catch up and transient upstream dips don't cause immediate
-// re-stall. 10s absorbs variable-rate sources (RealDebrid links from
-// torrent swarms, HEVC transcode below 1×) without making the user wait
-// 30s. The original 30s was raised to fix a userPaused auto-resume bug
-// that has since been fixed — 10s is sufficient to absorb transcode dips
-// while keeping the wait tolerable.
-const REBUFFER_AHEAD_SECONDS = 10
+const BUFFER_AHEAD_MAX_WAIT_MS = 10000
+// After a stall, rebuild three complete 2s fragments before resuming.
+// This protects against a rapid stall/resume loop while reducing the old
+// ten-second rebuffer delay.
+const REBUFFER_AHEAD_SECONDS = 6
 // Stall watchdog timeout for rebuffer stalls (playback already started).
 // Must be longer than REBUFFER_MAX_WAIT_MS so the deadline (which resumes
 // with partial buffer) fires before the watchdog (which reconnects).
@@ -43,12 +42,10 @@ const REBUFFER_AHEAD_SECONDS = 10
 // the fetch is truly dead.
 const REBUFFER_STALL_TIMEOUT_MS = 20000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
-// before resuming with whatever buffer has accumulated.  On a slow
-// or trickling source, data arrives in small bursts that never reach
-// the gate threshold — without a deadline, the video would sit on
-// "Buffering" forever.  12s gives ffmpeg time to build buffer even on
-// a slow source; the stall watchdog handles a genuinely dead source.
-const REBUFFER_MAX_WAIT_MS = 12000
+// before resuming with whatever buffer has accumulated. On a slow or
+// trickling source, data arrives in small bursts that never reach the gate.
+// Eight seconds keeps that wait bounded; the watchdog handles a dead source.
+const REBUFFER_MAX_WAIT_MS = 8000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // The subtitle overlay is pinned just above the controls bar while the
@@ -621,7 +618,8 @@ export default class extends Controller {
     if (this.isHls()) this.stopHlsSession()
     this.playbackStarted = false
     this.isStalled = false
-    this.userPaused = false
+    // Keep an explicit user pause across source rebuilds (seek, track/HDR
+    // switch, or recovery). Initial playback already starts with false.
     this.directPlayActive = false
     this.remuxDirectPlay = false
     this.hlsPlaybackActive = false
@@ -638,7 +636,9 @@ export default class extends Controller {
     if (!this.mseSupported) {
       this.videoTarget.src = streamUrl
       this.videoTarget.load()
-      const p = this.videoTarget.play(); if (p?.catch) p.catch(() => {})
+      if (!this.userPaused) {
+        const p = this.videoTarget.play(); if (p?.catch) p.catch(() => {})
+      }
       return
     }
 
@@ -760,10 +760,15 @@ export default class extends Controller {
   // Windows requires the HEVC Video Extension from the Store, which
   // most users have, so we allow "maybe" there too.
   browserCanPlayCodec(codec) {
-    const isHevc = codec === "hevc" || codec === "h265"
+    const normalizedCodec = codec?.toString().toLowerCase()
+    const isHevc = normalizedCodec === "hevc" || normalizedCodec === "h265"
+    const codecLabels = {
+      av1: "av01.0.08M.08",
+      vp9: "vp09.00.10.08"
+    }
     const mime = isHevc
       ? 'video/mp4; codecs="hvc1"'
-      : `video/mp4; codecs="${codec}"`
+      : `video/mp4; codecs="${codecLabels[normalizedCodec] || normalizedCodec}"`
     const result = this.videoTarget.canPlayType(mime)
     if (result === "probably" || result === "maybe") return true
 
@@ -1158,22 +1163,18 @@ export default class extends Controller {
     return true
   }
 
-  // Poll the HLS playlist URL until enough segments are ready, ffmpeg
-  // fails (424), or a timeout is reached.  Waiting for at least 2
-  // segments (instead of 1) gives iOS Safari a buffer head start: by
-  // the time it fetches and decodes the first segment, ffmpeg has
-  // already produced the second and is working on the third.  This
-  // reduces the periodic black-screen underruns that happen when
-  // playback starts with a single segment buffer and the transcode
-  // throughput dips.  Falls back to 1 segment if the timeout is nearly
-  // reached, so a slow source doesn't fail entirely.
+  // Poll until enough media is ready. Transcoded HLS uses two 2s segments,
+  // retaining a four-second head start at half the old startup latency.
+  // HDR stream-copy segments follow source keyframes and can be much longer,
+  // so one complete segment is already an adequate startup buffer.
   async waitForPlaylist(playlistUrl, playbackToken = this.hlsPlaybackToken, signal = null) {
     if (playbackToken !== this.hlsPlaybackToken || signal?.aborted) return false
     const maxAttempts = 150  // 150 × 200ms = 30s max wait
     const pollInterval = 200
-    const minSegments = 2
-    // After this many attempts, accept 1 segment rather than timing out.
-    const fallbackAttempts = 100  // 20s
+    const minSegments = this.hdrPassthroughActive() ? 1 : 2
+    // A source slower than real time should still show its first frame rather
+    // than waiting most of the 30s polling budget for a second segment.
+    const fallbackAttempts = 25  // 5s
     for (let i = 0; i < maxAttempts; i++) {
       try {
         // GET (not HEAD) so we can count segments in the playlist body.
@@ -1311,6 +1312,13 @@ export default class extends Controller {
       this.videoTarget.load()
       const p = this.userPaused ? null : this.videoTarget.play()
       if (p?.catch) p.catch(() => {})
+      if (this.userPaused) {
+        this.videoTarget.addEventListener("loadeddata", () => {
+          if (!this.userPaused) return
+          this.hideSeekingOverlay()
+          this.showOverlayUi()
+        }, { once: true })
+      }
 
       // Hide the seeking overlay once playback actually starts.
       const onPlaying = () => {
@@ -1777,10 +1785,9 @@ export default class extends Controller {
   // up to STREAM_MAX_RECOVERY_ATTEMPTS times.
   handleStreamStall() {
     // Never trigger recovery while the user has deliberately paused.
-    // The stall watchdog and progress watchdog can fire long after a
-    // user pause (60s/30s), and reconnectFromCurrentPosition resets
-    // userPaused=false via setupMseSource — which would auto-resume
-    // playback the user explicitly paused.
+    // The stall and progress watchdogs can fire long after a user pause.
+    // Never let a delayed recovery rebuild or resume a deliberately paused
+    // source.
     if (this.userPaused) {
       this.clearStallWatchdog()
       this.stopProgressWatchdog()
@@ -2204,12 +2211,13 @@ export default class extends Controller {
     this.startStallWatchdog(actuallyWaiting ? REBUFFER_STALL_TIMEOUT_MS : STREAM_STALL_TIMEOUT_MS)
     this.resetProgressBaseline()
     this.maybeStartPlayback()
+    this.finishPausedMseSeekIfReady()
     this.maybeHideBufferingOverlay()
     this.flushBufferQueue(generation, mediaSource, sourceBuffer)
   }
 
-  // Start (or resume) playback once the buffer holds at least
-  // BUFFER_AHEAD_SECONDS ahead of the current position.  This runs on
+  // Start (or resume) playback once the buffer holds the appropriate
+  // startup/rebuffer cushion ahead of the current position. This runs on
   // every appendBuffer completion — not just the initial start — so it
   // also gates rebuffering: when the video stalls (buffer ran dry),
   // it stays paused until enough data accumulates to sustain playback
@@ -2225,7 +2233,7 @@ export default class extends Controller {
 
     const bufferedAhead = this.bufferedAheadOfCurrent()
 
-    if (this.userPaused || this.isSeeking) return
+    if (this.userPaused || this.subtitlePlaybackHoldToken != null) return
     if (!this.playbackStarted) {
       const deadlineReached = this.bufferAheadDeadline && Date.now() >= this.bufferAheadDeadline
       if (bufferedAhead >= INITIAL_MSE_AHEAD_SECONDS || deadlineReached) {
@@ -2268,6 +2276,14 @@ export default class extends Controller {
         if (p?.catch) p.catch(() => {})
       }
     }
+  }
+
+  finishPausedMseSeekIfReady() {
+    if (!this.userPaused || !this.isSeeking || this.subtitlePlaybackHoldToken != null) return
+    if (this.bufferedAheadOfCurrent() < 0.5) return
+
+    this.hideSeekingOverlay()
+    this.showOverlayUi()
   }
 
   // Safety net for the hasBufferedAhead(2) gate in onVideoReady.
@@ -3993,7 +4009,19 @@ export default class extends Controller {
 
   runThumbnailPrefetch() {
     if (!this.thumbnailPrefetchKey || this.thumbnailPrefetchQueue.length === 0) return
-    if (this.videoTarget.paused || this.isStalled || document.visibilityState === "hidden") return
+    if (this.videoTarget.paused || document.visibilityState === "hidden") return
+    // Preview generation opens a second upstream FFmpeg seek. Never let that
+    // background work compete with startup, seeking, rebuffering, Save-Data,
+    // or a playback buffer that has not yet reached a healthy cushion.
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection
+    const constrainedConnection = connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || "")
+    const playbackNeedsBandwidth = !this.playbackStarted || this.isSeeking || this.isStalled ||
+      this.bufferedAheadOfCurrent() < THUMBNAIL_PREFETCH_MIN_BUFFER_SECONDS
+    if (constrainedConnection) return
+    if (playbackNeedsBandwidth) {
+      this.scheduleThumbnailPrefetch(THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS)
+      return
+    }
     if (this.thumbnailRequestInFlight) {
       this.scheduleThumbnailPrefetch(THUMBNAIL_PREFETCH_FOREGROUND_RETRY_MS)
       return
@@ -4287,7 +4315,8 @@ export default class extends Controller {
       this.videoTarget.load()
       // Wait for the first frame before playing (same as startRemuxDirectPlay).
       this.videoTarget.addEventListener("loadeddata", () => {
-        this.videoTarget.play().catch(() => {})
+        if (!this.userPaused) this.videoTarget.play().catch(() => {})
+        else this.hideSeekingOverlay()
       }, { once: true })
       this.clearSubtitleCues()
       this.reloadTextSubtitlesAt(targetSeconds)

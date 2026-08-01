@@ -102,10 +102,10 @@ RSpec.describe "HLS streaming", type: :request do
         <<~PLAYLIST
           #EXTM3U
           #EXT-X-VERSION:3
-          #EXT-X-TARGETDURATION:4
+          #EXT-X-TARGETDURATION:2
           #EXT-X-MEDIA-SEQUENCE:0
           #EXT-X-PLAYLIST-TYPE:EVENT
-          #EXTINF:4.000000,
+          #EXTINF:2.000000,
           0.ts
           #EXT-X-ENDLIST
         PLAYLIST

@@ -133,12 +133,11 @@ class TranscodeTracksController < ApplicationController
     "/direct_stream?url=#{CGI.escape(input_url)}"
   end
 
-  # Remux direct play is eligible when the video codec is H.264 or HEVC,
-  # regardless of container, B-frames, resolution, or pixel format.
-  # The native <video> element handles B-frames correctly (unlike MSE's
-  # SourceBuffer), and the browser plays HEVC natively on macOS via
-  # VideoToolbox.  -c:v copy runs at near network speed — no re-encode.
-  REMUX_COMPATIBLE_CODECS = %w[h264 hevc h265].freeze
+  # Remux direct play is eligible for codecs that modern native video
+  # elements can decode from MP4. Client-side canPlayType remains the final
+  # gate, so AV1/VP9 are used only on browsers that advertise support.
+  # -c:v copy runs at near network speed and avoids server video encoding.
+  REMUX_COMPATIBLE_CODECS = %w[h264 hevc h265 av1 vp9].freeze
 
   def remux_direct_playable?(video_stream)
     codec = video_stream[:codec_name].to_s.downcase
