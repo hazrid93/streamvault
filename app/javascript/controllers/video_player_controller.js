@@ -25,16 +25,15 @@ const HLS_MAX_RATE_LIMIT_RETRIES = 2
 const HLS_RETRY_AFTER_MAX_SECONDS = 10
 const HLS_MAX_UNSUPPORTED_RECOVERIES = 2
 const HLS_UNSUPPORTED_RECOVERY_DELAY_MS = 1500
-// Transcoded fMP4 now closes fragments every two seconds. Starting after
-// two complete fragments keeps a useful cushion while cutting the old 10s
-// startup/seek gate by more than half.
-const INITIAL_MSE_AHEAD_SECONDS = 4
+// Build two complete four-second fragments before releasing a CPU-heavy
+// transcode. This preserves most of the startup latency win without the
+// four-second cushion that proved too shallow for 4K tone mapping.
+const INITIAL_MSE_AHEAD_SECONDS = 8
 const MSE_APPEND_BACKLOG_HIGH_WATER = 8
-const BUFFER_AHEAD_MAX_WAIT_MS = 10000
-// After a stall, rebuild three complete 2s fragments before resuming.
-// This protects against a rapid stall/resume loop while reducing the old
-// ten-second rebuffer delay.
-const REBUFFER_AHEAD_SECONDS = 6
+const BUFFER_AHEAD_MAX_WAIT_MS = 15000
+// After a stall, rebuild a meaningful cushion before resuming so a heavy
+// transcode does not enter a rapid stall/resume loop.
+const REBUFFER_AHEAD_SECONDS = 10
 // Stall watchdog timeout for rebuffer stalls (playback already started).
 // Must be longer than REBUFFER_MAX_WAIT_MS so the deadline (which resumes
 // with partial buffer) fires before the watchdog (which reconnects).
@@ -44,8 +43,8 @@ const REBUFFER_STALL_TIMEOUT_MS = 20000
 // Maximum time to wait for the rebuffer gate (REBUFFER_AHEAD_SECONDS)
 // before resuming with whatever buffer has accumulated. On a slow or
 // trickling source, data arrives in small bursts that never reach the gate.
-// Eight seconds keeps that wait bounded; the watchdog handles a dead source.
-const REBUFFER_MAX_WAIT_MS = 8000
+// Twelve seconds keeps that wait bounded; the watchdog handles a dead source.
+const REBUFFER_MAX_WAIT_MS = 12000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // The subtitle overlay is pinned just above the controls bar while the
@@ -1163,18 +1162,16 @@ export default class extends Controller {
     return true
   }
 
-  // Poll until enough media is ready. Transcoded HLS uses two 2s segments,
-  // retaining a four-second head start at half the old startup latency.
-  // HDR stream-copy segments follow source keyframes and can be much longer,
-  // so one complete segment is already an adequate startup buffer.
+  // Poll until two media segments are ready. The deeper startup cushion is
+  // intentional: native HLS otherwise outruns a CPU-bound transcode and
+  // repeatedly drops into a black-screen rebuffer cycle.
   async waitForPlaylist(playlistUrl, playbackToken = this.hlsPlaybackToken, signal = null) {
     if (playbackToken !== this.hlsPlaybackToken || signal?.aborted) return false
     const maxAttempts = 150  // 150 × 200ms = 30s max wait
     const pollInterval = 200
-    const minSegments = this.hdrPassthroughActive() ? 1 : 2
-    // A source slower than real time should still show its first frame rather
-    // than waiting most of the 30s polling budget for a second segment.
-    const fallbackAttempts = 25  // 5s
+    const minSegments = 2
+    // Fall back to one segment only near the end of the polling budget.
+    const fallbackAttempts = 100  // 20s
     for (let i = 0; i < maxAttempts; i++) {
       try {
         // GET (not HEAD) so we can count segments in the playlist body.

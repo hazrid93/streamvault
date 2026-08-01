@@ -1158,7 +1158,7 @@ test("iOS loads track metadata before starting HLS playback", async () => {
   assert.deepEqual(calls, ["tracks", "hls"])
 })
 
-test("HDR HLS starts with one complete source-keyframe segment", async () => {
+test("HDR HLS also waits for two complete source-keyframe segments", async () => {
   const player = new VideoPlayerController()
   const previousFetch = context.fetch
   let playlistFetches = 0
@@ -1166,7 +1166,7 @@ test("HDR HLS starts with one complete source-keyframe segment", async () => {
   player.hdrPassthroughActive = () => true
   context.fetch = async () => {
     playlistFetches += 1
-    return { status: 200, text: async () => "#EXTINF:6,\n0.m4s" }
+    return { status: 200, text: async () => "#EXTINF:6,\n0.m4s\n#EXTINF:6,\n1.m4s" }
   }
 
   try {
@@ -1228,7 +1228,7 @@ test("MSE startup deadline starts playback below the buffer target", () => {
   assert.equal(player.bufferAheadTimer, null)
 })
 
-test("MSE resumes a stall after three two-second fragments are buffered", () => {
+test("MSE resumes a stall after rebuilding a ten second cushion", () => {
   const player = new VideoPlayerController()
   let played = 0
   player.videoTarget = {
@@ -1236,7 +1236,7 @@ test("MSE resumes a stall after three two-second fragments are buffered", () => 
     ended: false,
     play: () => { played += 1; return Promise.resolve() }
   }
-  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 6 } }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 10 } }
   player.playbackStarted = true
   player.isStalled = true
   player.userPaused = false
@@ -1470,7 +1470,7 @@ test("MSE retries the rejected quota fragment after eviction and bounds reader b
   assert.equal(await capacity, true)
 })
 
-test("MSE starts at four seconds and preserves user pause and subtitle-hold guards", () => {
+test("MSE starts at an eight second cushion and preserves pause and subtitle-hold guards", () => {
   const player = new VideoPlayerController()
   let plays = 0
   player.videoTarget = {
@@ -1478,7 +1478,7 @@ test("MSE starts at four seconds and preserves user pause and subtitle-hold guar
     ended: false,
     play: () => { plays += 1; return Promise.resolve() }
   }
-  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 4 } }
+  player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 8 } }
   player.playbackStarted = false
   player.userPaused = false
   player.isSeeking = false
@@ -1663,7 +1663,7 @@ test("a newer HLS seek aborts stale bootstrap work and stops its late session", 
       return Promise.resolve({ ok: true, json: async () => ({ session_id: "latest", playlist_url: "/hls/latest/playlist.m3u8" }) })
     }
     if (path === "/hls/latest/playlist.m3u8") {
-      return Promise.resolve({ status: 200, text: async () => "#EXTINF:2,\nsegment-1.ts\n#EXTINF:2,\nsegment-2.ts" })
+      return Promise.resolve({ status: 200, text: async () => "#EXTINF:4,\nsegment-1.ts\n#EXTINF:4,\nsegment-2.ts" })
     }
     return Promise.resolve({ ok: true })
   }

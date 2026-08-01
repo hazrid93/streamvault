@@ -49,6 +49,8 @@ class TranscodeTracksController < ApplicationController
       video_bit_depth: video_stream[:bit_depth],
       hdr: TranscodeService.hdr_video?(video_stream),
       hdr_type: video_stream[:hdr_type],
+      dolby_vision_profile: video_stream[:dolby_vision_profile],
+      dolby_vision_compatibility_id: video_stream[:dolby_vision_compatibility_id],
       hdr_passthrough: TranscodeService.hdr_passthrough_video?(video_stream),
       color_space: video_stream[:color_space],
       color_transfer: video_stream[:color_transfer],

@@ -94,6 +94,44 @@ RSpec.describe TranscodeService do
       expect(described_class.hdr_passthrough_video?(stream)).to be(true)
     end
 
+    it "passes through Dolby Vision profile 8 when it has an HDR10 fallback layer" do
+      output = {
+        "streams" => [
+          {
+            "codec_name" => "hevc", "width" => 3840, "height" => 2160,
+            "pix_fmt" => "yuv420p10le", "color_space" => "bt2020nc",
+            "color_transfer" => "smpte2084", "color_primaries" => "bt2020",
+            "side_data_list" => [
+              {
+                "side_data_type" => "DOVI configuration record",
+                "dv_profile" => 8,
+                "dv_bl_signal_compatibility_id" => 1
+              }
+            ]
+          }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      stream = described_class.probe_video_stream("https://example.test/dv-hybrid.mkv")
+
+      expect(stream).to include(
+        hdr_type: "dolby_vision", dolby_vision_profile: 8,
+        dolby_vision_compatibility_id: 1
+      )
+      expect(described_class.hdr_passthrough_video?(stream)).to be(true)
+    end
+
+    it "does not pass through Dolby Vision without an HDR fallback layer" do
+      stream = {
+        codec_name: "hevc", pix_fmt: "yuv420p10le", bit_depth: 10,
+        hdr_type: "dolby_vision", dolby_vision_profile: 5,
+        dolby_vision_compatibility_id: 0
+      }
+
+      expect(described_class.hdr_passthrough_video?(stream)).to be(false)
+    end
+
     it "marks forced subtitle tracks as partial" do
       output = {
         "streams" => [
@@ -608,7 +646,7 @@ RSpec.describe TranscodeService do
       )
 
       expect(argument_pairs(command)).to include([ "-f", "hls" ])
-      expect(argument_pairs(command)).to include([ "-hls_time", "2" ])
+      expect(argument_pairs(command)).to include([ "-hls_time", "4" ])
       expect(argument_pairs(command)).to include([ "-hls_playlist_type", "event" ])
       expect(argument_pairs(command)).to include([ "-hls_segment_type", "mpegts" ])
       expect(argument_pairs(command)).to include([ "-hls_flags", "temp_file" ])

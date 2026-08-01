@@ -27,14 +27,12 @@ class TranscodeService
   FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
-  # Two-second HLS segments publish the first playable media sooner. The
-  # player waits for two transcoded segments before starting, retaining a
-  # four-second safety buffer without paying the latency of two 4s segments.
-  HLS_SEGMENT_DURATION = 2
-  # fMP4 is flushed only at keyframes. x264's default GOP can exceed eight
-  # seconds, making every start/seek wait for a huge first fragment. Force a
-  # short GOP for low-latency MSE delivery without fragmenting on non-keyframes.
-  FMP4_KEYFRAME_INTERVAL_SECONDS = 2
+  # Four-second HLS segments reduce mux/playlist churn and give native clients
+  # a deeper cushion when a CPU-bound transcode is only slightly above 1x.
+  HLS_SEGMENT_DURATION = 4
+  # Keep fMP4 fragments shorter than x264's 8-10s default GOP, but avoid the
+  # extra I-frame/fragment overhead of the overly aggressive 2s cadence.
+  FMP4_KEYFRAME_INTERVAL_SECONDS = 4
   # HLS flags: temp_file writes segments via a .tmp~ sidecar and renames
   # them only once complete, so clients never read a partial segment.
   HLS_FLAGS = "temp_file".freeze
@@ -1435,7 +1433,7 @@ class TranscodeService
       cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
       cmd += [
         "-select_streams", "v:0",
-        "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames,bits_per_raw_sample,color_space,color_transfer,color_primaries,color_range:stream_side_data=side_data_type,dv_profile",
+        "-show_entries", "stream=codec_name,width,height,pix_fmt,has_b_frames,bits_per_raw_sample,color_space,color_transfer,color_primaries,color_range:stream_side_data=side_data_type,dv_profile,dv_bl_signal_compatibility_id",
         "-of", "json",
         input_url
       ]
@@ -1504,6 +1502,8 @@ class TranscodeService
       color_primaries: stream["color_primaries"].to_s.downcase,
       color_range: stream["color_range"].to_s.downcase,
       hdr_type: hdr_type_for_stream(stream),
+      dolby_vision_profile: dolby_vision_side_data(stream)["dv_profile"]&.to_i,
+      dolby_vision_compatibility_id: dolby_vision_side_data(stream)["dv_bl_signal_compatibility_id"]&.to_i,
       has_b_frames: positive_integer(stream["has_b_frames"]).to_i > 0
     }
   rescue JSON::ParserError
@@ -1519,9 +1519,15 @@ class TranscodeService
   end
   private_class_method :video_bit_depth
 
+  def self.dolby_vision_side_data(stream)
+    Array(stream["side_data_list"]).find do |entry|
+      entry["side_data_type"].to_s.match?(/dovi|dolby vision/i)
+    end || {}
+  end
+  private_class_method :dolby_vision_side_data
+
   def self.hdr_type_for_stream(stream)
-    side_data = Array(stream["side_data_list"])
-    return "dolby_vision" if side_data.any? { |entry| entry["side_data_type"].to_s.match?(/dovi|dolby vision/i) }
+    return "dolby_vision" if dolby_vision_side_data(stream).present?
 
     case stream["color_transfer"].to_s.downcase
     when "smpte2084" then "hdr10"
@@ -1536,8 +1542,16 @@ class TranscodeService
   public_class_method :hdr_video?
 
   def self.hdr_passthrough_video?(stream)
-    hdr_video?(stream) &&
-      %w[hdr10 hlg].include?(stream[:hdr_type].to_s) &&
+    hdr_type = stream[:hdr_type].to_s
+    # Dolby Vision profile 8 hybrid streams advertise a backward-compatible
+    # HDR10 (compatibility 1) or HLG (compatibility 4) base layer. Passing that
+    # HEVC through lets unsupported DV clients display the fallback HDR layer
+    # instead of forcing a CPU-heavy 4K tone-map. Profile 5/compatibility 0 has
+    # no fallback and must still be transcoded.
+    hdr_format_supported = %w[hdr10 hlg].include?(hdr_type) ||
+      (hdr_type == "dolby_vision" && [ 1, 4 ].include?(stream[:dolby_vision_compatibility_id].to_i))
+
+    hdr_video?(stream) && hdr_format_supported &&
       HDR_PASSTHROUGH_CODECS.include?(stream[:codec_name].to_s) &&
       stream[:bit_depth].to_i == 10
   end
