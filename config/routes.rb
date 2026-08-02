@@ -61,6 +61,7 @@ Rails.application.routes.draw do
   get "transcode/duration", to: "transcode_duration#show", as: :transcode_duration
   get "transcode/tracks", to: "transcode_tracks#show", as: :transcode_tracks
   get "transcode/subtitles", to: "transcode_subtitles#show", as: :transcode_subtitles
+  post "transcode/live_captions", to: "live_captions#create", as: :live_captions
   get "transcode/thumbnail", to: "transcode_thumbnail#show", as: :transcode_thumbnail
   get "transcode", to: "transcode#stream", as: :transcode_stream
 

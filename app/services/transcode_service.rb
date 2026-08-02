@@ -175,6 +175,11 @@ class TranscodeService
   class ThumbnailTimeoutError < ThumbnailExtractionError; end
 
   CommandCaptureResult = Struct.new(:stdout, :stderr, :status, :timed_out, keyword_init: true)
+  AudioClipExtractionResult = Struct.new(:status, :bytes, :duration_seconds, keyword_init: true) do
+    def ok?
+      status == :ok
+    end
+  end
   ThumbnailFlight = Struct.new(:condition, :done, :result, :error, keyword_init: true)
 
   SubtitleExtractionResult = Struct.new(:status, :vtt, :cue_count, :source, :diagnostic, keyword_init: true) do
@@ -226,6 +231,75 @@ class TranscodeService
       raise error
     end
   end
+
+  # Extract an exact, compact mono WAV window for local Whisper. Keeping the
+  # sidecar free of FFmpeg limits its attack surface and makes input URL/header
+  # credentials visible only to the Rails container.
+  def self.extract_speech_audio(input_url, output_path:, headers: {}, start_seconds:, duration_seconds:, audio_stream: nil, default_language: nil, preferred_languages: [])
+    start_time = Float(start_seconds, exception: false)
+    duration = Float(duration_seconds, exception: false)
+    unless start_time&.finite? && start_time.between?(0, MAX_VALID_DURATION_SECONDS) &&
+           duration&.finite? && duration.between?(1, 30)
+      return AudioClipExtractionResult.new(status: :invalid, bytes: 0, duration_seconds: 0)
+    end
+
+    selected_audio_index = selected_audio_stream_index(
+      input_url,
+      headers: headers,
+      audio_stream: audio_stream,
+      default_language: default_language,
+      preferred_languages: preferred_languages
+    )
+    return AudioClipExtractionResult.new(status: :no_audio, bytes: 0, duration_seconds: 0) unless selected_audio_index
+
+    header_str = ffmpeg_headers(headers)
+    command = [ FFMPEG_PATH, "-loglevel", "error" ]
+    command += [ "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5" ]
+    command += [ "-rw_timeout", "30000000" ]
+    command += [ "-headers", header_str + "\r\n" ] if header_str.present?
+    command += [ "-ss", start_time.to_s, "-i", input_url ]
+    command += [
+      "-map", "0:#{selected_audio_index}", "-t", duration.to_s,
+      "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+      "-map_metadata", "-1", "-y", output_path.to_s
+    ]
+
+    result = capture_command(command, timeout_seconds: 45)
+    clip_duration = speech_wav_duration(output_path)
+    status = if result.timed_out
+      :timeout
+    elsif result.status&.success? && clip_duration >= 0.25
+      :ok
+    elsif result.status&.success?
+      :no_audio
+    else
+      :failed
+    end
+    AudioClipExtractionResult.new(
+      status: status,
+      bytes: status == :ok ? File.size(output_path) : 0,
+      duration_seconds: status == :ok ? clip_duration.round(3) : 0
+    )
+  rescue StandardError => error
+    Rails.logger.warn("[LiveCaption] Audio extraction failed: #{error.class}")
+    AudioClipExtractionResult.new(status: :failed, bytes: 0, duration_seconds: 0)
+  end
+
+  def self.speech_wav_duration(path)
+    return 0 unless File.file?(path)
+
+    file_size = File.size(path)
+    header = File.binread(path, [ file_size, 4.kilobytes ].min)
+    data_offset = header.index("data")
+    return 0 unless data_offset && header.bytesize >= data_offset + 8
+
+    declared_bytes = header.byteslice(data_offset + 4, 4).unpack1("V")
+    available_bytes = [ file_size - data_offset - 8, 0 ].max
+    [ declared_bytes, available_bytes ].min.fdiv(16_000 * 2)
+  rescue SystemCallError, TypeError
+    0
+  end
+  private_class_method :speech_wav_duration
 
   # Stream transcoded/remuxed fMP4 from FFmpeg.
   # Copies browser-safe H.264 or explicitly requested compatible HDR HEVC.

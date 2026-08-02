@@ -886,6 +886,143 @@ test("playback time updates do not overwrite the seek position while dragging", 
   assert.equal(visualUpdates, 0)
 })
 
+test("enabling live English captions disables a burned subtitle and rebuilds playback", () => {
+  const player = new VideoPlayerController()
+  let restartedAt = null
+  player.liveCaptionsAvailableValue = true
+  player.liveCaptionsEnabled = false
+  player.selectedSubtitleStream = "7"
+  player.burnedSubtitleSelected = () => player.selectedSubtitleStream === "7"
+  player.currentPlaybackPosition = () => 125
+  player.clearSubtitleCues = () => {}
+  player.renderSubtitleControls = () => {}
+  player.renderHdrControls = () => {}
+  player.closeTrackMenus = () => {}
+  player.restartPlaybackAt = (position) => { restartedAt = position }
+  player.restartLiveCaptionsAt = () => {}
+
+  player.toggleLiveCaptions()
+
+  assert.equal(player.liveCaptionsEnabled, true)
+  assert.equal(player.selectedSubtitleStream, null)
+  assert.equal(restartedAt, 125)
+})
+
+test("selecting a normal subtitle disables live captions", () => {
+  const player = new VideoPlayerController()
+  let loadedAt = null
+  player.liveCaptionsEnabled = true
+  player.selectedSubtitleStream = null
+  player.subtitleTracks = [{ index: 2, text_supported: true, external: false }]
+  player.clearSubtitleCues = () => {}
+  player.abortLiveCaptionLoad = () => {}
+  player.renderSubtitleControls = () => {}
+  player.renderHdrControls = () => {}
+  player.closeTrackMenus = () => {}
+  player.currentPlaybackPosition = () => 80
+  player.loadSubtitleTrack = (position) => { loadedAt = position }
+  player.hideSeekingOverlay = () => {}
+  player.videoTarget = { paused: false }
+  player.playbackStarted = true
+  player.userPaused = false
+
+  player.selectSubtitleTrack({ currentTarget: { dataset: { subtitleStream: "2" } } })
+
+  assert.equal(player.liveCaptionsEnabled, false)
+  assert.equal(player.selectedSubtitleStream, "2")
+  assert.equal(loadedAt, 80)
+})
+
+test("subtitle Off disables live captions without selecting a normal track", () => {
+  const player = new VideoPlayerController()
+  player.liveCaptionsEnabled = true
+  player.selectedSubtitleStream = null
+  player.abortLiveCaptionLoad = () => {}
+  player.clearSubtitleCues = () => {}
+  player.renderSubtitleControls = () => {}
+  player.closeTrackMenus = () => {}
+  player.burnedSubtitleSelected = () => false
+
+  player.selectSubtitleTrack({ currentTarget: { dataset: { subtitleStream: "" } } })
+
+  assert.equal(player.liveCaptionsEnabled, false)
+  assert.equal(player.selectedSubtitleStream, null)
+})
+
+test("overlapping live caption windows deduplicate repeated lines", () => {
+  const player = new VideoPlayerController()
+  player.videoTarget = { currentTime: 30 }
+  player.startSecondsValue = 0
+  player.directPlayActive = true
+  player.subtitleCues = [{ start: 24, end: 28, text: "Where are we going?" }]
+
+  player.mergeLiveCaptionCues([
+    { start: 25, end: 29, text: "Where are we going?" },
+    { start: 29, end: 32, text: "To the station." }
+  ])
+
+  assert.deepEqual(
+    Array.from(player.subtitleCues, (cue) => [cue.start, cue.end, cue.text]),
+    [
+      [24, 28, "Where are we going?"],
+      [29, 32, "To the station."]
+    ]
+  )
+})
+
+test("live captions start modestly ahead while playing and at the playhead while paused", () => {
+  const player = new VideoPlayerController()
+  let requested = null
+  player.liveCaptionsEnabled = true
+  player.videoTarget = { paused: false }
+  player.playbackStarted = true
+  player.isSeeking = false
+  player.isStalled = false
+  player.subtitleLoading = false
+  player.subtitleRetryAfter = 0
+  player.subtitleWindowStart = null
+  player.subtitleWindowEnd = null
+  player.bufferedAheadOfCurrent = () => 20
+  player.abortLiveCaptionLoad = () => {}
+  player.clearSubtitleCues = () => {}
+  player.loadLiveCaptionWindow = (position) => { requested = position }
+
+  player.restartLiveCaptionsAt(100)
+  assert.equal(player.liveCaptionInitialWindowStart, 115)
+  assert.equal(requested, null)
+  player.ensureLiveCaptionWindow(100)
+  assert.equal(requested, 115)
+
+  requested = null
+  player.restartLiveCaptionsAt(112)
+  assert.equal(player.liveCaptionInitialWindowStart, 130)
+
+  player.videoTarget.paused = true
+  player.restartLiveCaptionsAt(112)
+  assert.equal(player.liveCaptionInitialWindowStart, 110)
+  assert.equal(requested, 110)
+})
+
+test("live caption prefetch yields while the playback buffer is shallow", () => {
+  const player = new VideoPlayerController()
+  let requested = null
+  player.liveCaptionsEnabled = true
+  player.subtitleLoading = false
+  player.subtitleRetryAfter = 0
+  player.subtitleWindowStart = 0
+  player.subtitleWindowEnd = 30
+  player.videoTarget = { paused: false }
+  player.bufferedAheadOfCurrent = () => 4
+  player.loadLiveCaptionWindow = (position) => { requested = position }
+
+  player.ensureLiveCaptionWindow(22)
+  assert.equal(requested, null)
+
+  player.bufferedAheadOfCurrent = () => 20
+  player.ensureLiveCaptionWindow(22)
+  assert.equal(requested, 28)
+})
+
 test("subtitle text renders inside the centered caption box", () => {
   const player = new VideoPlayerController()
   const classes = new Set(["hidden"])

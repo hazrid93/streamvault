@@ -32,6 +32,8 @@ services:
       LOCAL_TORRENT_GLOBAL_CACHE_BYTES: ${LOCAL_TORRENT_GLOBAL_CACHE_BYTES:-16106127360}
       LOCAL_TORRENT_HEARTBEAT_TIMEOUT: ${LOCAL_TORRENT_HEARTBEAT_TIMEOUT:-1800}
       LOCAL_TORRENT_PER_TORRENT_CACHE_BYTES: ${LOCAL_TORRENT_PER_TORRENT_CACHE_BYTES:-2147483648}
+      LIVE_CAPTION_WHISPER_URL: ${LIVE_CAPTION_WHISPER_URL:-http://whisper:8080/inference}
+      LIVE_CAPTIONS_ENABLED: ${LIVE_CAPTIONS_ENABLED:-true}
       SOLID_QUEUE_IN_PUMA: "true"
     volumes:
       - ./storage/torrserver/cache:/rails/storage/local_torrents:ro
@@ -45,6 +47,42 @@ services:
       - default
       - sv-shared
       - torrent-control
+      - caption-control
+
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    restart: unless-stopped
+    user: "10001:10001"
+    environment:
+      WHISPER_MODEL: base-q5_1
+      WHISPER_THREADS: "4"
+      OMP_NUM_THREADS: "4"
+    networks:
+      - caption-control
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "4.0"
+    cpu_shares: 128
+    mem_limit: 1200m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   torrserver:
     # Release-pinned stream-first BitTorrent sidecar. It has no host port:
@@ -96,3 +134,7 @@ networks:
     internal: true
   # Dedicated internet egress for tracker/DHT/peer traffic; no DB or app peers.
   torrent-egress:
+  # Whisper receives WAV clips from Rails but cannot reach the DB, TorrServer,
+  # media origins, or the public internet.
+  caption-control:
+    internal: true

@@ -61,6 +61,13 @@ RSpec.describe "Request rate limiting", type: :request do
     expect(authenticated_request("/transcode/thumbnail", method: "GET", user_id: 43).first).to eq(200)
   end
 
+  it "bounds local live-caption windows per user" do
+    statuses = 13.times.map { authenticated_post("/transcode/live_captions").first }
+
+    expect(statuses).to eq([ 200 ] * 12 + [ 429 ])
+    expect(authenticated_post("/transcode/live_captions", user_id: 43).first).to eq(200)
+  end
+
   it "allows an HLS seek and recovery burst without weakening fresh stream starts" do
     hls_statuses = 7.times.map { authenticated_post("/hls/start").first }
     stream_statuses = 3.times.map { authenticated_post("/streaming").first }

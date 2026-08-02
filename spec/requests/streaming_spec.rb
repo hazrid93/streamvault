@@ -380,6 +380,7 @@ RSpec.describe "Streaming", type: :request do
     before { sign_in user }
 
     it "renders the player page with video source" do
+      allow(LiveCaptionTranslationService).to receive(:enabled?).and_return(true)
       get streaming_path("play",
         streaming_url: "https://download.real-debrid.com/d/file123/Inception.mp4",
         filename: "Inception.mp4",
@@ -396,6 +397,8 @@ RSpec.describe "Streaming", type: :request do
       expect(response.body).to include(%(data-video-player-default-language-value="ENG"))
       expect(response.body).to include(%(data-video-player-tracks-url-value="/transcode/tracks"))
       expect(response.body).to include(%(data-video-player-subtitles-url-value="/transcode/subtitles"))
+      expect(response.body).to include(%(data-video-player-live-captions-url-value="/transcode/live_captions"))
+      expect(response.body).to include(%(data-video-player-live-captions-available-value="true"))
       expect(response.body).to include(%(data-video-player-thumbnail-url-value="/transcode/thumbnail"))
       expect(response.body).to include(%(data-video-player-target="audioControls"))
       expect(response.body).to include(%(data-video-player-target="subtitleControls"))

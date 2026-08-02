@@ -63,6 +63,14 @@ class Rack::Attack
     authenticated_user_id(request)
   end
 
+  # One player requests roughly two 30-second caption windows per minute.
+  # Leave room for seeks and tabs while bounding local Whisper CPU work.
+  throttle("live_captions/user", limit: 12, period: 1.minute) do |request|
+    next unless request.path == "/transcode/live_captions" && request.post?
+
+    authenticated_user_id(request)
+  end
+
   # Cast preparation starts an FFmpeg HLS session and may retain a local
   # torrent lease, so bound repeated device-picker retries per user.
   throttle("cast_start/user", limit: 3, period: 10.seconds) do |request|

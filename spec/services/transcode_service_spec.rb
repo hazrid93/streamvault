@@ -335,6 +335,58 @@ RSpec.describe TranscodeService do
   end
 
 
+  describe ".extract_speech_audio" do
+    it "extracts the selected stream as a bounded mono 16 kHz WAV" do
+      allow(described_class).to receive(:probe_media_tracks).and_return(
+        audio: [ { index: 3, position: 0, language: "FRE", default: true } ],
+        subtitles: []
+      )
+      captured_command = nil
+      allow(described_class).to receive(:capture_command) do |command, **_kwargs|
+        captured_command = command
+        pcm_bytes = 32_000
+        wav_header = "RIFF" + [ 36 + pcm_bytes ].pack("V") + "WAVEfmt " +
+          [ 16, 1, 1, 16_000, 32_000, 2, 16 ].pack("VvvVVvv") +
+          "data" + [ pcm_bytes ].pack("V")
+        File.binwrite(command.last, wav_header + ("\0" * pcm_bytes))
+        capture_result("")
+      end
+
+      Tempfile.create([ "speech", ".wav" ]) do |file|
+        result = described_class.extract_speech_audio(
+          "https://example.test/movie.mkv",
+          output_path: file.path,
+          headers: { "Authorization" => "Bearer hidden" },
+          start_seconds: 125,
+          duration_seconds: 30,
+          audio_stream: 3
+        )
+
+        expect(result).to be_ok
+        expect(result.duration_seconds).to eq(1.0)
+        expect(argument_pairs(captured_command)).to include(
+          [ "-ss", "125.0" ], [ "-map", "0:3" ], [ "-t", "30.0" ],
+          [ "-ac", "1" ], [ "-ar", "16000" ], [ "-c:a", "pcm_s16le" ]
+        )
+        expect(captured_command.join(" ")).to include("Bearer hidden")
+      end
+    end
+
+    it "rejects oversized windows before probing or spawning FFmpeg" do
+      expect(described_class).not_to receive(:probe_media_tracks)
+      expect(described_class).not_to receive(:capture_command)
+
+      result = described_class.extract_speech_audio(
+        "https://example.test/movie.mkv",
+        output_path: "/tmp/unused.wav",
+        start_seconds: 0,
+        duration_seconds: 31
+      )
+
+      expect(result.status).to eq(:invalid)
+    end
+  end
+
   describe "ffmpeg command selection" do
     it "copies browser-safe H.264 video" do
       output = {

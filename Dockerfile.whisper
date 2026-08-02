@@ -1,0 +1,40 @@
+# Local, CPU-only Whisper translation service for StreamVault live captions.
+# The upstream binary and compact multilingual model are pinned and
+# checksum-verified in the image. The model accepts foreign speech while
+# whisper.cpp's translation mode guarantees English-only caption output.
+FROM debian:bookworm-slim
+
+ARG WHISPER_CPP_VERSION=v1.9.1
+ARG WHISPER_ARCHIVE_SHA256=f3bf3b4369a99b54665b0f19b88483b30de27f25963b0414235dea03198515c5
+ARG WHISPER_MODEL_SHA256=422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898
+ARG WHISPER_VAD_SHA256=2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987
+
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y ca-certificates curl libgomp1 libstdc++6 && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL --retry 4 \
+      -o /tmp/whisper.tar.gz \
+      "https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_CPP_VERSION}/whisper-bin-ubuntu-x64.tar.gz" && \
+    echo "${WHISPER_ARCHIVE_SHA256}  /tmp/whisper.tar.gz" | sha256sum -c - && \
+    mkdir -p /opt/whisper && \
+    tar -xzf /tmp/whisper.tar.gz --strip-components=1 -C /opt/whisper && \
+    rm /tmp/whisper.tar.gz && \
+    useradd --system --uid 10001 --create-home --home-dir /home/whisper whisper && \
+    mkdir -p /models && \
+    curl -fL --retry 5 -o /models/ggml-base-q5_1.bin \
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin" && \
+    echo "${WHISPER_MODEL_SHA256}  /models/ggml-base-q5_1.bin" | sha256sum -c - && \
+    curl -fL --retry 5 -o /models/ggml-silero-v6.2.0.bin \
+      "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin" && \
+    echo "${WHISPER_VAD_SHA256}  /models/ggml-silero-v6.2.0.bin" | sha256sum -c - && \
+    chown -R whisper:whisper /models
+
+ENV LD_LIBRARY_PATH=/opt/whisper \
+    WHISPER_MODEL=base-q5_1 \
+    WHISPER_THREADS=4
+
+COPY docker/whisper-entrypoint.sh /usr/local/bin/whisper-entrypoint
+RUN chmod 0755 /usr/local/bin/whisper-entrypoint
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/whisper-entrypoint"]

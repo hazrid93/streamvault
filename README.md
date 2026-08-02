@@ -87,6 +87,7 @@ StreamVault (Rails app)
 - **Audio track selection** — Switch between audio languages when a stream has multiple tracks.
 - **A/V timestamp synchronisation** — Corrects source timestamp gaps and keeps resumed, sought, and recovered streams aligned.
 - **Subtitles** — Select from embedded subtitle tracks (text and image-based). Falls back to external subtitles from SubDL when none are embedded.
+- **Local live English captions** — Opt in from the CC menu to transcribe or translate the selected audio into English with a private, CPU-limited whisper.cpp sidecar. Normal subtitles and live captions are mutually exclusive.
 - **Burned subtitles** — Image-based subtitles (PGS, VobSub) are burned onto the video via FFmpeg since browsers can't render them natively.
 - **Resume playback** — Automatically resumes from your last position.
 - **Stall recovery** — If a stream stalls, the player attempts automatic recovery before failing.
@@ -116,6 +117,7 @@ StreamVault relies on several external services. Here's what each one does and h
 | **OMDB** | Enriches content with IMDb, Rotten Tomatoes, and Metacritic ratings | Yes | Get a free API key at [omdbapi.com/apikey.aspx](https://www.omdbapi.com/apikey.aspx) |
 | **TMDB** | Powers the "Recommended for You" feature using your watch history | Optional | Create an account at [themoviedb.org](https://www.themoviedb.org), then get a Read Access Token at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) |
 | **SubDL** | Provides external subtitles when embedded ones aren't available | Optional | Get a free API key at [subdl.com/panel/api](https://subdl.com/panel/api) |
+| **whisper.cpp** | Generates opt-in English live captions locally; no cloud API or key | Included | Managed automatically by Docker Compose |
 
 ### How the services work together
 
@@ -145,8 +147,8 @@ The most demanding component is **FFmpeg transcoding**, which happens on-the-fly
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| **CPU** | 2 cores | 4+ cores (transcoding 1080p in real time is CPU-intensive) |
-| **RAM** | 2 GB | 4 GB+ (Rails + Postgres + FFmpeg + jemalloc) |
+| **CPU** | 2 cores | 6+ cores for simultaneous transcoding and local live captions |
+| **RAM** | 2 GB | 6 GB+ with the local Whisper model enabled |
 | **Storage** | 10 GB | 20 GB+ (Postgres data, logs, Docker images) |
 | **Network** | 50 Mbps | 100 Mbps+ (streaming bandwidth) |
 | **OS** | Any Linux with Docker | Ubuntu/Debian LTS |
@@ -195,6 +197,12 @@ On later locked visits, enter the same PIN to unlock StreamVault. Choose **Lock*
 ### Configure your RealDebrid key
 
 After unlocking StreamVault, go to **Settings** and enter your RealDebrid API key. The app verifies the key automatically and shows a confirmation. Your key is encrypted at rest using Active Record Encryption — it never appears in logs or is transmitted in plain text.
+
+### Local live English captions
+
+The **AI · Live English captions** option in the player's CC menu sends short audio-only windows to the private `whisper.cpp` container. The bundled multilingual `base-q5_1` model detects the spoken language and always returns English text; audio and stream credentials never leave the Docker host. No cloud account or API key is required.
+
+Caption inference is CPU-only and deliberately runs below FFmpeg playback priority. The first lines can therefore take several seconds to appear, especially while a 4K source is being transcoded. Selecting live captions turns a normal subtitle off, and selecting any normal subtitle turns live captions off. The Whisper image includes its checksum-pinned model, so the first Docker build downloads roughly a few hundred megabytes.
 
 ### Auto-start on boot
 
@@ -246,6 +254,8 @@ docker compose up -d --build
 | `OMDB_API_KEY` | OMDB API key for ratings metadata | Required |
 | `TMDB_READ_ACCESS_TOKEN` | TMDB v4 bearer token for recommendations | Optional |
 | `SUBDL_API_KEY` | SubDL API key for external subtitle fallback | Optional |
+| `LIVE_CAPTIONS_ENABLED` | Expose local English live captions in the player | `true` in Docker Compose |
+| `LIVE_CAPTION_WHISPER_URL` | Private whisper.cpp inference endpoint | `http://whisper:8080/inference` in Docker Compose |
 | `TORRENTIO_PROXY` | Forward proxy URL for Torrentio requests (if IP is blocked) | Optional |
 | `CINEMETA_PROXY` | Forward proxy URL for Cinemeta requests (if needed) | Optional |
 | `COMET_PROXY` | Forward proxy URL for Comet requests (if needed) | Optional |
@@ -392,7 +402,8 @@ app/
 | **StreamProvider** | Factory that returns the configured provider(s) with fallback ordering |
 | **RealDebridService** | Manages RealDebrid API: add magnets, select files, get streaming links, verify keys |
 | **ContentStreamingService** | Orchestrates the full streaming flow: fetch streams → resolve best candidate → verify link |
-| **TranscodeService** | FFmpeg-based transcoding: MKV→MP4, audio→AAC, subtitle extraction/burning, video normalisation |
+| **TranscodeService** | FFmpeg-based transcoding: MKV→MP4, audio→AAC, subtitle extraction/burning, speech-window extraction, video normalisation |
+| **LiveCaptionTranslationService** | Single-flight/cached local whisper.cpp translation into timed English cues |
 | **ProgressTrackingService** | Saves watch progress, auto-advances episodes, builds the "Continue Watching" list |
 | **RecommendationService** | Generates "Recommended for You" from watch history via TMDB collaborative filtering |
 | **TmdbService** | TMDB API client for recommendations and poster URLs |

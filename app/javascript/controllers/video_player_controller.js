@@ -7,6 +7,12 @@ const SUBTITLE_WINDOW_SECONDS = 60
 const SUBTITLE_LOOK_BEHIND_SECONDS = 5
 const EXTERNAL_SUBTITLE_WINDOW_SECONDS = 60
 const SUBTITLE_PREFETCH_SECONDS = 20
+const LIVE_CAPTION_WINDOW_SECONDS = 30
+const LIVE_CAPTION_WINDOW_STRIDE_SECONDS = 28
+const LIVE_CAPTION_WINDOW_QUANTUM_SECONDS = 5
+const LIVE_CAPTION_START_LEAD_SECONDS = 15
+const LIVE_CAPTION_PREFETCH_SECONDS = 24
+const LIVE_CAPTION_MIN_BUFFER_SECONDS = 8
 const SUBTITLE_OFFSET_MIN_SECONDS = -5
 const SUBTITLE_OFFSET_MAX_SECONDS = 5
 const STREAM_STALL_TIMEOUT_MS = 60000
@@ -76,7 +82,7 @@ export default class extends Controller {
       season: String, episode: String, resumeAt: String, startSeconds: Number,
       title: String, duration: Number, posterUrl: String,
       defaultLanguage: String, preferredLanguages: String,
-      tracksUrl: String, subtitlesUrl: String, resumeUrl: String,
+      tracksUrl: String, subtitlesUrl: String, liveCaptionsUrl: String, liveCaptionsAvailable: Boolean, resumeUrl: String,
       nextEpisodeTitle: String, hasNextEpisode: Boolean,
       localTorrentHash: String, localTorrentSession: String, localStatusUrl: String, localStopUrl: String,
       castSessionsUrl: String, thumbnailUrl: String
@@ -116,6 +122,11 @@ export default class extends Controller {
     this.subtitlePrefetches = new Map()
     this.subtitlePrefetchResults = new Map()
     this.subtitlePlaybackHoldToken = null
+    this.liveCaptionsEnabled = false
+    this.liveCaptionLoadToken = 0
+    this.liveCaptionAbortController = null
+    this.liveCaptionError = null
+    this.liveCaptionInitialWindowStart = null
     this.sourceSelectionToken = 0
     this.pendingExternalSubtitleStream = null
     this.tracksData = null
@@ -267,6 +278,7 @@ export default class extends Controller {
     this.clearSuppressSeekClickTimer()
     this.clearSeekThumbnailTimer()
     this.stopThumbnailPrefetch()
+    this.abortLiveCaptionLoad()
     this.thumbnailRequestToken += 1
     this.seekPreviewImageTarget.onload = null
     this.seekPreviewImageTarget.onerror = null
@@ -2806,7 +2818,7 @@ export default class extends Controller {
       this.tracksData = { ...this.tracksData, subtitles: this.subtitleTracks }
 
       let restoredExternalSelection = false
-      if (this.pendingExternalSubtitleStream && this.subtitleTrackForStream(this.pendingExternalSubtitleStream)) {
+      if (!this.liveCaptionsEnabled && this.pendingExternalSubtitleStream && this.subtitleTrackForStream(this.pendingExternalSubtitleStream)) {
         this.selectedSubtitleStream = this.pendingExternalSubtitleStream
         this.pendingExternalSubtitleStream = null
         restoredExternalSelection = true
@@ -2967,16 +2979,31 @@ export default class extends Controller {
 
   renderSubtitleControls() {
     if (!this.hasSubtitleControlsTarget || !this.hasSubtitleOptionsTarget) return
-    if (this.subtitleTracks.length === 0) {
+    const liveAvailable = this.liveCaptionsAvailableValue === true
+    if (this.subtitleTracks.length === 0 && !liveAvailable) {
       this.subtitleControlsTarget.classList.add("hidden")
       return
     }
 
     this.subtitleControlsTarget.classList.remove("hidden")
     this.subtitleOptionsTarget.replaceChildren()
+    if (liveAvailable) {
+      const liveButton = this.trackOptionButton({
+        label: this.liveCaptionError ? "AI · Live English captions — delayed" : "AI · Live English captions",
+        selected: this.liveCaptionsEnabled,
+        datasetName: "liveCaptions",
+        datasetValue: "1",
+        action: "click->video-player#toggleLiveCaptions"
+      })
+      liveButton.classList.add("mb-1", "border", "border-indigo-400/30")
+      liveButton.title = this.liveCaptionError || "Generate English captions locally from the selected audio"
+      liveButton.setAttribute("aria-pressed", this.liveCaptionsEnabled ? "true" : "false")
+      this.subtitleOptionsTarget.appendChild(liveButton)
+    }
+
     this.subtitleOptionsTarget.appendChild(this.trackOptionButton({
       label: "Off",
-      selected: !this.selectedSubtitleStream,
+      selected: !this.selectedSubtitleStream && !this.liveCaptionsEnabled,
       datasetName: "subtitleStream",
       datasetValue: "",
       action: "click->video-player#selectSubtitleTrack"
@@ -2985,7 +3012,7 @@ export default class extends Controller {
     this.subtitleTracks.forEach((track) => {
       this.subtitleOptionsTarget.appendChild(this.trackOptionButton({
         label: track.label || "Subtitle",
-        selected: track.index?.toString() === this.selectedSubtitleStream,
+        selected: !this.liveCaptionsEnabled && track.index?.toString() === this.selectedSubtitleStream,
         datasetName: "subtitleStream",
         datasetValue: track.index,
         action: track.external === true
@@ -3021,9 +3048,46 @@ export default class extends Controller {
     this.restartPlaybackAt(targetSeconds)
   }
 
+  toggleLiveCaptions() {
+    if (!this.liveCaptionsAvailableValue) return
+    if (this.liveCaptionsEnabled) {
+      this.disableLiveCaptions()
+      this.closeTrackMenus()
+      return
+    }
+
+    const previousBurnedSubtitle = this.burnedSubtitleSelected()
+    const targetSeconds = Math.floor(this.currentPlaybackPosition())
+    this.selectedSubtitleStream = null
+    this.pendingExternalSubtitleStream = null
+    this.clearSubtitleCues()
+    this.liveCaptionsEnabled = true
+    this.liveCaptionError = null
+    this.subtitleRetryAfter = 0
+    this.renderSubtitleControls()
+    this.renderHdrControls()
+    this.closeTrackMenus()
+
+    // A bitmap subtitle is part of the encoded video and must be removed by
+    // rebuilding the source. Text tracks only need their cues cleared.
+    if (previousBurnedSubtitle) this.restartPlaybackAt(targetSeconds)
+    else this.restartLiveCaptionsAt(targetSeconds)
+  }
+
+  disableLiveCaptions({ render = true } = {}) {
+    if (!this.liveCaptionsEnabled && !this.liveCaptionAbortController) return
+
+    this.liveCaptionsEnabled = false
+    this.liveCaptionError = null
+    this.abortLiveCaptionLoad()
+    this.clearSubtitleCues()
+    if (render) this.renderSubtitleControls()
+  }
+
   selectSubtitleTrack(event) {
     const previousBurnedSubtitle = this.burnedSubtitleSelected()
     const selectedStream = event.currentTarget.dataset.subtitleStream || null
+    if (this.liveCaptionsEnabled) this.disableLiveCaptions({ render: false })
     if (selectedStream === this.selectedSubtitleStream) {
       this.closeTrackMenus()
       return
@@ -3358,6 +3422,154 @@ export default class extends Controller {
     this.subtitleAbortController = null
   }
 
+  restartLiveCaptionsAt(position) {
+    if (!this.liveCaptionsEnabled) return
+
+    this.abortLiveCaptionLoad()
+    this.clearSubtitleCues()
+    this.liveCaptionError = null
+    this.subtitleRetryAfter = 0
+    // Local translation runs below playback priority. While playing, begin a
+    // modest distance ahead so most of the first result is still upcoming;
+    // a paused viewer can prepare captions at the exact paused position.
+    const desiredStart = this.videoTarget.paused ? position : position + LIVE_CAPTION_START_LEAD_SECONDS
+    const rounding = this.videoTarget.paused ? Math.floor : Math.ceil
+    const firstWindow = Math.max(0,
+      rounding(desiredStart / LIVE_CAPTION_WINDOW_QUANTUM_SECONDS) * LIVE_CAPTION_WINDOW_QUANTUM_SECONDS)
+    this.liveCaptionInitialWindowStart = firstWindow
+    this.updateSubtitleButtonLabel()
+    if (this.videoTarget.paused) this.loadLiveCaptionWindow(firstWindow)
+  }
+
+  abortLiveCaptionLoad() {
+    this.liveCaptionLoadToken += 1
+    if (this.liveCaptionAbortController) this.liveCaptionAbortController.abort()
+    this.liveCaptionAbortController = null
+    this.subtitleLoading = false
+  }
+
+  async loadLiveCaptionWindow(position) {
+    if (!this.liveCaptionsEnabled || !this.hasLiveCaptionsUrlValue) return
+    const rawUrl = this.extractRawUrl()
+    if (!rawUrl) return
+
+    const windowStart = Math.max(0,
+      Math.floor(position / LIVE_CAPTION_WINDOW_QUANTUM_SECONDS) * LIVE_CAPTION_WINDOW_QUANTUM_SECONDS)
+    this.liveCaptionInitialWindowStart = null
+    this.abortLiveCaptionLoad()
+    const activeToken = this.liveCaptionLoadToken + 1
+    this.liveCaptionLoadToken = activeToken
+    const abortController = new AbortController()
+    this.liveCaptionAbortController = abortController
+    this.subtitleLoading = true
+    this.subtitlePendingWindowStart = windowStart
+    this.subtitlePendingWindowEnd = windowStart + LIVE_CAPTION_WINDOW_SECONDS
+    this.updateSubtitleButtonLabel()
+
+    const body = new URLSearchParams({ url: rawUrl, start_seconds: windowStart.toString() })
+    if (this.selectedAudioStream) body.set("audio_stream", this.selectedAudioStream)
+    const selectedAudioTrack = this.audioTracks.find((track) => track.index?.toString() === this.selectedAudioStream)
+    if (selectedAudioTrack?.language) body.set("source_language", selectedAudioTrack.language)
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content
+    let requestTimedOut = false
+    const timeout = setTimeout(() => {
+      requestTimedOut = true
+      abortController.abort()
+    }, 145000)
+
+    try {
+      const response = await fetch(this.liveCaptionsUrlValue, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {})
+        },
+        body: body.toString(),
+        signal: abortController.signal
+      })
+      if (activeToken !== this.liveCaptionLoadToken || !this.liveCaptionsEnabled) return
+
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        const retrySeconds = Math.max(2, Math.min(30, Number(payload.retry_after) || 5))
+        this.subtitleRetryAfter = Date.now() + retrySeconds * 1000
+        this.liveCaptionError = payload.error || "Live captions are temporarily unavailable"
+        this.liveCaptionInitialWindowStart = windowStart
+        return
+      }
+
+      this.liveCaptionError = null
+      this.subtitleRetryAfter = 0
+      this.subtitleWindowStart = Number(payload.window_start)
+      this.subtitleWindowEnd = Number(payload.window_end)
+      this.mergeLiveCaptionCues(payload.cues)
+      this.syncNativeFullscreenSubtitles()
+      this.updateSubtitleOverlay()
+    } catch (error) {
+      const retryableFailure = error?.name !== "AbortError" || requestTimedOut
+      if (retryableFailure && activeToken === this.liveCaptionLoadToken) {
+        this.liveCaptionError = requestTimedOut
+          ? "Live captions timed out while playback stayed active"
+          : "Live captions are temporarily unavailable"
+        this.liveCaptionInitialWindowStart = windowStart
+        this.subtitleRetryAfter = Date.now() + 5000
+      }
+    } finally {
+      clearTimeout(timeout)
+      if (activeToken === this.liveCaptionLoadToken) {
+        this.liveCaptionAbortController = null
+        this.subtitleLoading = false
+        this.subtitlePendingWindowStart = null
+        this.subtitlePendingWindowEnd = null
+        this.renderSubtitleControls()
+      }
+    }
+  }
+
+  ensureLiveCaptionWindow(currentPosition) {
+    if (!this.liveCaptionsEnabled || this.subtitleLoading || Date.now() < this.subtitleRetryAfter) return
+    if (!this.videoTarget.paused && (this.isSeeking || this.isStalled ||
+        (this.playbackStarted && this.bufferedAheadOfCurrent() < LIVE_CAPTION_MIN_BUFFER_SECONDS))) return
+
+    let requestedPosition = null
+    const missingWindow = this.subtitleWindowStart === null || this.subtitleWindowEnd === null
+    const farBeforeWindow = !missingWindow && currentPosition < this.subtitleWindowStart - LIVE_CAPTION_WINDOW_SECONDS
+    if (missingWindow || farBeforeWindow || currentPosition >= this.subtitleWindowEnd) {
+      requestedPosition = this.liveCaptionInitialWindowStart ?? currentPosition
+      this.liveCaptionInitialWindowStart = null
+    } else if (currentPosition >= this.subtitleWindowStart && this.subtitleWindowEnd - currentPosition <= LIVE_CAPTION_PREFETCH_SECONDS) {
+      // Future audio extraction is lower priority than uninterrupted playback.
+      if (!this.videoTarget.paused && this.bufferedAheadOfCurrent() < LIVE_CAPTION_MIN_BUFFER_SECONDS) return
+      requestedPosition = this.subtitleWindowStart + LIVE_CAPTION_WINDOW_STRIDE_SECONDS
+    }
+
+    if (requestedPosition !== null) this.loadLiveCaptionWindow(requestedPosition)
+  }
+
+  mergeLiveCaptionCues(rawCues) {
+    const cutoff = Math.max(0, this.currentPlaybackPosition() - 120)
+    const merged = this.subtitleCues.filter((cue) => cue.end >= cutoff)
+    const incomingCues = Array.isArray(rawCues) ? rawCues : []
+    incomingCues.forEach((rawCue) => {
+      const cue = {
+        start: Number(rawCue.start),
+        end: Number(rawCue.end),
+        text: rawCue.text?.toString().replace(/\s+/g, " ").trim()
+      }
+      if (!Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end <= cue.start || !cue.text) return
+
+      const identity = cue.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+      const duplicate = merged.some((existing) => {
+        const existingIdentity = existing.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+        const overlaps = existing.start < cue.end && cue.start < existing.end
+        return identity === existingIdentity && (overlaps || Math.abs(existing.start - cue.start) <= 3)
+      })
+      if (!duplicate) merged.push(cue)
+    })
+    this.subtitleCues = merged.sort((left, right) => left.start - right.start || left.end - right.end)
+  }
+
   clearSubtitleCues() {
     // A cleared cue buffer cannot keep claiming its old window is loaded.
     // Cancel stale responses and force the next overlay update to fetch the
@@ -3367,7 +3579,7 @@ export default class extends Controller {
     this.subtitlePlaybackHoldToken = null
     this.subtitleLoadToken += 1
     this.abortSubtitleLoad()
-    this.subtitleLoading = false
+    this.subtitleLoading = Boolean(this.liveCaptionsEnabled && this.liveCaptionAbortController !== null)
     this.resetSubtitleWindow()
     this.subtitleCues = []
     if (this.nativeFullscreenActive) this.syncNativeFullscreenSubtitles()
@@ -3537,6 +3749,10 @@ export default class extends Controller {
   }
 
   ensureSubtitleWindow(currentPos) {
+    if (this.liveCaptionsEnabled) {
+      this.ensureLiveCaptionWindow(currentPos)
+      return
+    }
     if (!this.textSubtitleSelected() || this.subtitleLoading) return
     if (this.subtitleRetryAfter && Date.now() < this.subtitleRetryAfter) return
 
@@ -3571,6 +3787,12 @@ export default class extends Controller {
   updateSubtitleButtonLabel() {
     if (!this.hasSubtitleButtonLabelTarget) return
 
+    if (this.liveCaptionsEnabled) {
+      const preparing = this.subtitleLoading || this.liveCaptionInitialWindowStart !== null
+      this.subtitleButtonLabelTarget.textContent = this.liveCaptionError ? "AI!" : (preparing ? "AI…" : "AI CC")
+      return
+    }
+
     const selectedTrack = this.subtitleTracks.find((track) => track.index?.toString() === this.selectedSubtitleStream)
     this.subtitleButtonLabelTarget.textContent = selectedTrack?.language_label || "CC"
   }
@@ -3583,7 +3805,7 @@ export default class extends Controller {
   toggleSubtitleMenu(event) {
     event.stopPropagation()
     this.toggleTrackMenu(this.subtitleMenuTarget, this.hasAudioMenuTarget ? this.audioMenuTarget : null)
-    if (!this.subtitleMenuTarget.classList.contains("hidden")) this.prefetchLikelyExternalSubtitle()
+    if (!this.liveCaptionsEnabled && !this.subtitleMenuTarget.classList.contains("hidden")) this.prefetchLikelyExternalSubtitle()
   }
 
   toggleTrackMenu(menu, otherMenu) {
@@ -3724,7 +3946,7 @@ export default class extends Controller {
   }
 
   syncNativeFullscreenSubtitles() {
-    if (!this.nativeFullscreenActive || !this.textSubtitleSelected() || this.subtitleCues.length === 0) {
+    if (!this.nativeFullscreenActive || (!this.textSubtitleSelected() && !this.liveCaptionsEnabled) || this.subtitleCues.length === 0) {
       if (this.nativeFullscreenCueSignature !== null) this.clearNativeFullscreenSubtitles()
       return
     }
@@ -3749,8 +3971,8 @@ export default class extends Controller {
       try {
         this.nativeFullscreenTextTrack = this.videoTarget.addTextTrack(
           "subtitles",
-          selectedTrack?.label || "StreamVault Subtitles",
-          selectedTrack?.language?.toLowerCase() || ""
+          this.liveCaptionsEnabled ? "Live English captions" : (selectedTrack?.label || "StreamVault Subtitles"),
+          this.liveCaptionsEnabled ? "en" : (selectedTrack?.language?.toLowerCase() || "")
         )
       } catch (error) {
         console.warn("Native subtitle track setup failed:", error)
@@ -4288,6 +4510,8 @@ export default class extends Controller {
   }
 
   restartPlaybackAt(targetSeconds) {
+    if (this.liveCaptionsEnabled) this.restartLiveCaptionsAt(targetSeconds)
+
     if (this.isHls()) {
       this.isSeeking = true
       this.showSeekingOverlay("Seeking...")
