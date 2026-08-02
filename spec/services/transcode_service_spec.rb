@@ -94,7 +94,7 @@ RSpec.describe TranscodeService do
       expect(described_class.hdr_passthrough_video?(stream)).to be(true)
     end
 
-    it "passes through Dolby Vision profile 8 when it has an HDR10 fallback layer" do
+    it "detects Dolby Vision profile 8 but keeps it off the generic mobile passthrough path" do
       output = {
         "streams" => [
           {
@@ -119,7 +119,7 @@ RSpec.describe TranscodeService do
         hdr_type: "dolby_vision", dolby_vision_profile: 8,
         dolby_vision_compatibility_id: 1
       )
-      expect(described_class.hdr_passthrough_video?(stream)).to be(true)
+      expect(described_class.hdr_passthrough_video?(stream)).to be(false)
     end
 
     it "does not pass through Dolby Vision without an HDR fallback layer" do
@@ -506,6 +506,34 @@ RSpec.describe TranscodeService do
       )
     end
 
+    it "normalizes ordinary SDR transcodes to limited-range BT.709" do
+      output = {
+        "streams" => [
+          {
+            "codec_name" => "vp9", "width" => 1280, "height" => 720,
+            "pix_fmt" => "yuvj420p", "color_range" => "pc"
+          }
+        ]
+      }.to_json
+      allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/full-range-sdr.webm",
+        headers: {}, start_seconds: 0
+      )
+
+      video_filter = command.fetch(command.index("-vf") + 1)
+      expect(video_filter).to include(
+        "in_color_matrix=auto", "out_color_matrix=bt709",
+        "in_range=auto", "out_range=tv"
+      )
+      expect(argument_pairs(command)).to include(
+        [ "-color_primaries", "bt709" ], [ "-color_trc", "bt709" ],
+        [ "-colorspace", "bt709" ], [ "-color_range", "tv" ],
+        [ "-x264-params", described_class::X264_BT709_PARAMS ]
+      )
+    end
+
     it "transcodes when video probing fails closed" do
       allow(described_class).to receive(:capture_command).and_return(capture_result("", success: false))
 
@@ -580,9 +608,7 @@ RSpec.describe TranscodeService do
         subtitle_stream: "4"
       )
 
-      subtitle_filter = "[0:v:0][0:s:0]overlay," \
-        "scale=w='min(1920,iw)':h='min(1080,ih)':" \
-        "force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p[v]"
+      subtitle_filter = "[0:v:0][0:s:0]overlay,#{described_class::SAFE_VIDEO_FILTER}[v]"
 
       expect(argument_pairs(command)).to include([ "-filter_complex", subtitle_filter ])
       expect(argument_pairs(command)).to include([ "-map", "[v]" ])

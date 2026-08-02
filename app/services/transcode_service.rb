@@ -24,7 +24,7 @@ require "digest"
 class TranscodeService
   FFMPEG_PATH = "ffmpeg"
   FFPROBE_PATH = "ffprobe"
-  FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
+  FMP4_FLAGS = "+frag_keyframe+empty_moov+default_base_moof+write_colr"
   # Maximum bytes of stderr to include in error messages.
   STDERR_MAX_BYTES = 4096
   # Four-second HLS segments reduce mux/playlist churn and give native clients
@@ -73,8 +73,17 @@ class TranscodeService
   # pushing 4K transcodes onto veryfast.
   MAX_VERYFAST_VIDEO_WIDTH = 1920
   MAX_VERYFAST_VIDEO_HEIGHT = 1080
+  # Normalize every decoded SDR output to the browser-safe BT.709 limited-range
+  # contract. Mobile decoders otherwise guess BT.601/BT.709 when source tags
+  # are absent, and full-range sources can look washed out after H.264 encode.
   SAFE_VIDEO_FILTER =
-    "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+    "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:" \
+    "in_color_matrix=auto:out_color_matrix=bt709:in_range=auto:out_range=tv,format=yuv420p"
+  SDR_COLOR_METADATA_ARGS = [
+    "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-colorspace", "bt709", "-color_range", "tv"
+  ].freeze
+  X264_BT709_PARAMS = "colorprim=bt709:transfer=bt709:colormatrix=bt709:fullrange=off"
   # HDR sources must be converted through linear light before producing SDR.
   # Simply forcing a PQ/HLG source to yuv420p leaves the PQ transfer function
   # in SDR output and produces the familiar dim, desaturated picture.
@@ -981,7 +990,14 @@ class TranscodeService
 
     if defined?(Rails)
       encoder = video_args.each_cons(2).find { |k, _| k == "-c:v" }&.last || "copy"
-      Rails.logger.info("[Transcode] codec=#{video_stream[:codec_name]} #{video_stream[:width]}x#{video_stream[:height]} encoder=#{encoder}")
+      Rails.logger.info(
+        "[Transcode] codec=#{video_stream[:codec_name]} #{video_stream[:width]}x#{video_stream[:height]} " \
+        "encoder=#{encoder} hdr=#{video_stream[:hdr_type].presence || 'none'} " \
+        "color=#{video_stream[:color_space].presence || 'unknown'}/" \
+        "#{video_stream[:color_transfer].presence || 'unknown'}/" \
+        "#{video_stream[:color_primaries].presence || 'unknown'} " \
+        "range=#{video_stream[:color_range].presence || 'unknown'}"
+      )
     end
 
     cmd = [ FFMPEG_PATH, "-loglevel", "error" ]
@@ -1047,9 +1063,12 @@ class TranscodeService
     end
     cmd += [ "-sn", "-dn" ]
     cmd += video_args
-    if hdr_video?(video_stream) && !copy_video
-      cmd += [ "-color_primaries", "bt709", "-color_trc", "bt709",
-               "-colorspace", "bt709", "-color_range", "tv" ]
+    unless copy_video
+      cmd += SDR_COLOR_METADATA_ARGS
+      # FFmpeg's generic color flags alone do not reliably write H.264 VUI
+      # primaries/transfer fields. x264 needs the same contract explicitly,
+      # especially for MPEG-TS where there is no MP4 colr atom fallback.
+      cmd += [ "-x264-params", X264_BT709_PARAMS ] if video_args.include?("libx264")
     end
     # Apple platforms require an hvc1 sample entry for copied HEVC in MP4/HLS.
     copied_hevc = copy_video && HDR_PASSTHROUGH_CODECS.include?(video_stream[:codec_name].to_s)
@@ -1616,16 +1635,11 @@ class TranscodeService
   public_class_method :hdr_video?
 
   def self.hdr_passthrough_video?(stream)
-    hdr_type = stream[:hdr_type].to_s
-    # Dolby Vision profile 8 hybrid streams advertise a backward-compatible
-    # HDR10 (compatibility 1) or HLG (compatibility 4) base layer. Passing that
-    # HEVC through lets unsupported DV clients display the fallback HDR layer
-    # instead of forcing a CPU-heavy 4K tone-map. Profile 5/compatibility 0 has
-    # no fallback and must still be transcoded.
-    hdr_format_supported = %w[hdr10 hlg].include?(hdr_type) ||
-      (hdr_type == "dolby_vision" && [ 1, 4 ].include?(stream[:dolby_vision_compatibility_id].to_i))
-
-    hdr_video?(stream) && hdr_format_supported &&
+    # Dolby Vision requires profile/container-specific signaling that the
+    # generic fMP4 remux path does not write reliably. Even profile 8 fallback
+    # streams can trigger incorrect colors on mobile, so only plain HDR10/HLG
+    # are eligible for passthrough; DV is decoded from its fallback base layer.
+    hdr_video?(stream) && %w[hdr10 hlg].include?(stream[:hdr_type].to_s) &&
       HDR_PASSTHROUGH_CODECS.include?(stream[:codec_name].to_s) &&
       stream[:bit_depth].to_i == 10
   end
