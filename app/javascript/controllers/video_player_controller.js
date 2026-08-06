@@ -35,7 +35,14 @@ const HLS_UNSUPPORTED_RECOVERY_DELAY_MS = 1500
 // transcode. This preserves most of the startup latency win without the
 // four-second cushion that proved too shallow for 4K tone mapping.
 const INITIAL_MSE_AHEAD_SECONDS = 8
-const MSE_APPEND_BACKLOG_HIGH_WATER = 8
+// Keep the TV's MediaSource byte quota well below its limit. ffmpeg can
+// produce ~3x realtime, so bounding only the JS append queue still lets the
+// SourceBuffer grow until Samsung/Chromium throws QuotaExceededError.
+const MSE_APPEND_BACKLOG_HIGH_WATER = 3
+const MSE_FORWARD_BUFFER_HIGH_WATER_SECONDS = 30
+const MSE_RETAIN_BEHIND_SECONDS = 15
+const MSE_QUOTA_RETRY_MS = 500
+const RECOVERY_HEALTHY_PROGRESS_SECONDS = 5
 const BUFFER_AHEAD_MAX_WAIT_MS = 15000
 // After a stall, rebuild a meaningful cushion before resuming so a heavy
 // transcode does not enter a rapid stall/resume loop.
@@ -167,6 +174,7 @@ export default class extends Controller {
     this.bufferQueue = []
     this.bufferAppending = false
     this.bufferEvicting = false
+    this.mseQuotaRetryTimer = null
     this.mseBacklogWaiters = []
     this.pendingSeekSeconds = null
     this.stallWatchdogTimer = null
@@ -177,7 +185,9 @@ export default class extends Controller {
     this.lastBufferDataTime = 0
     this.lastProgressEventTime = 0
     this.progressWatchdogArmed = false
+    this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
+    this.streamRecoveryStartPosition = null
     this.playbackStarted = false
     this.isStalled = false
     // True when the user deliberately paused (button/spacebar). The
@@ -607,9 +617,11 @@ export default class extends Controller {
     this.fmp4BufferSize = 0
     this.bufferAppending = false
     this.bufferEvicting = false
+    if (this.mseQuotaRetryTimer) clearTimeout(this.mseQuotaRetryTimer)
+    this.mseQuotaRetryTimer = null
     const waiters = this.mseBacklogWaiters || []
     this.mseBacklogWaiters = []
-    waiters.forEach((resolve) => resolve())
+    waiters.forEach((waiter) => waiter.resolve(false))
     return this.msePipelineGeneration
   }
 
@@ -1425,23 +1437,39 @@ export default class extends Controller {
     }
   }
 
+  msePullCapacityAvailable() {
+    const backlog = this.bufferQueue || (this.bufferQueue = [])
+    if (backlog.length >= MSE_APPEND_BACKLOG_HIGH_WATER) return false
+    if (!this.playbackStarted) return true
+    return this.bufferedAheadOfCurrent() < MSE_FORWARD_BUFFER_HIGH_WATER_SECONDS
+  }
+
   waitForMseBacklogCapacity(generation, mediaSource, sourceBuffer) {
     if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return Promise.resolve(false)
-    const backlog = this.bufferQueue || (this.bufferQueue = [])
-    if (backlog.length < MSE_APPEND_BACKLOG_HIGH_WATER) return Promise.resolve(true)
+    if (this.msePullCapacityAvailable()) return Promise.resolve(true)
+
     return new Promise((resolve) => {
       const waiters = this.mseBacklogWaiters || (this.mseBacklogWaiters = [])
-      waiters.push(() => resolve(
-        this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) &&
-        this.bufferQueue.length < MSE_APPEND_BACKLOG_HIGH_WATER
-      ))
+      waiters.push({ generation, mediaSource, sourceBuffer, resolve })
     })
   }
 
+  // A waiter can be blocked either by queued append work or by a deep
+  // forward buffer. updateend releases the former; timeupdate releases the
+  // latter as playback consumes data. Stale pipelines are resolved false so
+  // their fetch loops exit without touching the replacement source.
   releaseMseBacklogWaiters() {
     const waiters = this.mseBacklogWaiters || []
     this.mseBacklogWaiters = []
-    waiters.forEach((resolve) => resolve())
+    waiters.forEach((waiter) => {
+      if (!this.isMsePipelineCurrent(waiter.generation, waiter.mediaSource, waiter.sourceBuffer)) {
+        waiter.resolve(false)
+      } else if (this.msePullCapacityAvailable()) {
+        waiter.resolve(true)
+      } else {
+        this.mseBacklogWaiters.push(waiter)
+      }
+    })
   }
 
   // ── Stall watchdog ────────────────────────────────────────────────
@@ -1572,11 +1600,13 @@ export default class extends Controller {
       // Re-check before firing recovery: the video may have resumed
       // from buffer without firing "playing" (the media element
       // doesn't always emit it when transitioning between buffered
-      // ranges). If there's buffer ahead and the video isn't paused,
-      // the stall resolved — don't reconnect.
-      if (!this.videoTarget.paused && this.hasBufferedAhead()) {
-        this.hideSeekingOverlay()
-        this.startProgressWatchdog()
+      // ranges). Buffered media is not a stream failure, including while
+      // playback is temporarily paused for subtitle setup or decoder work.
+      if (this.hasBufferedAhead()) {
+        if (!this.videoTarget.paused) {
+          this.hideSeekingOverlay()
+          this.startProgressWatchdog()
+        }
         return
       }
       this.handleStreamStall()
@@ -1812,7 +1842,9 @@ export default class extends Controller {
 
     this.streamRecoveryAttempts += 1
     this.streamRecoveryActive = true
+    this.streamRecoveryStartPosition = this.currentPlaybackPosition()
     console.warn(`Stream stalled — recovering (attempt ${this.streamRecoveryAttempts}/${STREAM_MAX_RECOVERY_ATTEMPTS})`)
+    this.showBufferingOverlay()
     this.reportStall("stall")
 
     // For direct play (including remux), restart the same path — don't
@@ -1835,6 +1867,7 @@ export default class extends Controller {
   // start_seconds so ffmpeg re-seeks and produces data from there.
   reconnectDirectPlay() {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
+    this.streamRecoveryStartPosition = targetSeconds
     this.startSecondsValue = targetSeconds
     this.element.dataset.videoPlayerStartSecondsValue = targetSeconds.toString()
     this.streamRecoveryActive = false
@@ -1856,6 +1889,15 @@ export default class extends Controller {
       // via Range requests, so just reload and seek to the target.
       console.log(`[Player] Reconnecting direct play at ${targetSeconds}s`)
       this.videoTarget.src = this.directStreamUrlValue
+    }
+
+    // Reloading the same native URL resets currentTime to zero on several
+    // TV browsers. Seek after metadata so the reload issues a fresh Range
+    // request at the stalled position, exactly like a successful manual seek.
+    if (!this.isRemuxDirectPlay() && targetSeconds > 0) {
+      this.videoTarget.addEventListener("loadedmetadata", () => {
+        this.videoTarget.currentTime = targetSeconds
+      }, { once: true })
     }
 
     this.videoTarget.load()
@@ -2011,6 +2053,7 @@ export default class extends Controller {
   // further recovery if the reconnect fetch produces no data (the
   async reconnectFromCurrentPosition() {
     const targetSeconds = Math.floor(this.currentPlaybackPosition())
+    this.streamRecoveryStartPosition = targetSeconds
     const savedAttempts = this.streamRecoveryAttempts
     const recoveryGeneration = this.msePipelineGeneration
     this.invalidateMsePipeline()
@@ -2197,9 +2240,12 @@ export default class extends Controller {
         if (this.bufferEvicting) return
         this.bufferEvicting = true
         if (!this.evictOldBuffer(generation, mediaSource, sourceBuffer)) {
+          // A full SourceBuffer is backpressure, not a dead stream. Keep the
+          // rejected head fragment and retry after playback frees quota.
+          // Reconnecting here used to discard 50–130s of healthy buffered
+          // video and eventually tell the viewer to seek manually.
           this.bufferEvicting = false
-          console.warn("appendBuffer quota exceeded with no retained data to evict")
-          this.handleStreamStall()
+          this.scheduleMseQuotaRetry(generation, mediaSource, sourceBuffer)
         }
       } else {
         // Any other append error means this MSE pipeline is broken. The
@@ -2208,6 +2254,15 @@ export default class extends Controller {
         this.handleStreamStall()
       }
     }
+  }
+
+  scheduleMseQuotaRetry(generation, mediaSource, sourceBuffer) {
+    if (this.mseQuotaRetryTimer) return
+    this.mseQuotaRetryTimer = setTimeout(() => {
+      this.mseQuotaRetryTimer = null
+      if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer)) return
+      this.flushBufferQueue(generation, mediaSource, sourceBuffer)
+    }, MSE_QUOTA_RETRY_MS)
   }
 
   onBufferUpdateEnd(generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
@@ -2323,7 +2378,7 @@ export default class extends Controller {
 
   evictOldBuffer(generation = this.msePipelineGeneration, mediaSource = this.mediaSource, sourceBuffer = this.sourceBuffer) {
     if (!this.isMsePipelineCurrent(generation, mediaSource, sourceBuffer) || sourceBuffer.updating) return false
-    const evictBefore = this.videoTarget.currentTime - 30
+    const evictBefore = this.videoTarget.currentTime - MSE_RETAIN_BEHIND_SECONDS
     if (evictBefore <= 0) return false
     for (let i = 0; i < sourceBuffer.buffered.length; i++) {
       const start = sourceBuffer.buffered.start(i)
@@ -4622,6 +4677,31 @@ export default class extends Controller {
     // there isn't.  This is the #1 cause of "buffering happens when the
     // timeline shows lots of buffer ahead" — the timeline was lying.
     this.updateBufferBar()
+
+    // Resume a fetch paused at the forward-buffer high-water mark as the
+    // playhead consumes data. This keeps transcoding near realtime instead
+    // of filling the TV's finite MediaSource quota.
+    this.releaseMseBacklogWaiters()
+
+    // Some TV browsers advance currentTime after a source rebuild without
+    // emitting another "playing" event. Treat five seconds of real progress
+    // as a healthy recovery so unrelated later stalls get a fresh retry
+    // budget instead of ending with a manual-seek prompt.
+    if (this.streamRecoveryAttempts > 0 &&
+        Number.isFinite(this.streamRecoveryStartPosition) &&
+        currentPos >= this.streamRecoveryStartPosition + RECOVERY_HEALTHY_PROGRESS_SECONDS) {
+      this.streamRecoveryAttempts = 0
+      this.streamRecoveryActive = false
+      this.streamRecoveryStartPosition = null
+      if (!this.videoTarget.paused && !this.userPaused && !this.isSeeking) {
+        clearTimeout(this.bufferingOverlayTimer)
+        this.bufferingOverlayTimer = null
+        this.isStalled = false
+        this.clearStallWatchdog()
+        this.startProgressWatchdog()
+        this.hideSeekingOverlay()
+      }
+    }
 
     // Safety net: if the "Buffering..." overlay is stuck (isStalled=true)
     // but currentTime is actively advancing (video is playing), the stall

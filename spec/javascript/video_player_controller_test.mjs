@@ -1595,7 +1595,7 @@ test("MSE retries the rejected quota fragment after eviction and bounds reader b
   assert.equal(attempts[1], fragment)
   assert.equal(player.bufferQueue.length, 0)
 
-  player.bufferQueue = Array.from({ length: 8 }, () => fragment)
+  player.bufferQueue = Array.from({ length: 3 }, () => fragment)
   const capacity = player.waitForMseBacklogCapacity(1, mediaSource, sourceBuffer)
   let capacityResolved = false
   capacity.then(() => { capacityResolved = true })
@@ -1605,6 +1605,112 @@ test("MSE retries the rejected quota fragment after eviction and bounds reader b
   player.bufferQueue.pop()
   player.releaseMseBacklogWaiters()
   assert.equal(await capacity, true)
+})
+
+test("MSE backpressures a deep forward buffer until playback consumes it", async () => {
+  const player = new VideoPlayerController()
+  const mediaSource = {}
+  let bufferEnd = 35
+  const sourceBuffer = {
+    buffered: { length: 1, start: () => 0, end: () => bufferEnd }
+  }
+  player.msePipelineGeneration = 1
+  player.mediaSource = mediaSource
+  player.sourceBuffer = sourceBuffer
+  player.directPlayActive = false
+  player.hlsPlaybackActive = false
+  player.hlsSessionId = null
+  player.playbackStarted = true
+  player.bufferQueue = []
+  player.videoTarget = { currentTime: 0 }
+
+  const capacity = player.waitForMseBacklogCapacity(1, mediaSource, sourceBuffer)
+  let capacityResolved = false
+  capacity.then(() => { capacityResolved = true })
+  await Promise.resolve()
+  assert.equal(capacityResolved, false)
+
+  bufferEnd = 29
+  player.releaseMseBacklogWaiters()
+  assert.equal(await capacity, true)
+})
+
+test("MSE quota pressure waits and retries without declaring a stream stall", () => {
+  const player = new VideoPlayerController()
+  const previousSetTimeout = context.setTimeout
+  const mediaSource = {}
+  const fragment = new Uint8Array([1, 2, 3]).buffer
+  let appendAttempts = 0
+  let retry
+  let recoveries = 0
+  const sourceBuffer = {
+    updating: false,
+    buffered: { length: 1, start: () => 0, end: () => 20 },
+    appendBuffer() {
+      appendAttempts += 1
+      if (appendAttempts === 1) {
+        const error = new Error("quota")
+        error.name = "QuotaExceededError"
+        throw error
+      }
+    },
+    remove() { throw new Error("no old buffer should be evicted") }
+  }
+  player.msePipelineGeneration = 1
+  player.mediaSource = mediaSource
+  player.sourceBuffer = sourceBuffer
+  player.directPlayActive = false
+  player.hlsPlaybackActive = false
+  player.hlsSessionId = null
+  player.videoTarget = { currentTime: 10 }
+  player.bufferQueue = [fragment]
+  player.handleStreamStall = () => { recoveries += 1 }
+  context.setTimeout = (callback) => { retry = callback; return 1 }
+
+  try {
+    player.flushBufferQueue(1, mediaSource, sourceBuffer)
+    assert.equal(recoveries, 0)
+    assert.equal(player.bufferQueue[0], fragment)
+    assert.equal(typeof retry, "function")
+
+    retry()
+    assert.equal(appendAttempts, 2)
+    assert.equal(player.bufferQueue.length, 0)
+    assert.equal(recoveries, 0)
+  } finally {
+    context.setTimeout = previousSetTimeout
+  }
+})
+
+test("native direct recovery seeks the reloaded URL back to the stalled position", () => {
+  const player = new VideoPlayerController()
+  let loadedMetadata
+  let loads = 0
+  player.videoTarget = {
+    currentTime: 125.8,
+    src: "",
+    addEventListener(name, callback) {
+      if (name === "loadedmetadata") loadedMetadata = callback
+    },
+    load() { loads += 1; this.currentTime = 0 },
+    play: () => Promise.resolve()
+  }
+  player.element = { dataset: {} }
+  player.directPlayActive = true
+  player.remuxDirectPlay = false
+  player.directStreamUrlValue = "/direct_stream/movie"
+  player.showBufferingOverlay = () => {}
+  player.clearStallWatchdog = () => {}
+  player.stopProgressWatchdog = () => {}
+  player.startStallWatchdog = () => {}
+
+  player.reconnectDirectPlay()
+  assert.equal(loads, 1)
+  assert.equal(player.videoTarget.currentTime, 0)
+  assert.equal(typeof loadedMetadata, "function")
+
+  loadedMetadata()
+  assert.equal(player.videoTarget.currentTime, 125)
 })
 
 test("MSE starts at an eight second cushion and preserves pause and subtitle-hold guards", () => {
@@ -1715,6 +1821,31 @@ test("MSE recovery budget survives raw network data and resets only when playbac
   } finally {
     context.fetch = previousFetch
   }
+})
+
+test("verified playback progress restores the automatic recovery budget", () => {
+  const player = new VideoPlayerController()
+  player.currentPlaybackPosition = () => 105
+  player.effectiveDuration = () => 0
+  player.currentTimeTarget = { textContent: "" }
+  player.videoTarget = { paused: false }
+  player.updateSubtitleOverlay = () => {}
+  player.updateBufferBar = () => {}
+  player.releaseMseBacklogWaiters = () => {}
+  player.clearStallWatchdog = () => {}
+  player.startProgressWatchdog = () => {}
+  player.hideSeekingOverlay = () => {}
+  player.streamRecoveryAttempts = 3
+  player.streamRecoveryActive = false
+  player.streamRecoveryStartPosition = 100
+  player.isDragging = false
+  player.isStalled = false
+
+  player.onTimeUpdate()
+
+  assert.equal(player.streamRecoveryAttempts, 0)
+  assert.equal(player.streamRecoveryActive, false)
+  assert.equal(player.streamRecoveryStartPosition, null)
 })
 
 test("HLS rate limits honor Retry-After and retry the current operation", async () => {
