@@ -10,26 +10,43 @@ class ContentStreamingService
     @providers = StreamProvider.providers(rd_api_key: user.realdebrid_api_key)
   end
 
-  def start_stream(imdb_id, type, season: nil, episode: nil, source_mode: nil)
-    mode = effective_source_mode(source_mode)
+  def start_stream(imdb_id, type, season: nil, episode: nil, source_mode: nil,
+                   preferred_source: nil, preferred_info_hash: nil, preferred_file_idx: nil)
+    preferred_source = normalized_source(preferred_source)
+    preferred_info_hash = normalized_info_hash(preferred_info_hash)
+    mode = effective_source_mode(source_mode, preferred_source: preferred_source)
     if !@user.has_realdebrid_key? && !LocalTorrentService.enabled?
       return ServiceResult.failure("RealDebrid API key not configured and local torrent playback is unavailable")
     end
 
     if mode == "local"
-      return ServiceResult.failure("Local torrent playback is unavailable") unless LocalTorrentService.enabled?
-      local_result = fetch_local_streams(imdb_id, type, season: season, episode: episode)
-      return local_result if local_result.failure?
-      return ServiceResult.failure("No local torrent sources are available for this content") if local_result.data.empty?
+      if LocalTorrentService.enabled?
+        local_result = start_local_request(
+          imdb_id,
+          type,
+          season: season,
+          episode: episode,
+          preferred_source: preferred_source,
+          preferred_info_hash: preferred_info_hash,
+          preferred_file_idx: preferred_file_idx
+        )
+        return local_result unless automatic_source?(source_mode) && @user.has_realdebrid_key? && local_result.failure?
+      elsif !automatic_source?(source_mode) || !@user.has_realdebrid_key?
+        return ServiceResult.failure("Local torrent playback is unavailable")
+      end
 
-      return start_local_stream(local_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
+      # A saved local release may temporarily have no reachable peers, use a
+      # v2 hash the local engine cannot consume, or local playback may have
+      # since been disabled. Automatic mode tries the same identity via RD.
+      Rails.logger.warn("[ContentStreamingService] Preferred local source is unavailable for #{imdb_id}; trying RealDebrid")
     end
 
     return ServiceResult.failure("RealDebrid API key not configured") unless @user.has_realdebrid_key?
 
     streams_result = fetch_streams(imdb_id, type, season: season, episode: episode)
     rd_result = if streams_result.success? && streams_result.data.any?
-      start_realdebrid_stream(streams_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
+      streams = prioritize_stream_identity(streams_result.data, preferred_info_hash, preferred_file_idx)
+      start_realdebrid_stream(streams, imdb_id: imdb_id, type: type, season: season, episode: episode)
     else
       ServiceResult.failure(streams_result.failure? ? streams_result.error_message : "No streams available through RealDebrid")
     end
@@ -41,7 +58,9 @@ class ContentStreamingService
     local_result = fetch_local_streams(imdb_id, type, season: season, episode: episode)
     return rd_result if local_result.failure? || local_result.data.empty?
 
-    start_local_stream(local_result.data, imdb_id: imdb_id, type: type, season: season, episode: episode)
+    streams = prioritize_stream_identity(local_result.data, preferred_info_hash, preferred_file_idx)
+    fallback_result = start_local_stream(streams, imdb_id: imdb_id, type: type, season: season, episode: episode)
+    fallback_result.success? ? fallback_result : rd_result
   end
 
   # Resolve a specific stream chosen by the user (via resolve_url).
@@ -62,7 +81,12 @@ class ContentStreamingService
 
     return ServiceResult.failure("RealDebrid API key not configured") unless @user.has_realdebrid_key?
 
-    selected_stream = { resolve_url: resolve_url, filename: filename }
+    selected_stream = {
+      resolve_url: resolve_url,
+      filename: filename,
+      info_hash: normalized_info_hash(info_hash),
+      file_idx: normalized_file_idx(file_idx)
+    }
     result = resolve_stream(selected_stream)
 
     if result
@@ -98,18 +122,53 @@ class ContentStreamingService
     @user.streaming_preference == "automatic" && (requested.blank? || requested == "automatic")
   end
 
-  def effective_source_mode(requested)
+  def effective_source_mode(requested, preferred_source: nil)
     # Forced preferences are policy, not UI defaults: a crafted source_mode
     # parameter must not bypass them. Automatic is the only mode that allows
-    # an explicit per-stream Local choice.
+    # an explicit per-stream Local choice or a saved source preference.
     case @user.streaming_preference
     when "local"
       "local"
     when "realdebrid"
       "realdebrid"
     else
-      requested == "local" ? "local" : (@user.has_realdebrid_key? ? "realdebrid" : "local")
+      return "local" if requested == "local"
+      return "local" if requested.blank? && preferred_source == "local"
+
+      @user.has_realdebrid_key? ? "realdebrid" : "local"
     end
+  end
+
+  def start_local_request(imdb_id, type, season:, episode:, preferred_source:, preferred_info_hash:, preferred_file_idx:)
+    return ServiceResult.failure("Local torrent playback is unavailable") unless LocalTorrentService.enabled?
+
+    # A TorrServer URL and lease are ephemeral, but the torrent hash and file
+    # index are stable. Resume that identity directly instead of asking a
+    # provider to return and re-rank the release again.
+    if preferred_source == "local" && preferred_info_hash
+      return ServiceResult.failure("Saved torrent identity is unsupported by local playback") unless local_info_hash?(preferred_info_hash)
+
+      result = LocalTorrentService.new(user: @user).start(
+        info_hash: preferred_info_hash,
+        file_idx: preferred_file_idx,
+        title: nil
+      )
+      return local_content_result(
+        result,
+        stream: { info_hash: preferred_info_hash, file_idx: preferred_file_idx },
+        imdb_id: imdb_id,
+        type: type,
+        season: season,
+        episode: episode
+      )
+    end
+
+    local_result = fetch_local_streams(imdb_id, type, season: season, episode: episode)
+    return local_result if local_result.failure?
+    return ServiceResult.failure("No local torrent sources are available for this content") if local_result.data.empty?
+
+    streams = prioritize_stream_identity(local_result.data, preferred_info_hash, preferred_file_idx)
+    start_local_stream(streams, imdb_id: imdb_id, type: type, season: season, episode: episode)
   end
 
   def start_realdebrid_stream(streams, imdb_id:, type:, season:, episode:)
@@ -121,7 +180,7 @@ class ContentStreamingService
   end
 
   def start_local_stream(streams, imdb_id:, type:, season:, episode:)
-    stream = streams.find { |candidate| candidate[:info_hash].present? }
+    stream = streams.find { |candidate| local_info_hash?(candidate[:info_hash]) }
     return ServiceResult.failure("No local torrent source is available for this title") unless stream
 
     result = LocalTorrentService.new(user: @user).start(
@@ -130,10 +189,24 @@ class ContentStreamingService
       filename: stream[:filename],
       title: stream[:title] || stream[:name]
     )
+    local_content_result(
+      result,
+      stream: stream,
+      imdb_id: imdb_id,
+      type: type,
+      season: season,
+      episode: episode
+    )
+  end
+
+  def local_content_result(result, stream:, imdb_id:, type:, season:, episode:)
     return result if result.failure?
 
     ServiceResult.success(result.data.merge(
       stream: stream,
+      info_hash: result.data[:info_hash].presence || stream[:info_hash],
+      file_idx: result.data[:file_idx].nil? ? stream[:file_idx] : result.data[:file_idx],
+      source: "local",
       imdb_id: imdb_id,
       type: type,
       season: season,
@@ -214,11 +287,45 @@ class ContentStreamingService
       streaming_url: result[:streaming_url],
       filename: torrent_filename,
       stream: result[:stream].merge(filename: torrent_filename),
+      source: "realdebrid",
+      info_hash: normalized_info_hash(result[:stream][:info_hash]),
+      file_idx: normalized_file_idx(result[:stream][:file_idx]),
       imdb_id: imdb_id,
       type: type,
       season: season,
       episode: episode
     })
+  end
+
+  def prioritize_stream_identity(streams, preferred_info_hash, preferred_file_idx)
+    return streams unless preferred_info_hash
+
+    preferred_index = normalized_file_idx(preferred_file_idx)
+    streams.each_with_index.sort_by do |stream, position|
+      hash_match = normalized_info_hash(stream[:info_hash]) == preferred_info_hash
+      candidate_index = normalized_file_idx(stream[:file_idx])
+      exact_file = preferred_index.nil? || candidate_index == preferred_index
+      [ hash_match && exact_file ? 0 : 1, hash_match ? 0 : 1, position ]
+    end.map(&:first)
+  end
+
+  def normalized_source(value)
+    source = value.to_s
+    source if %w[local realdebrid].include?(source)
+  end
+
+  def normalized_info_hash(value)
+    hash = value.to_s.strip.downcase
+    hash if hash.match?(/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/)
+  end
+
+  def local_info_hash?(value)
+    value.to_s.match?(LocalTorrentService::INFO_HASH_FORMAT)
+  end
+
+  def normalized_file_idx(value)
+    index = Integer(value, exception: false)
+    index if index && index >= 0
   end
 
   def resolve_first_valid(candidates)

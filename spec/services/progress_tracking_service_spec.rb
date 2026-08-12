@@ -88,6 +88,32 @@ RSpec.describe ProgressTrackingService do
       expect(described_class.continue_watching(user).data.first[:imdb_id]).to eq("tt1375666")
     end
 
+    it "persists stable source identity for movie and episode resume" do
+      result = described_class.save_progress(
+        user, "tt0903747", 1200, 2400,
+        type: "show", season: 1, episode: 1, title: "Breaking Bad",
+        stream_source: "local", torrent_info_hash: "A" * 40, torrent_file_idx: "3"
+      )
+
+      expect(result).to be_success
+      expect(user.watch_history_entries.first).to have_attributes(
+        stream_source: "local", torrent_info_hash: "a" * 40, torrent_file_idx: 3
+      )
+      expect(user.episode_progresses.first).to have_attributes(
+        stream_source: "local", torrent_info_hash: "a" * 40, torrent_file_idx: 3
+      )
+    end
+
+    it "accepts a stable 64-character v2 torrent identity" do
+      result = described_class.save_progress(
+        user, "tt1375666", 120, 7200, type: "movie", title: "Inception",
+        stream_source: "realdebrid", torrent_info_hash: "b" * 64, torrent_file_idx: 0
+      )
+
+      expect(result).to be_success
+      expect(user.watch_history_entries.first.torrent_info_hash).to eq("b" * 64)
+    end
+
     it "clamps progress percentage when progress exceeds duration" do
       result = described_class.save_progress(user, "tt1375666", 120, 60, type: "movie", title: "Inception")
 

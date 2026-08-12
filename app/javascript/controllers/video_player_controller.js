@@ -88,6 +88,7 @@ export default class extends Controller {
       streamingUrl: String, directUrl: String, directStreamUrl: String, filename: String, imdbId: String, type: String,
       season: String, episode: String, resumeAt: String, startSeconds: Number,
       title: String, duration: Number, posterUrl: String,
+      streamSource: String, torrentInfoHash: String, torrentFileIdx: Number,
       defaultLanguage: String, preferredLanguages: String,
       tracksUrl: String, subtitlesUrl: String, liveCaptionsUrl: String, liveCaptionsAvailable: Boolean, resumeUrl: String,
       nextEpisodeTitle: String, hasNextEpisode: Boolean,
@@ -490,6 +491,14 @@ export default class extends Controller {
       return
     }
     if (!this.videoTarget.paused) this.startThumbnailPrefetch()
+    this.refreshSelectedSubtitles()
+  }
+
+  refreshSelectedSubtitles() {
+    if (this.liveCaptionsEnabled) {
+      this.restartLiveCaptionsAt(this.currentPlaybackPosition())
+      return
+    }
     if (!this.textSubtitleSelected()) return
 
     const position = this.currentPlaybackPosition()
@@ -3983,21 +3992,28 @@ export default class extends Controller {
   }
 
   onFullscreenChange() {
-    if (!this.nativeFullscreenActive) return
-
     const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement
-    if (fullscreenElement === this.videoTarget || this.videoTarget.webkitDisplayingFullscreen) return
+    if (this.nativeFullscreenActive) {
+      if (fullscreenElement === this.videoTarget || this.videoTarget.webkitDisplayingFullscreen) return
+      this.finishNativeFullscreen()
+      return
+    }
 
-    this.finishNativeFullscreen()
+    // Browser fullscreen transitions can rebuild the compositing layer and
+    // drop the custom overlay even though its selected track remains active.
+    // Refresh its current window after either entering or leaving fullscreen.
+    this.refreshSelectedSubtitles()
   }
 
   finishNativeFullscreen() {
+    const wasNativeFullscreen = this.nativeFullscreenActive || this.nativeFullscreenControls !== null
     this.nativeFullscreenActive = false
     this.clearNativeFullscreenSubtitles()
     if (this.nativeFullscreenControls !== null) {
       this.videoTarget.controls = this.nativeFullscreenControls
       this.nativeFullscreenControls = null
     }
+    if (wasNativeFullscreen) this.refreshSelectedSubtitles()
   }
 
   syncNativeFullscreenSubtitles() {
@@ -4969,7 +4985,10 @@ export default class extends Controller {
           season: this.seasonValue,
           episode: this.episodeValue,
           title: this.titleValue || null,
-          poster_url: this.posterUrlValue || null
+          poster_url: this.posterUrlValue || null,
+          stream_source: this.streamSourceValue || null,
+          torrent_info_hash: this.torrentInfoHashValue || null,
+          torrent_file_idx: this.hasTorrentFileIdxValue ? this.torrentFileIdxValue : null
         }),
         signal: this.progressAbortController.signal
       })
@@ -5009,7 +5028,10 @@ export default class extends Controller {
       season: this.seasonValue,
       episode: this.episodeValue,
       title: this.titleValue || null,
-      poster_url: this.posterUrlValue || null
+      poster_url: this.posterUrlValue || null,
+      stream_source: this.streamSourceValue || null,
+      torrent_info_hash: this.torrentInfoHashValue || null,
+      torrent_file_idx: this.hasTorrentFileIdxValue ? this.torrentFileIdxValue : null
     }
   }
 

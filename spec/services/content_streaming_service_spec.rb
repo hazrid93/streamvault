@@ -51,6 +51,7 @@ RSpec.describe ContentStreamingService do
   describe "#start_stream" do
     it "returns failure when RealDebrid key is missing" do
       user.update!(realdebrid_api_key: nil)
+      allow(LocalTorrentService).to receive(:enabled?).and_return(false)
       result = service.start_stream("tt1375666", "movie")
       expect(result).to be_failure
       expect(result.error_message).to include("RealDebrid API key not configured")
@@ -239,12 +240,24 @@ RSpec.describe ContentStreamingService do
   end
 
   describe "local torrent playback" do
+    it "fails an explicit local request without falling through when local playback is disabled" do
+      user.update!(streaming_preference: "automatic")
+      allow(LocalTorrentService).to receive(:enabled?).and_return(false)
+      allow(service).to receive(:fetch_streams)
+
+      result = service.start_stream("tt1375666", "movie", source_mode: "local")
+
+      expect(result).to be_failure
+      expect(result.error_message).to eq("Local torrent playback is unavailable")
+      expect(service).not_to have_received(:fetch_streams)
+    end
+
     it "enforces local-only even when a request asks for RealDebrid" do
       local_user = create(:user, realdebrid_api_key: nil, streaming_preference: "local")
       provider = instance_double(TorrentioService)
       local_engine = instance_double(LocalTorrentService)
       allow(LocalTorrentService).to receive(:enabled?).and_return(true)
-      allow(StreamProvider).to receive(:providers).and_return([provider])
+      allow(StreamProvider).to receive(:providers).and_return([ provider ])
       allow(provider).to receive(:streams).and_return(ServiceResult.success([
         { title: "Inception 1080p", info_hash: "a" * 40, file_idx: 0, filename: "Inception.mkv" }
       ]))
@@ -274,7 +287,7 @@ RSpec.describe ContentStreamingService do
         info_hash: "c" * 40
       ))
       stream = { title: "Movie", info_hash: "c" * 40, file_idx: 0, filename: "Movie.mkv", resolve_url: "https://torrentio.strem.fun/resolve/fail" }
-      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([stream]), ServiceResult.success([stream]))
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([ stream ]), ServiceResult.success([ stream ]))
       allow(service).to receive(:start_realdebrid_stream).and_return(ServiceResult.failure("Unauthorized RD key"))
 
       result = service.start_stream("tt1375666", "movie")
@@ -298,6 +311,105 @@ RSpec.describe ContentStreamingService do
       expect(result).to be_failure
       expect(result.error_message).to eq("Unauthorized RD key")
       expect(LocalTorrentService).not_to have_received(:new)
+    end
+
+    it "resumes a saved local torrent identity directly without re-ranking provider results" do
+      user.update!(streaming_preference: "automatic")
+      local_engine = instance_double(LocalTorrentService)
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(LocalTorrentService).to receive(:new).and_return(local_engine)
+      allow(local_engine).to receive(:start).and_return(ServiceResult.success(
+        streaming_url: "http://torrserver:8090/stream/Movie.mkv?link=#{'e' * 40}&index=3&play=",
+        filename: "Movie.mkv",
+        info_hash: "e" * 40,
+        file_idx: 3,
+        source: "local"
+      ))
+      allow(service).to receive(:fetch_streams)
+
+      result = service.start_stream(
+        "tt1375666",
+        "movie",
+        preferred_source: "local",
+        preferred_info_hash: "e" * 40,
+        preferred_file_idx: 3
+      )
+
+      expect(result).to be_success
+      expect(result.data).to include(source: "local", info_hash: "e" * 40, file_idx: 3)
+      expect(local_engine).to have_received(:start).with(hash_including(info_hash: "e" * 40, file_idx: 3))
+      expect(service).not_to have_received(:fetch_streams)
+    end
+
+    it "prioritizes a saved release identity when re-resolving through RealDebrid" do
+      user.update!(streaming_preference: "automatic")
+      preferred = { resolve_url: "https://torrentio.strem.fun/preferred", info_hash: "f" * 40, file_idx: 2 }
+      wrong_file = { resolve_url: "https://torrentio.strem.fun/wrong-file", info_hash: "f" * 40, file_idx: 1 }
+      other = { resolve_url: "https://torrentio.strem.fun/other", info_hash: "a" * 40, file_idx: 0 }
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([ wrong_file, other, preferred ]))
+      expect(service).to receive(:start_realdebrid_stream).with(
+        [ preferred, wrong_file, other ],
+        imdb_id: "tt1375666", type: "movie", season: nil, episode: nil
+      ).and_return(ServiceResult.failure("not resolved"))
+      allow(LocalTorrentService).to receive(:enabled?).and_return(false)
+
+      service.start_stream(
+        "tt1375666",
+        "movie",
+        preferred_source: "realdebrid",
+        preferred_info_hash: "f" * 40,
+        preferred_file_idx: 2
+      )
+    end
+
+    it "does not pass a saved v2 identity to the v1-only local engine" do
+      user.update!(streaming_preference: "automatic")
+      local_engine = instance_double(LocalTorrentService)
+      preferred = { resolve_url: "https://torrentio.strem.fun/v2", info_hash: "b" * 64, file_idx: 2 }
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(LocalTorrentService).to receive(:new).and_return(local_engine)
+      allow(local_engine).to receive(:start)
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([ preferred ]))
+      allow(service).to receive(:start_realdebrid_stream).and_return(ServiceResult.failure("not resolved"))
+
+      result = service.start_stream(
+        "tt1375666",
+        "movie",
+        preferred_source: "local",
+        preferred_info_hash: "b" * 64,
+        preferred_file_idx: 2
+      )
+
+      expect(result).to be_failure
+      expect(service).to have_received(:start_realdebrid_stream).with(
+        [ preferred ],
+        imdb_id: "tt1375666", type: "movie", season: nil, episode: nil
+      )
+      expect(local_engine).not_to have_received(:start)
+    end
+
+    it "falls back through RealDebrid when saved local playback is no longer enabled" do
+      user.update!(streaming_preference: "automatic")
+      preferred = { resolve_url: "https://torrentio.strem.fun/saved", info_hash: "c" * 40, file_idx: 3 }
+      allow(LocalTorrentService).to receive(:enabled?).and_return(false)
+      allow(service).to receive(:fetch_streams).and_return(ServiceResult.success([ preferred ]))
+      allow(service).to receive(:start_realdebrid_stream).and_return(ServiceResult.success(
+        streaming_url: "https://download.real-debrid.com/d/movie.mkv",
+        source: "realdebrid",
+        info_hash: "c" * 40,
+        file_idx: 3
+      ))
+
+      result = service.start_stream(
+        "tt1375666",
+        "movie",
+        preferred_source: "local",
+        preferred_info_hash: "c" * 40,
+        preferred_file_idx: 3
+      )
+
+      expect(result).to be_success
+      expect(result.data[:source]).to eq("realdebrid")
     end
 
     it "resolves an explicitly selected local source without an RD resolve URL" do

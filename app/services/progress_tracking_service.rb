@@ -2,7 +2,8 @@
 
 class ProgressTrackingService
   # Save watch progress for content
-  def self.save_progress(user, imdb_id, progress_seconds, duration_seconds, type:, season: nil, episode: nil, poster_url: nil, title: nil)
+  def self.save_progress(user, imdb_id, progress_seconds, duration_seconds, type:, season: nil, episode: nil,
+                         poster_url: nil, title: nil, stream_source: nil, torrent_info_hash: nil, torrent_file_idx: nil)
     progress_seconds = progress_seconds.to_i
     duration_seconds = duration_seconds.to_i
     return ServiceResult.failure("Invalid progress data") unless progress_seconds.positive?
@@ -18,6 +19,7 @@ class ProgressTrackingService
 
     resolved_title = title.presence || fetch_title(user, imdb_id, type)
     resolved_poster = poster_url.presence || fetch_poster(user, imdb_id, type)
+    source_identity = normalized_source_identity(stream_source, torrent_info_hash, torrent_file_idx)
 
     # Upsert the watch history entry — one row per movie or per
     # episode, updated in place on every 5s progress save.  The
@@ -52,11 +54,24 @@ class ProgressTrackingService
       progress_percentage: progress_pct,
       show_title: show_title_val
     )
+    # A player page opened before a deployment will not send these newer
+    # fields. Preserve an already-known release in that case; an explicit
+    # source payload still replaces (or clears) the old identity.
+    entry.assign_attributes(source_identity) if source_identity
     entry.save!
 
     # Update episode progress for shows
     if type == "show" && season && episode
-      update_episode_progress(user, imdb_id, season, episode, progress_seconds, duration_seconds, resolved_title)
+      update_episode_progress(
+        user,
+        imdb_id,
+        season,
+        episode,
+        progress_seconds,
+        duration_seconds,
+        resolved_title,
+        source_identity: source_identity
+      )
     end
 
     # Update library entry watch status
@@ -127,11 +142,12 @@ class ProgressTrackingService
   # save_progress now upserts (one row per movie/episode), so dedup is
   # normally a no-op — kept as a safety net for any pre-migration rows.
   def self.continue_watching(user)
+    # Safety cap before Ruby dedup. The upsert design means dedup is mostly a
+    # no-op, so 200 is far more than needed.
     recent = user.watch_history_entries
       .where("progress_percentage < ?", 95)
       .order(watched_at: :desc)
-      .limit(200) # safety cap before Ruby dedup — the upsert design means
-                  # dedup is mostly a no-op, so 200 is far more than needed
+      .limit(200)
 
     seen = {}
     items = recent.filter_map do |e|
@@ -139,10 +155,10 @@ class ProgressTrackingService
       # S01E02 from Continue Watching — only the most recent episode
       # per show should appear. Movies dedup by imdb_id.
       key = if e.episode?
-              e.show_imdb_id
-            else
-              e.imdb_id
-            end
+        e.show_imdb_id
+      else
+        e.imdb_id
+      end
       next if seen.key?(key)
       seen[key] = true
 
@@ -166,19 +182,44 @@ class ProgressTrackingService
 
   private
 
-  def self.update_episode_progress(user, show_imdb_id, season, episode, progress_seconds, duration_seconds, show_title)
+  def self.update_episode_progress(user, show_imdb_id, season, episode, progress_seconds, duration_seconds, show_title,
+                                   source_identity:)
     ep = user.episode_progresses.find_or_initialize_by(
       show_imdb_id: show_imdb_id,
       season_number: season,
       episode_number: episode
     )
 
-    ep.update!(
+    attributes = {
       show_title: show_title,
       progress_seconds: progress_seconds,
       duration_seconds: duration_seconds,
       last_watched_at: Time.current
-    )
+    }
+    attributes.merge!(source_identity) if source_identity
+    ep.update!(attributes)
+  end
+
+  def self.normalized_source_identity(source, info_hash, file_idx)
+    identity_provided = source.present? || info_hash.present? || file_idx.present?
+    return nil unless identity_provided
+
+    normalized_source = source.to_s
+    normalized_source = nil unless %w[local realdebrid].include?(normalized_source)
+
+    # Preserve both v1 (40-char SHA-1) and v2 (64-char SHA-256) stable
+    # identities. LocalTorrentService currently accepts v1; an RD resume can
+    # still prioritize a v2/hybrid source without ever persisting its URL.
+    normalized_hash = info_hash.to_s.strip.downcase
+    normalized_hash = nil unless normalized_hash.match?(/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/)
+    normalized_index = Integer(file_idx, exception: false)
+    normalized_index = nil if normalized_index&.negative?
+
+    {
+      stream_source: normalized_source,
+      torrent_info_hash: normalized_hash,
+      torrent_file_idx: normalized_index
+    }
   end
 
   def self.update_library_watch_status(user, imdb_id, type, progress_pct)

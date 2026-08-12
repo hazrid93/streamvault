@@ -343,6 +343,45 @@ RSpec.describe "Streaming", type: :request do
       ))
     end
 
+    it "passes stable source identity as resume hints instead of persisting a resolved URL" do
+      progress = create(
+        :episode_progress,
+        user: user,
+        show_imdb_id: "tt0903747",
+        season_number: 1,
+        episode_number: 1,
+        progress_seconds: 600,
+        duration_seconds: 3480,
+        stream_source: "local",
+        torrent_info_hash: "a" * 40,
+        torrent_file_idx: 2
+      )
+      service = instance_double(ContentStreamingService)
+      allow(ContentStreamingService).to receive(:new).with(user).and_return(service)
+      allow(service).to receive(:start_stream).and_return(ServiceResult.success(
+        streaming_url: "http://torrserver:8090/stream/bb.mkv?link=#{'a' * 40}&index=2&play=",
+        filename: "bb.mkv",
+        source: "local",
+        info_hash: "a" * 40,
+        file_idx: 2,
+        session_token: "new-lease"
+      ))
+
+      get resume_streaming_index_path(show_imdb_id: "tt0903747", type: "show")
+
+      expect(service).to have_received(:start_stream).with(
+        "tt0903747",
+        "show",
+        season: 1,
+        episode: 1,
+        preferred_source: "local",
+        preferred_info_hash: "a" * 40,
+        preferred_file_idx: 2
+      )
+      expect(response.location).to include("local_torrent_session=new-lease")
+      expect(progress.attributes).not_to have_key("streaming_url")
+    end
+
     it "advances to the next episode when the last-watched is >= 95%" do
       progress = create(:episode_progress, user: user, show_imdb_id: "tt0903747",
              season_number: 1, episode_number: 1,
@@ -575,12 +614,18 @@ RSpec.describe "Streaming", type: :request do
         duration_seconds: 7200,
         type: "movie",
         title: "Inception",
-        poster_url: "https://img.example.com/inception.jpg"
+        poster_url: "https://img.example.com/inception.jpg",
+        stream_source: "realdebrid",
+        torrent_info_hash: "b" * 64,
+        torrent_file_idx: 4
       }
 
       expect(response).to have_http_status(:ok)
       entry = user.watch_history_entries.first
       expect(entry.poster_url).to eq("https://img.example.com/inception.jpg")
+      expect(entry).to have_attributes(
+        stream_source: "realdebrid", torrent_info_hash: "b" * 64, torrent_file_idx: 4
+      )
     end
 
     it "falls back to wishlist poster when poster_url not sent" do

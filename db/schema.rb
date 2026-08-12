@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_27_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_28_000000) do
   create_table "api_caches", force: :cascade do |t|
     t.datetime "cached_at", null: false
     t.datetime "created_at", null: false
@@ -54,8 +54,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_000000) do
     t.integer "season_number", null: false
     t.string "show_imdb_id", null: false
     t.string "show_title", null: false
+    t.string "stream_source"
+    t.integer "torrent_file_idx"
+    t.string "torrent_info_hash", limit: 64
     t.datetime "updated_at", null: false
     t.integer "user_id", null: false
+    t.index ["torrent_info_hash"], name: "index_episode_progresses_on_torrent_info_hash"
     t.index ["user_id", "show_imdb_id", "season_number", "episode_number"], name: "idx_episode_progresses_unique", unique: true
     t.index ["user_id", "show_imdb_id"], name: "index_episode_progresses_on_user_id_and_show_imdb_id"
     t.index ["user_id"], name: "index_episode_progresses_on_user_id"
@@ -287,11 +291,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_000000) do
     t.integer "season_number", default: 0, null: false
     t.string "show_imdb_id"
     t.string "show_title"
+    t.string "stream_source"
     t.string "title", null: false
+    t.integer "torrent_file_idx"
+    t.string "torrent_info_hash", limit: 64
     t.datetime "updated_at", null: false
     t.integer "user_id", null: false
     t.datetime "watched_at", null: false
     t.index ["show_imdb_id"], name: "index_watch_history_entries_on_show_imdb_id"
+    t.index ["torrent_info_hash"], name: "index_watch_history_entries_on_torrent_info_hash"
     t.index ["user_id", "imdb_id", "content_type", "season_number", "episode_number"], name: "idx_watch_history_entries_unique", unique: true
     t.index ["user_id", "imdb_id"], name: "index_watch_history_entries_on_user_id_and_imdb_id"
     t.index ["user_id"], name: "index_watch_history_entries_on_user_id"

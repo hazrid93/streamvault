@@ -67,9 +67,11 @@ class StreamingController < ApplicationController
         poster_url: params[:poster_url],
         resume_at: resume_at,
         duration: duration,
-        source: result.data[:source],
-        local_torrent_hash: result.data[:info_hash],
-        local_torrent_session: result.data[:session_token]
+        source: (result.data[:source] if result.data[:info_hash].present?),
+        torrent_info_hash: result.data[:info_hash],
+        torrent_file_idx: result.data[:file_idx],
+        local_torrent_hash: (result.data[:info_hash] if result.data[:source] == "local"),
+        local_torrent_session: (result.data[:session_token] if result.data[:source] == "local")
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -84,7 +86,9 @@ class StreamingController < ApplicationController
     @episode = params[:episode]
     @title = params[:title] || "Now Playing"
     @poster_url = params[:poster_url]
-    @stream_source = params[:source]
+    @stream_source = params[:source].presence || ("local" if params[:local_torrent_hash].present?)
+    @torrent_info_hash = params[:torrent_info_hash].presence || params[:local_torrent_hash]
+    @torrent_file_idx = params[:torrent_file_idx]
     @local_torrent_hash = params[:local_torrent_hash]
     @local_torrent_session = params[:local_torrent_session]
     @resume_at = params[:resume_at]
@@ -150,7 +154,10 @@ class StreamingController < ApplicationController
       imdb_id,
       type,
       season: target_season,
-      episode: target_episode
+      episode: target_episode,
+      preferred_source: target[:stream_source],
+      preferred_info_hash: target[:torrent_info_hash],
+      preferred_file_idx: target[:torrent_file_idx]
     )
 
     if result.success?
@@ -169,9 +176,11 @@ class StreamingController < ApplicationController
         poster_url: target[:poster_url],
         resume_at: resume_at,
         duration: target[:duration_seconds].to_i,
-        source: result.data[:source],
-        local_torrent_hash: result.data[:info_hash],
-        local_torrent_session: result.data[:session_token]
+        source: (result.data[:source] if result.data[:info_hash].present?),
+        torrent_info_hash: result.data[:info_hash],
+        torrent_file_idx: result.data[:file_idx],
+        local_torrent_hash: (result.data[:info_hash] if result.data[:source] == "local"),
+        local_torrent_session: (result.data[:session_token] if result.data[:source] == "local")
       )
     else
       redirect_back fallback_location: root_path, alert: result.error_message
@@ -189,7 +198,10 @@ class StreamingController < ApplicationController
       season: params[:season]&.to_i,
       episode: params[:episode]&.to_i,
       title: params[:title],
-      poster_url: params[:poster_url]
+      poster_url: params[:poster_url],
+      stream_source: params[:stream_source],
+      torrent_info_hash: params[:torrent_info_hash],
+      torrent_file_idx: params[:torrent_file_idx]
     )
 
     if result.success?
@@ -244,40 +256,70 @@ class StreamingController < ApplicationController
       .first
   end
 
-  # Resolve which episode/movie to play, where to start, and metadata
- # (title, poster_url, duration) from the existing DB progress row.
- # Returns { season:, episode:, resume_at:, title:, poster_url:, duration_seconds: }.
- #
- # For shows resuming an in-progress episode, the episode_progresses row
- # holds show_title and duration_seconds. For movies, the watch_history_entries
- # row holds title, poster_url, and duration_seconds.
- #
- # When advancing to a next episode (progress >= 95%), no DB row exists
- # for the next episode yet — duration falls back to 0 and the player's
- # probeDuration fills it in. When no progress row exists at all (first
- # play), metadata is empty and the player page handles the fallback.
+  # Resolve which episode/movie to play, where to start, and metadata from
+  # the existing progress row. Stable source identity is included so resume
+  # can re-resolve the same release; resolved RD and local lease URLs are not.
   def resume_target(imdb_id, type)
     if type == "movie"
       last = current_user.watch_history_entries.where(imdb_id: imdb_id).order(watched_at: :desc).first
-      return { season: 0, episode: 0, resume_at: 0, title: nil, poster_url: nil, duration_seconds: 0 } if last.nil?
-      return { season: 0, episode: 0, resume_at: 0, title: last.title, poster_url: last.poster_url, duration_seconds: last.duration_seconds } if last.progress_percentage >= 95
-      return { season: 0, episode: 0, resume_at: last.progress_seconds, title: last.title, poster_url: last.poster_url, duration_seconds: last.duration_seconds }
+      return empty_resume_target(season: 0, episode: 0) if last.nil?
+      return resume_target_from(last, season: 0, episode: 0, resume_at: 0) if last.progress_percentage >= 95
+
+      return resume_target_from(last, season: 0, episode: 0, resume_at: last.progress_seconds)
     end
 
     last = current_user.episode_progresses.for_show(imdb_id).recently_watched.first
-    return { season: 1, episode: 1, resume_at: 0, title: nil, poster_url: nil, duration_seconds: 0 } if last.nil?
+    return empty_resume_target(season: 1, episode: 1) if last.nil?
 
     if last.progress_percentage >= 95
       next_ep = ProgressTrackingService.next_episode(current_user, imdb_id, last.season_number, last.episode_number)
       if next_ep.success?
-        { season: next_ep.data[:season], episode: next_ep.data[:episode], resume_at: 0, title: last.show_title, poster_url: nil, duration_seconds: 0 }
+        # Never carry a finished episode's file identity to the next one.
+        empty_resume_target(
+          season: next_ep.data[:season],
+          episode: next_ep.data[:episode],
+          title: last.show_title
+        )
       else
-        # Series finale: replay the finished episode from the start
-        { season: last.season_number, episode: last.episode_number, resume_at: 0, title: last.show_title, poster_url: nil, duration_seconds: last.duration_seconds }
+        # Series finale: replay the finished episode from the start.
+        resume_target_from(last, season: last.season_number, episode: last.episode_number, resume_at: 0)
       end
     else
-      { season: last.season_number, episode: last.episode_number, resume_at: last.progress_seconds, title: last.show_title, poster_url: nil, duration_seconds: last.duration_seconds }
+      resume_target_from(
+        last,
+        season: last.season_number,
+        episode: last.episode_number,
+        resume_at: last.progress_seconds
+      )
     end
+  end
+
+  def empty_resume_target(season:, episode:, title: nil)
+    {
+      season: season,
+      episode: episode,
+      resume_at: 0,
+      title: title,
+      poster_url: nil,
+      duration_seconds: 0,
+      stream_source: nil,
+      torrent_info_hash: nil,
+      torrent_file_idx: nil
+    }
+  end
+
+  def resume_target_from(progress, season:, episode:, resume_at:)
+    {
+      season: season,
+      episode: episode,
+      resume_at: resume_at,
+      title: progress.respond_to?(:title) ? progress.title : progress.show_title,
+      poster_url: progress.respond_to?(:poster_url) ? progress.poster_url : nil,
+      duration_seconds: progress.duration_seconds,
+      stream_source: progress.stream_source,
+      torrent_info_hash: progress.torrent_info_hash,
+      torrent_file_idx: progress.torrent_file_idx
+    }
   end
 
   def find_duration_seconds(progress_entry, imdb_id, type, season, episode)

@@ -44,7 +44,7 @@ RSpec.describe HlsSession do
     it "cleans up a pre-first-segment ffmpeg failure and retains diagnostics" do
       run_monitor_inline
       status = instance_double(Process::Status, success?: false, exitstatus: 1)
-      allow(Process).to receive(:waitpid2).with(pid, Process::WNOHANG).and_return([pid, status])
+      allow(Process).to receive(:waitpid2).with(pid, Process::WNOHANG).and_return([ pid, status ])
 
       session = create_session
 
@@ -58,7 +58,7 @@ RSpec.describe HlsSession do
     it "terminates a first-segment timeout and retains diagnostics" do
       run_monitor_inline
       stub_const("TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS", 0)
-      allow(Process).to receive(:waitpid2).with(pid, Process::WNOHANG).and_return([nil, nil])
+      allow(Process).to receive(:waitpid2).with(pid, Process::WNOHANG).and_return([ nil, nil ])
 
       create_session
 
@@ -66,6 +66,35 @@ RSpec.describe HlsSession do
       expect(File.exist?(segment_dir)).to be(false)
       expect(HlsSessionRecord.find_by(session_id: session_id)).to be_nil
       expect(described_class.error(session_id)).to include("timed out")
+    end
+
+    it "retries a cold local source under the same session id and replaces its pid" do
+      run_monitor_inline
+      stub_const("TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS", 0)
+      replacement_pid = pid + 1
+      replacement_killer = instance_double(HlsSessionKiller, kill: nil)
+      allow(HlsSessionKiller).to receive(:new).with(replacement_pid).and_return(replacement_killer)
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+      allow(LocalTorrentService).to receive(:internal_host).and_return("torrserver")
+      allow(Process).to receive(:waitpid2).with(pid, Process::WNOHANG).and_return([ nil, nil ])
+      allow(Process).to receive(:waitpid2).with(replacement_pid, Process::WNOHANG) do
+        File.write(File.join(segment_dir, "playlist.m3u8"), "#EXTM3U\n#EXTINF:4,\n0.ts\n")
+        File.write(File.join(segment_dir, "0.ts"), "segment")
+        [ nil, nil ]
+      end
+      transcode_calls = 0
+      allow(TranscodeService).to receive(:transcode_to_hls) do |_input_url, **kwargs|
+        transcode_calls += 1
+        FileUtils.mkdir_p(kwargs.fetch(:segment_dir))
+        transcode_calls == 1 ? pid : replacement_pid
+      end
+
+      session = create_session(input_url: "http://torrserver:8090/stream/movie.mkv?link=#{'a' * 40}&index=1&play=")
+
+      expect(session.id).to eq(session_id)
+      expect(HlsSessionRecord.find_by!(session_id: session_id).pid).to eq(replacement_pid)
+      expect(described_class.error(session_id)).to be_nil
+      expect(File.exist?(File.join(segment_dir, "0.ts"))).to be(true)
     end
   end
 
@@ -103,10 +132,10 @@ RSpec.describe HlsSession do
 
   private
 
-  def create_session
+  def create_session(input_url: "https://download.real-debrid.com/d/file123/video.mkv")
     described_class.create(
       user_id: user.id,
-      input_url: "https://download.real-debrid.com/d/file123/video.mkv",
+      input_url: input_url,
       headers: {},
       start_seconds: 0,
       audio_stream: nil,

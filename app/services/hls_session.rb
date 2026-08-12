@@ -30,6 +30,8 @@ class HlsSession
   # hash was per-worker, so under multi-worker the 424 error path
   # never fired if the playlist request landed on a different worker.
   ERROR_CACHE_TTL = 5.minutes
+  LOCAL_FIRST_SEGMENT_RETRIES = 1
+  LOCAL_RETRY_FIRST_SEGMENT_TIMEOUT_SECONDS = 45
 
   attr_reader :id, :pid, :segment_dir, :user_id
 
@@ -71,7 +73,19 @@ class HlsSession
     end
 
     @mutex.synchronize { @pids[session_id] = pid }
-    monitor_first_segment(session_id, pid, dir)
+    monitor_first_segment(
+      session_id,
+      pid,
+      dir,
+      input_url: input_url,
+      headers: headers,
+      start_seconds: start_seconds,
+      audio_stream: audio_stream,
+      subtitle_stream: subtitle_stream,
+      default_language: default_language,
+      preferred_languages: preferred_languages,
+      hdr: hdr
+    )
 
     new(id: session_id, pid: pid, segment_dir: dir, user_id: user_id)
   end
@@ -150,10 +164,13 @@ class HlsSession
       stop(record.session_id)
     end
   end
-  def self.monitor_first_segment(session_id, pid, dir)
+  def self.monitor_first_segment(session_id, pid, dir, **transcode_options)
     monitor_thread = Thread.new do
       begin
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS
+        local_input = local_torrent_input?(transcode_options[:input_url])
+        retries_remaining = local_input ? LOCAL_FIRST_SEGMENT_RETRIES : 0
+        timeout_seconds = TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
 
         loop do
           _, status = Process.waitpid2(pid, Process::WNOHANG)
@@ -172,11 +189,22 @@ class HlsSession
           break if first_segment_produced?(dir)
 
           if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+            if retries_remaining.positive?
+              retries_remaining -= 1
+              replacement_pid = retry_local_transcode(session_id, pid, dir, **transcode_options)
+              break unless replacement_pid
+
+              pid = replacement_pid
+              timeout_seconds = LOCAL_RETRY_FIRST_SEGMENT_TIMEOUT_SECONDS
+              deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+              next
+            end
+
             fail_before_first_segment(
               session_id,
               pid,
               dir,
-              "FFmpeg timed out after #{TranscodeService::FIRST_SEGMENT_TIMEOUT_SECONDS}s waiting for first segment."
+              "FFmpeg timed out after #{timeout_seconds}s waiting for first segment."
             )
             break
           end
@@ -195,6 +223,62 @@ class HlsSession
     File.exist?(playlist_path) && (Dir.glob(File.join(dir, "*.ts")).any? || Dir.glob(File.join(dir, "*.m4s")).any?)
   end
 
+  def self.local_torrent_input?(input_url)
+    return false unless LocalTorrentService.enabled?
+
+    uri = URI.parse(input_url.to_s)
+    uri.host.to_s.casecmp?(LocalTorrentService.internal_host.to_s)
+  rescue URI::InvalidURIError
+    false
+  end
+
+  # A cold random-access read from TorrServer can spend the whole initial
+  # deadline fetching pieces without completing segment zero. Retry once in
+  # the same session directory after clearing partial output. The public
+  # playlist URL remains stable while the warm piece cache feeds the retry.
+  def self.retry_local_transcode(session_id, old_pid, dir, **transcode_options)
+    Rails.logger.warn("[HLS] Local first segment timed out for #{session_id}; retrying from warm torrent cache")
+    terminate_process(old_pid)
+    FileUtils.rm_rf(dir)
+    FileUtils.mkdir_p(dir)
+
+    new_pid = TranscodeService.transcode_to_hls(
+      transcode_options.fetch(:input_url),
+      segment_dir: dir,
+      headers: transcode_options.fetch(:headers),
+      start_seconds: transcode_options.fetch(:start_seconds),
+      audio_stream: transcode_options[:audio_stream],
+      subtitle_stream: transcode_options[:subtitle_stream],
+      default_language: transcode_options[:default_language],
+      preferred_languages: transcode_options.fetch(:preferred_languages),
+      hdr: transcode_options.fetch(:hdr),
+      wait_for_first_segment: false
+    )
+
+    updated = HlsSessionRecord.where(session_id: session_id, pid: old_pid).update_all(pid: new_pid)
+    unless updated.positive?
+      terminate_process(new_pid)
+      FileUtils.rm_rf(dir)
+      return nil
+    end
+
+    owned = @mutex.synchronize do
+      next false unless @pids[session_id] == old_pid
+
+      @pids[session_id] = new_pid
+      true
+    end
+    return new_pid if owned
+
+    # A concurrent stop removed registry ownership after the DB pid swap.
+    # Delete only if the row still points at this replacement; otherwise a
+    # newer retry/session owns it. Never leave a DB record for a killed pid.
+    HlsSessionRecord.where(session_id: session_id, pid: new_pid).delete_all
+    terminate_process(new_pid)
+    FileUtils.rm_rf(dir)
+    nil
+  end
+
   def self.fail_before_first_segment(session_id, pid, dir, message)
     terminate_process(pid)
     FileUtils.rm_rf(dir)
@@ -210,7 +294,8 @@ class HlsSession
     Rails.logger.warn("[HLS] Failed to stop ffmpeg #{pid}: #{e.message}")
   end
 
-  private_class_method :monitor_first_segment, :first_segment_produced?, :fail_before_first_segment, :terminate_process
+  private_class_method :monitor_first_segment, :first_segment_produced?, :local_torrent_input?,
+    :retry_local_transcode, :fail_before_first_segment, :terminate_process
 
   def playlist_path
     File.join(segment_dir, "playlist.m3u8")

@@ -68,6 +68,32 @@ test("leaving a local player sends one authenticated keepalive stop", () => {
   })
 })
 
+test("progress payload carries stable source identity without an ephemeral stream URL", () => {
+  const player = new VideoPlayerController()
+  player.videoTarget = { currentTime: 300 }
+  player.startSecondsValue = 0
+  player.directPlayActive = true
+  player.remuxDirectPlay = false
+  player.imdbIdValue = "tt12042730"
+  player.typeValue = "movie"
+  player.seasonValue = ""
+  player.episodeValue = ""
+  player.titleValue = "Project Hail Mary"
+  player.posterUrlValue = "https://example.test/poster.jpg"
+  player.streamSourceValue = "local"
+  player.torrentInfoHashValue = "a".repeat(40)
+  player.hasTorrentFileIdxValue = true
+  player.torrentFileIdxValue = 2
+  player.saveableDurationSeconds = () => 9391
+
+  const payload = player.progressPayload()
+
+  assert.equal(payload.stream_source, "local")
+  assert.equal(payload.torrent_info_hash, "a".repeat(40))
+  assert.equal(payload.torrent_file_idx, 2)
+  assert.equal("streaming_url" in payload, false)
+})
+
 test("returning to mobile Chrome reloads subtitles at the resumed absolute position", () => {
   const player = new VideoPlayerController()
   let cleared = 0
@@ -96,6 +122,27 @@ test("returning to mobile Chrome reloads subtitles at the resumed absolute posit
   assert.equal(prefetchStarts, 1)
   assert.equal(cleared, 1)
   assert.equal(reloadedAt, 187.25)
+})
+
+test("leaving desktop fullscreen refreshes the current text subtitle window", () => {
+  const player = new VideoPlayerController()
+  let reloads = 0
+  player.nativeFullscreenActive = false
+  player.liveCaptionsEnabled = false
+  player.videoTarget = { webkitDisplayingFullscreen: false }
+  player.textSubtitleSelected = () => true
+  player.currentPlaybackPosition = () => 245
+  player.clearSubtitleCues = () => {}
+  player.reloadTextSubtitlesAt = (position) => {
+    assert.equal(position, 245)
+    reloads += 1
+  }
+  testDocument.fullscreenElement = null
+  testDocument.webkitFullscreenElement = null
+
+  player.onFullscreenChange()
+
+  assert.equal(reloads, 1)
 })
 
 test("cast button opens the native AirPlay target picker on Apple browsers", async () => {
