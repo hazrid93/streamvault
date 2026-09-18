@@ -90,7 +90,7 @@ export default class extends Controller {
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats",
-      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "playerNotice", "upscaleDiagnostic", "upscaleDiagnosticText", "fpsStats", "backButton",
+      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "upscaleSpinner", "playerNotice", "upscaleDiagnostic", "upscaleDiagnosticText", "fpsStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -173,6 +173,9 @@ export default class extends Controller {
     this.upscaleHealthTimer = null
     this.playerNoticeTimer = null
     this.fpsFrameTimes = null
+    // Set while an engine start/switch/profile change is in flight; guards
+    // re-entrant menu taps and drives the "Applying" spinner.
+    this.upscaleApplying = false
     // Details of the last upscaler startup failure, rendered in the
     // diagnostic panel (with copy button) so viewers without devtools can
     // report the real reason.
@@ -263,6 +266,17 @@ export default class extends Controller {
     // additionally show seeder and transfer stats.
     this.sourceInfoTarget.classList.remove("hidden")
     this.startFpsMonitor()
+    // Upscale canvas letterboxing: WebKit does not apply object-fit to
+    // canvas elements, so the canvas is explicitly sized/positioned to the
+    // video's displayed (contain-fit) box by layoutUpscaleCanvas().
+    this.upscaleCanvasResizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => this.layoutUpscaleCanvas())
+      : null
+    if (this.upscaleCanvasResizeObserver && this.hasUpscaleWebglCanvasTarget && this.upscaleWebglCanvasTarget.parentElement) {
+      this.upscaleCanvasResizeObserver.observe(this.upscaleWebglCanvasTarget.parentElement)
+    }
+    this.upscaleVideoMetaHandler = () => this.layoutUpscaleCanvas()
+    this.videoTarget.addEventListener("loadedmetadata", this.upscaleVideoMetaHandler)
     this.startLocalTorrentStatus()
     this.initializeCasting()
     this.visibilityChangeHandler = () => this.onVisibilityChange()
@@ -336,6 +350,10 @@ export default class extends Controller {
     clearTimeout(this.upscaleHealthTimer)
     clearTimeout(this.playerNoticeTimer)
     this.stopFpsMonitor()
+    if (this.upscaleCanvasResizeObserver) this.upscaleCanvasResizeObserver.disconnect()
+    if (this.upscaleVideoMetaHandler) this.videoTarget.removeEventListener("loadedmetadata", this.upscaleVideoMetaHandler)
+    this.hideUpscaleSpinner()
+    this.upscaleApplying = false
     this.closeUpscalerMenu()
     this.closeUpscaleDiagnostic()
     this.upscaleStartError = null
@@ -3152,6 +3170,41 @@ export default class extends Controller {
     return import(this.upscaleModuleSpecifier(engineId, profileId))
   }
 
+  // ── Upscale canvas letterboxing ───────────────────────────────────
+
+  // Compute the video's contain-fit box inside the player container and
+  // place both upscale canvases exactly over it. object-fit: contain is
+  // kept as a non-WebKit fallback, but WebKit does not apply object-fit to
+  // canvas elements at all — there the explicit box is the only correct
+  // layout. Re-run on container resize (fullscreen, rotation) and video
+  // metadata changes.
+  layoutUpscaleCanvas() {
+    const video = this.videoTarget
+    if (!video || !video.videoWidth || !video.videoHeight) return
+    const canvases = [
+      this.hasUpscaleWebglCanvasTarget ? this.upscaleWebglCanvasTarget : null,
+      this.hasUpscaleWebgpuCanvasTarget ? this.upscaleWebgpuCanvasTarget : null
+    ].filter(Boolean)
+    for (const canvas of canvases) {
+      const container = canvas.parentElement
+      if (!container) continue
+      const cw = container.clientWidth
+      const ch = container.clientHeight
+      if (!cw || !ch) continue
+      const videoAspect = video.videoWidth / video.videoHeight
+      let w = cw
+      let h = cw / videoAspect
+      if (h > ch) {
+        h = ch
+        w = ch * videoAspect
+      }
+      canvas.style.width = `${Math.round(w)}px`
+      canvas.style.height = `${Math.round(h)}px`
+      canvas.style.left = `${Math.round((cw - w) / 2)}px`
+      canvas.style.top = `${Math.round((ch - h) / 2)}px`
+    }
+  }
+
   // ── Startup failure diagnostics ───────────────────────────────────
 
   // Persistent panel with the full failure details + copy button, so a
@@ -3254,6 +3307,8 @@ export default class extends Controller {
       this.showPlayerNotice(`${label} is not supported in this browser`)
       return
     }
+    // Ignore taps while a previous switch is still applying (spinner up).
+    if (this.upscaleApplying) return
     const engineId = row.dataset.upscaleEngine
     this.closeUpscalerMenu()
 
@@ -3311,6 +3366,7 @@ export default class extends Controller {
       this.showPlayerNotice("Upscaling is not supported in this browser")
       return
     }
+    if (this.upscaleApplying) return
     const profileId = row.dataset.upscaleProfile
     if (!UPSCALE_PROFILE_IDS.includes(profileId) || profileId === this.upscaleProfileId) return
     this.closeUpscalerMenu()
@@ -3347,6 +3403,8 @@ export default class extends Controller {
     if (!engine || !engine.supported) return false
     const canvas = engineId === "webgl" ? this.upscaleWebglCanvasTarget : this.upscaleWebgpuCanvasTarget
     if (!canvas) return false
+    this.upscaleApplying = true
+    this.showUpscaleSpinner()
     try {
       const module = await this.loadUpscaleModule(engineId, profileId)
       // HDR may have been switched on while the module loaded.
@@ -3360,6 +3418,10 @@ export default class extends Controller {
       }
       const upscaler = this.upscaler
       upscaler.attachVideo(this.videoTarget, canvas)
+      // Letterbox the canvas to the video's displayed box BEFORE revealing
+      // it: WebKit ignores object-fit on canvas, so without this the bitmap
+      // stretches edge-to-edge over the video's letterboxed picture.
+      this.layoutUpscaleCanvas()
       canvas.classList.remove("hidden")
       // Async GPU failure hooks must be wired BEFORE start(): adapter /
       // device requests can fail (or the device be lost) during start.
@@ -3376,6 +3438,27 @@ export default class extends Controller {
       // The engine may have died (onError -> disableUpscale) or been
       // replaced while awaiting start.
       if (this.upscaler !== upscaler || this.hdrEnabled) return false
+      // The WebGPU canvas bitmap must share the video's aspect ratio —
+      // layoutUpscaleCanvas assumes it. A padded or mis-sized output
+      // texture would stretch the picture INSIDE the letterbox box, which
+      // looks exactly like the layout bug; report it distinctly instead.
+      // (WebGL excluded: that library sizes its own canvas asynchronously.)
+      if (engineId === "webgpu" && canvas.width && canvas.height && this.videoTarget.videoWidth) {
+        const videoAspect = this.videoTarget.videoWidth / this.videoTarget.videoHeight
+        const canvasAspect = canvas.width / canvas.height
+        if (Math.abs(canvasAspect - videoAspect) > 0.01) {
+          this.upscaleStartError = {
+            engine: engineId,
+            profile: profileId,
+            message: `output texture ${canvas.width}x${canvas.height} does not match video aspect ${this.videoTarget.videoWidth}x${this.videoTarget.videoHeight} (would stretch inside the letterbox)`,
+            gpu: this.webgpuApiPresent() ? "navigator.gpu present" : "navigator.gpu missing",
+            userAgent: (typeof navigator !== "undefined" && navigator.userAgent) || "unknown"
+          }
+          this.disableUpscale()
+          this.showUpscaleDiagnostic()
+          return false
+        }
+      }
       this.upscaleEnabled = true
       this.activeUpscaleEngineId = engineId
       this.renderUpscaleControls()
@@ -3384,6 +3467,12 @@ export default class extends Controller {
       // (the exact symptom of 4K silently reverting to Off on iOS).
       if (engineId === "webgpu" && typeof upscaler.renderingHealthy === "function") {
         this.upscaleHealthTimer = setTimeout(() => this.checkWebgpuUpscaleHealth(upscaler), UPSCALE_HEALTH_CHECK_DELAY_MS)
+      }
+      // Reflect the switch immediately on a paused video: rVFC never fires
+      // while paused, so nothing would visibly change until playback.
+      if (this.videoTarget && this.videoTarget.paused) {
+        if (typeof upscaler.renderOnce === "function") upscaler.renderOnce()
+        this.nudgePausedVideo()
       }
       return true
     } catch (error) {
@@ -3403,6 +3492,9 @@ export default class extends Controller {
       this.disableUpscale()
       this.showUpscaleDiagnostic()
       return false
+    } finally {
+      this.upscaleApplying = false
+      this.hideUpscaleSpinner()
     }
   }
 
@@ -3494,6 +3586,37 @@ export default class extends Controller {
     this.playerNoticeTimer = setTimeout(() => {
       if (this.hasPlayerNoticeTarget) this.playerNoticeTarget.classList.add("hidden")
     }, duration)
+  }
+
+  // ── Upscaler apply feedback ────────────────────────────────────────
+
+  // "Applying" spinner shown while a module downloads or an engine starts —
+  // engine starts can take seconds (adapter + shader compilation), and the
+  // 4x profile pulls ~2MB of model weights on first pick.
+  showUpscaleSpinner() {
+    if (!this.hasUpscaleSpinnerTarget) return
+    this.upscaleSpinnerTarget.classList.remove("hidden")
+    this.upscaleSpinnerTarget.classList.add("inline-flex")
+  }
+
+  hideUpscaleSpinner() {
+    if (!this.hasUpscaleSpinnerTarget) return
+    this.upscaleSpinnerTarget.classList.add("hidden")
+    this.upscaleSpinnerTarget.classList.remove("inline-flex")
+  }
+
+  // Both engines render on requestVideoFrameCallback, which never fires
+  // while the video is paused. A tiny seek presents one frame, so the
+  // WebGL engine's loop renders the current picture after a switch. (The
+  // WebGPU engine renders directly via renderOnce(); this nudge also
+  // refreshes it harmlessly.)
+  nudgePausedVideo() {
+    const video = this.videoTarget
+    if (!video || !video.paused || !video.duration) return
+    try {
+      const target = Math.min((video.currentTime || 0) + 0.001, video.duration - 0.001)
+      video.currentTime = target
+    } catch {}
   }
 
   async restoreUpscale() {
