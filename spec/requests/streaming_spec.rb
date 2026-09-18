@@ -433,6 +433,10 @@ RSpec.describe "Streaming", type: :request do
       expect(response.body).to include("download.real-debrid.com")
       expect(response.body).to include(%(data-video-player-target="startupOverlay"))
       expect(response.body).to include("Starting playback")
+      # Client-side Anime4K upscaler: canvas output overlay + toggle button.
+      expect(response.body).to include(%(data-video-player-target="upscaleCanvas"))
+      expect(response.body).to include(%(data-video-player-target="upscaleControls"))
+      expect(response.body).to include(%(data-action="click->video-player#toggleUpscale"))
       expect(response.body).to include(%(data-video-player-default-language-value="ENG"))
       expect(response.body).to include(%(data-video-player-tracks-url-value="/transcode/tracks"))
       expect(response.body).to include(%(data-video-player-subtitles-url-value="/transcode/subtitles"))

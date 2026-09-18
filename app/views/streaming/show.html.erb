@@ -65,6 +65,16 @@
          style="object-fit: contain; background: #000;">
   </video>
 
+  <%# Anime4K upscaler output (client-side WebGL). Only shown while
+     upscaling runs; the library toggles style.visibility per frame so a
+     stopped upscaler falls straight back to the video underneath. Never
+     intercepts pointer events. %>
+  <canvas data-video-player-target="upscaleCanvas"
+          class="hidden absolute inset-0 h-full w-full"
+          style="object-fit: contain; pointer-events: none;"
+          aria-hidden="true">
+  </canvas>
+
   <%# Primary touch controls. This group floats over the center of the movie
       and follows the exact same visibility state as the player menu below. %>
   <div data-video-player-target="topControls"
@@ -289,6 +299,27 @@
           </svg>
           <span>HDR</span>
           <span data-video-player-target="hdrButtonState" class="sr-only">OFF</span>
+        </button>
+      </div>
+
+      <%# Anime4K client-side upscaling (WebGL). Offered whenever the
+          browser supports float WebGL textures; disabled while HDR
+          playback is active because the upscale canvas is SDR-only.
+          Zero server load — shaders run on the viewer's GPU. %>
+      <div data-video-player-target="upscaleControls" class="hidden">
+        <button type="button"
+                data-video-player-target="upscaleButton"
+                data-action="click->video-player#toggleUpscale"
+                class="group flex h-7 items-center gap-1 rounded-md border border-white/20 bg-black/60 px-1.5 text-[10px] font-black tracking-wider text-sv-text-muted transition-all hover:border-white/40 hover:text-white"
+                aria-pressed="false"
+                aria-label="Enable upscaling"
+                title="Anime4K upscaling (client-side, 2x)">
+          <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>
+            <path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15z"/>
+          </svg>
+          <span>4K</span>
+          <span data-video-player-target="upscaleButtonState" class="sr-only">OFF</span>
         </button>
       </div>
 

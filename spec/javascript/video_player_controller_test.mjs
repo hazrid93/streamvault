@@ -2135,3 +2135,136 @@ test("hideOverlayUi collapses an open stats panel so it never sticks open", () =
 
   assert.equal(classes.has("hidden"), true)
 })
+
+class FakeUpscaler {
+  constructor(shaders) { this.shaders = shaders; this.attached = null; this.started = false }
+  attachVideo(video, canvas) { this.attached = [video, canvas] }
+  start() { this.started = true }
+  stop() { this.started = false }
+  detachVideo() { this.attached = null }
+}
+
+const fakeUpscaleModule = () => ({
+  VideoUpscaler: FakeUpscaler,
+  Anime4K_Clamp_Highlights: "clamp",
+  Anime4K_Restore_CNN_M: "restore",
+  Anime4K_Upscale_CNN_x2_M: "upscale"
+})
+
+const makeUpscalePlayer = () => {
+  const player = new VideoPlayerController()
+  player.upscaleSupportedResult = true
+  player.upscaleEnabled = false
+  player.upscaler = null
+  player.upscalePreferenceEnabled = false
+  player.hdrEnabled = false
+  player.videoTarget = { currentTime: 0 }
+  const classes = new Set(["hidden"])
+  player.hasUpscaleCanvasTarget = true
+  player.upscaleCanvasTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name),
+      toggle: (name, on) => { on ? classes.add(name) : classes.delete(name) }
+    }
+  }
+  player.hasUpscaleControlsTarget = true
+  player.hasUpscaleButtonTarget = true
+  player.hasUpscaleButtonStateTarget = true
+  player.upscaleControlsTarget = { classList: { toggle: () => {} } }
+  player.upscaleButtonTarget = {
+    attributes: {},
+    disabled: false,
+    setAttribute(name, value) { this.attributes[name] = value },
+    classList: { toggle: () => {} }
+  }
+  player.upscaleButtonStateTarget = { textContent: "OFF" }
+  player.saveUpscalePreference = () => {}
+  player.canvasClasses = classes
+  return player
+}
+
+test("toggling the 4K button lazily attaches and starts the upscaler", async () => {
+  const player = makeUpscalePlayer()
+  const modules = []
+  player.loadUpscaleModule = async () => { modules.push(1); return fakeUpscaleModule() }
+
+  await player.toggleUpscale()
+
+  assert.equal(modules.length, 1)
+  assert.equal(player.upscaleEnabled, true)
+  assert.ok(player.upscaler instanceof FakeUpscaler)
+  assert.deepEqual(Array.from(player.upscaler.shaders, String), ["clamp", "restore", "upscale"])
+  assert.equal(player.upscaler.started, true)
+  assert.equal(player.upscaler.attached[0], player.videoTarget)
+  assert.equal(player.upscaler.attached[1], player.upscaleCanvasTarget)
+  assert.equal(player.canvasClasses.has("hidden"), false)
+  assert.equal(player.upscaleButtonTarget.attributes["aria-pressed"], "true")
+})
+
+test("toggling the 4K button off stops, detaches and hides the canvas", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  await player.toggleUpscale()
+  const upscaler = player.upscaler
+
+  await player.toggleUpscale()
+
+  assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.upscaler, null)
+  assert.equal(upscaler.started, false)
+  assert.equal(upscaler.attached, null)
+  assert.equal(player.canvasClasses.has("hidden"), true)
+  assert.equal(player.upscaleButtonStateTarget.textContent, "OFF")
+})
+
+test("a failed module load leaves the player on plain video and preference off", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => { throw new Error("no WebGL") }
+  const saved = []
+  player.saveUpscalePreference = (enabled) => saved.push(enabled)
+
+  await player.toggleUpscale()
+
+  assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.upscaler, null)
+  assert.equal(player.canvasClasses.has("hidden"), true)
+  assert.deepEqual(saved, [false])
+})
+
+test("HDR playback suspends upscaling and resumes it when HDR is off again", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  await player.toggleUpscale()
+  assert.equal(player.upscaleEnabled, true)
+
+  // HDR on: renderHdrControls calls syncUpscaleControls.
+  player.hdrEnabled = true
+  player.syncUpscaleControls()
+  assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.canvasClasses.has("hidden"), true)
+
+  // HDR off with the preference still saved: upscaling comes back.
+  // syncUpscaleControls kicks off the restore without awaiting it.
+  player.hdrEnabled = false
+  player.upscalePreferenceEnabled = true
+  player.syncUpscaleControls()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(player.upscaleEnabled, true)
+  assert.equal(player.canvasClasses.has("hidden"), false)
+})
+
+test("upscale preference is opt-in only", () => {
+  const player = new VideoPlayerController()
+  // No localStorage in the test context: default off, unlike HDR.
+  assert.equal(player.loadUpscalePreference(), false)
+})
+
+test("upscaler availability requires WebGL float textures", () => {
+  const player = new VideoPlayerController()
+  assert.equal(player.upscaleSupported(), false)
+
+  const good = new VideoPlayerController()
+  good.upscaleSupportedResult = true
+  assert.equal(good.upscaleSupported(), true)
+})
