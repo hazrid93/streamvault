@@ -3141,9 +3141,15 @@ export default class extends Controller {
   // Overridable for tests; resolved through the import map in the browser.
   // The 4x profile lives in separate lazy bundles (~2MB of model weights)
   // so only viewers who pick 4x download it.
+  // NOTE: import-map pin names are anime4k / anime4k-webgpu / *-ultra —
+  // engine ids ("webgl"/"webgpu") are NOT valid module specifiers.
+  upscaleModuleSpecifier(engineId, profileId) {
+    const base = engineId === "webgpu" ? "anime4k-webgpu" : "anime4k"
+    return profileId === "ultra4x" ? `${base}-ultra` : base
+  }
+
   loadUpscaleModule(engineId, profileId) {
-    const module = profileId === "ultra4x" ? `${engineId}-ultra` : engineId
-    return import(module)
+    return import(this.upscaleModuleSpecifier(engineId, profileId))
   }
 
   // ── Startup failure diagnostics ───────────────────────────────────

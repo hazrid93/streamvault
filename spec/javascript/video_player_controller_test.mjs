@@ -2703,3 +2703,22 @@ test("closeUpscaleDiagnostic hides the panel", () => {
   player.closeUpscaleDiagnostic()
   assert.equal(player.upscaleDiagnosticTarget.classList.classes.has("hidden"), true)
 })
+
+test("engine/profile ids map to real import-map pin names (not engine ids)", () => {
+  const player = new VideoPlayerController()
+  // Engine ids alone are NOT valid module specifiers — this exact bug
+  // produced "Module name 'webgpu' does not resolve to a valid URL" on
+  // every device after the engine menu shipped.
+  assert.equal(player.upscaleModuleSpecifier("webgl", "balanced"), "anime4k")
+  assert.equal(player.upscaleModuleSpecifier("webgl", "quality"), "anime4k")
+  assert.equal(player.upscaleModuleSpecifier("webgl", "ultra4x"), "anime4k-ultra")
+  assert.equal(player.upscaleModuleSpecifier("webgpu", "balanced"), "anime4k-webgpu")
+  assert.equal(player.upscaleModuleSpecifier("webgpu", "quality"), "anime4k-webgpu")
+  assert.equal(player.upscaleModuleSpecifier("webgpu", "ultra4x"), "anime4k-webgpu-ultra")
+  // Every specifier must be an actually pinned module.
+  for (const engineId of ["webgl", "webgpu"]) {
+    for (const profileId of ["balanced", "quality", "ultra4x"]) {
+      assert.ok(player.upscaleModuleSpecifier(engineId, profileId).startsWith("anime4k"))
+    }
+  }
+})
