@@ -272,8 +272,13 @@ export default class extends Controller {
     this.upscaleCanvasResizeObserver = typeof ResizeObserver !== "undefined"
       ? new ResizeObserver(() => this.layoutUpscaleCanvas())
       : null
-    if (this.upscaleCanvasResizeObserver && this.hasUpscaleWebglCanvasTarget && this.upscaleWebglCanvasTarget.parentElement) {
-      this.upscaleCanvasResizeObserver.observe(this.upscaleWebglCanvasTarget.parentElement)
+    if (this.upscaleCanvasResizeObserver) {
+      // Observe the video element too: the picture box must follow the video
+      // wherever the layout engine puts it (flex quirks, rotations).
+      this.upscaleCanvasResizeObserver.observe(this.videoTarget)
+      if (this.hasUpscaleWebglCanvasTarget && this.upscaleWebglCanvasTarget.parentElement) {
+        this.upscaleCanvasResizeObserver.observe(this.upscaleWebglCanvasTarget.parentElement)
+      }
     }
     this.upscaleVideoMetaHandler = () => this.layoutUpscaleCanvas()
     this.videoTarget.addEventListener("loadedmetadata", this.upscaleVideoMetaHandler)
@@ -3174,12 +3179,15 @@ export default class extends Controller {
 
   // ── Upscale canvas letterboxing ───────────────────────────────────
 
-  // Compute the video's contain-fit box inside the player container and
-  // place both upscale canvases exactly over it. object-fit: contain is
-  // kept as a non-WebKit fallback, but WebKit does not apply object-fit to
-  // canvas elements at all — there the explicit box is the only correct
-  // layout. Re-run on container resize (fullscreen, rotation) and video
-  // metadata changes.
+  // Place both upscale canvases exactly over the video's displayed picture,
+  // derived from MEASUREMENT, not assumptions: the video element's actual
+  // rect (getBoundingClientRect) + intrinsic aspect give the true contain-fit
+  // picture box, whatever the engine did with the flex container,
+  // percentage heights, 100vw/dvh or safe areas. Translated into the canvas's
+  // own containing block, with inset:auto so no over-constrained CSS
+  // (inset-0 + m-auto + max-*) participates — those resolve differently
+  // across engines (the iOS stretch/cutoff). Re-run on resize and metadata
+  // changes.
   layoutUpscaleCanvas() {
     const video = this.videoTarget
     if (!video || !video.videoWidth || !video.videoHeight) return
@@ -3187,29 +3195,26 @@ export default class extends Controller {
       this.hasUpscaleWebglCanvasTarget ? this.upscaleWebglCanvasTarget : null,
       this.hasUpscaleWebgpuCanvasTarget ? this.upscaleWebgpuCanvasTarget : null
     ].filter(Boolean)
+    const videoAspect = video.videoWidth / video.videoHeight
+    const videoRect = video.getBoundingClientRect()
     for (const canvas of canvases) {
-      const container = canvas.parentElement
-      if (!container) continue
-      const cw = container.clientWidth
-      const ch = container.clientHeight
-      if (!cw || !ch) continue
-      const videoAspect = video.videoWidth / video.videoHeight
-      let w = cw
-      let h = cw / videoAspect
-      if (h > ch) {
-        h = ch
-        w = ch * videoAspect
+      const anchor = canvas.offsetParent || canvas.parentElement
+      const anchorRect = anchor ? anchor.getBoundingClientRect() : { left: 0, top: 0 }
+      // Contain-fit of the video's aspect inside the video element's box.
+      let w = videoRect.width
+      let h = videoRect.width / videoAspect
+      if (h > videoRect.height) {
+        h = videoRect.height
+        w = videoRect.height * videoAspect
       }
-      canvas.style.width = `${Math.round(w)}px`
-      canvas.style.height = `${Math.round(h)}px`
-      canvas.style.left = `${Math.round((cw - w) / 2)}px`
-      canvas.style.top = `${Math.round((ch - h) / 2)}px`
-      // The CSS fallback centers via m-auto + inset-0; once this explicit
-      // box is set, those auto margins must go — on Chromium the
-      // over-constrained box (inline left/top + inset-0 + m-auto)
-      // double-offsets the canvas out of the video's letterbox box, which
-      // reads as a strip of the frame floating above the picture.
-      canvas.style.margin = "0px"
+      canvas.style.inset = "auto"
+      canvas.style.left = `${(videoRect.left - anchorRect.left) + (videoRect.width - w) / 2}px`
+      canvas.style.top = `${(videoRect.top - anchorRect.top) + (videoRect.height - h) / 2}px`
+      canvas.style.width = `${w}px`
+      canvas.style.height = `${h}px`
+      canvas.style.margin = "0"
+      canvas.style.maxWidth = "none"
+      canvas.style.maxHeight = "none"
     }
     this.updateUpscaleStats()
   }
