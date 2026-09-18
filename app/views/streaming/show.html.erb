@@ -88,7 +88,7 @@
   <%# Upscaler startup-failure diagnostics: full details plus a copy
      button, since viewers on phones have no console. Dismissable. %>
   <div data-video-player-target="upscaleDiagnostic"
-       class="hidden absolute left-1/2 z-40 w-[min(92vw,28rem)] -translate-x-1/2 rounded-lg border border-white/20 bg-black/80 p-3 shadow-2xl"
+       class="hidden absolute left-1/2 z-40 max-h-[calc(100dvh-7rem)] w-[min(92vw,28rem)] -translate-x-1/2 overflow-y-auto overscroll-contain rounded-lg border border-white/20 bg-black/80 p-3 shadow-2xl"
        style="bottom: calc(env(safe-area-inset-bottom, 0px) + 6rem);"
        role="alertdialog" aria-label="Upscaling failure details">
     <div class="mb-1.5 flex items-center justify-between">
