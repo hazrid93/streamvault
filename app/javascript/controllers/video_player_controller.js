@@ -3323,7 +3323,12 @@ export default class extends Controller {
       return true
     } catch (error) {
       console.warn("[VideoPlayer] Anime4K upscaling unavailable", error)
+      // Surface the engine + real error: "failed to start" alone hides
+      // whether the device lacks adapters, rejects a shader, or broke on
+      // context creation — the message text tells us which.
+      const reason = error && error.message ? String(error.message).slice(0, 90) : "unknown error"
       this.disableUpscale()
+      this.showPlayerNotice(`Upscaling failed to start (${engineId}: ${reason})`)
       return false
     }
   }

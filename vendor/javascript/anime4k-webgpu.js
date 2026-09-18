@@ -7,8 +7,7 @@
  * frame telemetry, async device.lost/uncapturederror hooks and a one-shot
  * renderingHealthy() readback raced with a timeout for the watchdog.
  * The 4x GAN chain lives in anime4k-webgpu-ultra.js.
- * Rebuilt with esbuild (loader: .wgsl=text) from master @ 58580db. */
-var T=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
+var U=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
 @group(0) @binding(1) var tex_out: texture_storage_2d<rgba16float, write>; // luminationX
 
 fn colorAt(x: u32, y: u32) -> vec4f {
@@ -40,7 +39,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   }
   textureStore(tex_out, vec2u(pixel.x, pixel.y), vec4f(gmax, 0, 0, 1));
 }
-`;var S=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // lumination X
+`;var M=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // lumination X
 @group(0) @binding(1) var tex_out: texture_storage_2d<rgba16float, write>; // lumination Y
 
 fn lumaAt(x: u32, y: u32) -> vec4f {
@@ -67,7 +66,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   }
   textureStore(tex_out, vec2u(pixel.x, pixel.y), vec4f(gmax, 0, 0, 1));
 }
-`;var U=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
+`;var C=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
 @group(0) @binding(1) var tex_lumi: texture_2d<f32>; // lumination Y
 @group(0) @binding(2) var tex_out: texture_storage_2d<rgba16float, write>; // output texture
 
@@ -102,7 +101,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
 
   textureStore(tex_out, vec2u(pixel.x, pixel.y), new_color);
 }
-`;var b=class{constructor({device:e,inputTexture:t,name:x="clamp highlights"}){this.name=x,this.outputTexture=e.createTexture({label:`${x}: clamp_highlights_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let o=e.createTexture({label:`${x}: statsmax_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}),r=e.createTexture({label:`${x}: statsmax_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}),i=e.createBindGroupLayout({label:`${x} lumination bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),f=e.createBindGroupLayout({label:`${x} clamp bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),s=e.createShaderModule({label:`${x}: luminationX Module`,code:T}),u=e.createShaderModule({label:`${x}: luminationY Module`,code:S}),n=e.createShaderModule({label:`${x}: clamp Module`,code:U}),_=e.createPipelineLayout({label:`${x} lumination pipeline layout`,bindGroupLayouts:[i]}),v=e.createPipelineLayout({label:`${x} clamp pipeline layout`,bindGroupLayouts:[f]}),g=e.createComputePipeline({label:`${x} luminationX pipeline`,layout:_,compute:{module:s,entryPoint:"computeMain"}}),a=e.createComputePipeline({label:`${x} luminationY pipeline`,layout:_,compute:{module:u,entryPoint:"computeMain"}}),h=e.createComputePipeline({label:`${x} clamp pipeline`,layout:v,compute:{module:n,entryPoint:"computeMain"}});this.pipelines={luminationXPipeline:g,luminationYPipeline:a,clampPipeline:h};let L=e.createBindGroup({label:`${x} luminationX bind group`,layout:i,entries:[{binding:0,resource:t.createView()},{binding:1,resource:o.createView()}]}),G=e.createBindGroup({label:`${x} luminationY bind group`,layout:i,entries:[{binding:0,resource:o.createView()},{binding:1,resource:r.createView()}]}),l=e.createBindGroup({label:`${x} clamp bind group`,layout:f,entries:[{binding:0,resource:t.createView()},{binding:1,resource:r.createView()},{binding:2,resource:this.outputTexture.createView()}]});this.bindGroups={luminationXBindGroup:L,luminationYBindGroup:G,clampBindGroup:l}}updateParam(e,t){throw new Error(`${this.name} has no param.`)}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipelines.luminationXPipeline),t.setBindGroup(0,this.bindGroups.luminationXBindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),t.end();let x=e.beginComputePass();x.setPipeline(this.pipelines.luminationYPipeline),x.setBindGroup(0,this.bindGroups.luminationYBindGroup),x.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),x.end();let o=e.beginComputePass();o.setPipeline(this.pipelines.clampPipeline),o.setBindGroup(0,this.bindGroups.clampBindGroup),o.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),o.end()}getOutputTexture(){return this.outputTexture}};var M=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x3
+`;var b=class{constructor({device:e,inputTexture:t,name:x="clamp highlights"}){this.name=x,this.outputTexture=e.createTexture({label:`${x}: clamp_highlights_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let o=e.createTexture({label:`${x}: statsmax_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}),r=e.createTexture({label:`${x}: statsmax_texture`,size:[t.width,t.height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}),i=e.createBindGroupLayout({label:`${x} lumination bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),f=e.createBindGroupLayout({label:`${x} clamp bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),s=e.createShaderModule({label:`${x}: luminationX Module`,code:U}),u=e.createShaderModule({label:`${x}: luminationY Module`,code:M}),a=e.createShaderModule({label:`${x}: clamp Module`,code:C}),_=e.createPipelineLayout({label:`${x} lumination pipeline layout`,bindGroupLayouts:[i]}),d=e.createPipelineLayout({label:`${x} clamp pipeline layout`,bindGroupLayouts:[f]}),c=e.createComputePipeline({label:`${x} luminationX pipeline`,layout:_,compute:{module:s,entryPoint:"computeMain"}}),p=e.createComputePipeline({label:`${x} luminationY pipeline`,layout:_,compute:{module:u,entryPoint:"computeMain"}}),h=e.createComputePipeline({label:`${x} clamp pipeline`,layout:d,compute:{module:a,entryPoint:"computeMain"}});this.pipelines={luminationXPipeline:c,luminationYPipeline:p,clampPipeline:h};let L=e.createBindGroup({label:`${x} luminationX bind group`,layout:i,entries:[{binding:0,resource:t.createView()},{binding:1,resource:o.createView()}]}),G=e.createBindGroup({label:`${x} luminationY bind group`,layout:i,entries:[{binding:0,resource:o.createView()},{binding:1,resource:r.createView()}]}),P=e.createBindGroup({label:`${x} clamp bind group`,layout:f,entries:[{binding:0,resource:t.createView()},{binding:1,resource:r.createView()},{binding:2,resource:this.outputTexture.createView()}]});this.bindGroups={luminationXBindGroup:L,luminationYBindGroup:G,clampBindGroup:P}}updateParam(e,t){throw new Error(`${this.name} has no param.`)}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipelines.luminationXPipeline),t.setBindGroup(0,this.bindGroups.luminationXBindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),t.end();let x=e.beginComputePass();x.setPipeline(this.pipelines.luminationYPipeline),x.setBindGroup(0,this.bindGroups.luminationYBindGroup),x.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),x.end();let o=e.beginComputePass();o.setPipeline(this.pipelines.clampPipeline),o.setBindGroup(0,this.bindGroups.clampBindGroup),o.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),o.end()}getOutputTexture(){return this.outputTexture}};var A=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x3
 // Name: conv2dtf
 // Inputs: ['MAIN']
 // Output: conv2d_tf
@@ -135,7 +134,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.061233472, 0.39222646, 0.029704979, 0.02586828);
   textureStore(conv2d_tf_tex, pixel.xy, result);
 }
-`;var C=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var E=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d1tf
 // Inputs: ['conv2d_tf']
 // Output: conv2d_1_tf
@@ -185,7 +184,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.018297346, -0.080951825, -0.062163066, -0.08050014);
   textureStore(conv2d_1_tf_tex, pixel.xy, result);
 }
-`;var A=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var I=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d2tf
 // Inputs: ['conv2d_1_tf']
 // Output: conv2d_2_tf
@@ -235,7 +234,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.008952847, -0.0058945753, -0.08097229, 0.020968592);
   textureStore(conv2d_2_tf_tex, pixel.xy, result);
 }
-`;var E=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var B=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d3tf
 // Inputs: ['conv2d_2_tf']
 // Output: conv2d_3_tf
@@ -285,7 +284,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.059377354, -0.02055341, 0.07234869, -0.015452986);
   textureStore(conv2d_3_tf_tex, pixel.xy, result);
 }
-`;var I=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var D=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d4tf
 // Inputs: ['conv2d_3_tf']
 // Output: conv2d_4_tf
@@ -335,7 +334,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.048888464, -0.0561434, 0.030690912, -0.030496685);
   textureStore(conv2d_4_tf_tex, pixel.xy, result);
 }
-`;var B=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var k=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d5tf
 // Inputs: ['conv2d_4_tf']
 // Output: conv2d_5_tf
@@ -385,7 +384,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.011169491, 0.032399546, 0.138099, 0.023857072);
   textureStore(conv2d_5_tf_tex, pixel.xy, result);
 }
-`;var D=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
+`;var K=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-4x3x3x8
 // Name: conv2d6tf
 // Inputs: ['conv2d_5_tf']
 // Output: conv2d_6_tf
@@ -435,7 +434,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.013687534, -0.08185164, -0.04755438, 0.290178);
   textureStore(conv2d_6_tf_tex, pixel.xy, result);
 }
-`;var k=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-3x1x1x56
+`;var V=`// Layer: Anime4K-v4.0-Restore-CNN-(M)-Conv-3x1x1x56
 // Name: output
 // Inputs: ['MAIN', 'conv2d_tf', 'conv2d_1_tf', 'conv2d_2_tf', 'conv2d_3_tf', 'conv2d_4_tf', 'conv2d_5_tf', 'conv2d_6_tf']
 // Output: output
@@ -535,7 +534,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.010478934, -0.008364784, -0.010246552, 0.0);
   textureStore(output_tex, pixel.xy, result);
 }
-`;var p=class{constructor({device:e,inputTextures:t,shaderWGSL:x,name:o="conv2d"}){this.name=o;let r=t.length;if(r===0)throw Error(`${o}: 0 input textures for conv2d.`);if(x===void 0)throw Error(`${o}: shader not defined.`);this.outputTexture=e.createTexture({label:`${o}: conv2d_texture`,size:[t[0].width,t[0].height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let i=e.createShaderModule({label:`${o}: conv2dModule`,code:x}),f=[];for(let _=0;_<r;_+=1)f.push({binding:_,visibility:GPUShaderStage.COMPUTE,texture:{}});f.push({binding:r,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}});let s=e.createBindGroupLayout({label:`${o}: ${r} to 1 convolution bind group layout`,entries:f}),u=[];for(let _=0;_<r;_+=1)u.push({binding:_,resource:t[_].createView()});u.push({binding:r,resource:this.outputTexture.createView()}),this.bindGroup=e.createBindGroup({label:`${o}: bind group`,layout:s,entries:u});let n=e.createPipelineLayout({label:`${o}: pipeline layout`,bindGroupLayouts:[s]});this.pipeline=e.createComputePipeline({label:`${o}: pipeline`,layout:n,compute:{module:i,entryPoint:"computeMain"}})}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),t.end()}getOutputTexture(){return this.outputTexture}};var K=`@group(0) @binding(0) var tex_0: texture_2d<f32>;
+`;var n=class{constructor({device:e,inputTextures:t,shaderWGSL:x,name:o="conv2d"}){this.name=o;let r=t.length;if(r===0)throw Error(`${o}: 0 input textures for conv2d.`);if(x===void 0)throw Error(`${o}: shader not defined.`);this.outputTexture=e.createTexture({label:`${o}: conv2d_texture`,size:[t[0].width,t[0].height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let i=e.createShaderModule({label:`${o}: conv2dModule`,code:x}),f=[];for(let _=0;_<r;_+=1)f.push({binding:_,visibility:GPUShaderStage.COMPUTE,texture:{}});f.push({binding:r,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}});let s=e.createBindGroupLayout({label:`${o}: ${r} to 1 convolution bind group layout`,entries:f}),u=[];for(let _=0;_<r;_+=1)u.push({binding:_,resource:t[_].createView()});u.push({binding:r,resource:this.outputTexture.createView()}),this.bindGroup=e.createBindGroup({label:`${o}: bind group`,layout:s,entries:u});let a=e.createPipelineLayout({label:`${o}: pipeline layout`,bindGroupLayouts:[s]});this.pipeline=e.createComputePipeline({label:`${o}: pipeline`,layout:a,compute:{module:i,entryPoint:"computeMain"}})}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/8),Math.ceil(this.outputTexture.height/8)),t.end()}getOutputTexture(){return this.outputTexture}};var R=`@group(0) @binding(0) var tex_0: texture_2d<f32>;
 @group(0) @binding(1) var tex_1: texture_2d<f32>;
 @group(0) @binding(2) var tex_2: texture_2d<f32>;
 @group(0) @binding(3) var tex_out: texture_storage_2d<rgba16float, write>;
@@ -562,7 +561,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
 
     textureStore(tex_out, pixel.xy, vec4f(c0, c1, c2, c3));
 }
-`;var y=class{constructor({device:e,inputTextures:t,name:x="depth to space"}){if(t.length!==3)throw Error(`expect 3 textures for depth2Space, got ${t.length}`);this.name=x,this.outputTexture=e.createTexture({label:`${x}: depth_to_space_texture`,size:[2*t[0].width,2*t[0].height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let o=e.createShaderModule({label:`${x}: depthToSpace Module`,code:K}),r=e.createBindGroupLayout({label:`${x}depth to space bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:2,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),i=e.createPipelineLayout({label:"depth to space pipeline layout",bindGroupLayouts:[r]});this.pipeline=e.createComputePipeline({label:"depth to space pipeline",layout:i,compute:{module:o,entryPoint:"computeMain"}}),this.bindGroup=e.createBindGroup({layout:r,entries:[{binding:0,resource:t[0].createView()},{binding:1,resource:t[1].createView()},{binding:2,resource:t[2].createView()},{binding:3,resource:this.outputTexture.createView()}]})}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/4),Math.ceil(this.outputTexture.height/4)),t.end()}getOutputTexture(){return this.outputTexture}};var V=`struct VertexOutput {
+`;var y=class{constructor({device:e,inputTextures:t,name:x="depth to space"}){if(t.length!==3)throw Error(`expect 3 textures for depth2Space, got ${t.length}`);this.name=x,this.outputTexture=e.createTexture({label:`${x}: depth_to_space_texture`,size:[2*t[0].width,2*t[0].height,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});let o=e.createShaderModule({label:`${x}: depthToSpace Module`,code:R}),r=e.createBindGroupLayout({label:`${x}depth to space bind group layout`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:1,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:2,visibility:GPUShaderStage.COMPUTE,texture:{}},{binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}}]}),i=e.createPipelineLayout({label:"depth to space pipeline layout",bindGroupLayouts:[r]});this.pipeline=e.createComputePipeline({label:"depth to space pipeline",layout:i,compute:{module:o,entryPoint:"computeMain"}}),this.bindGroup=e.createBindGroup({layout:r,entries:[{binding:0,resource:t[0].createView()},{binding:1,resource:t[1].createView()},{binding:2,resource:t[2].createView()},{binding:3,resource:this.outputTexture.createView()}]})}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){let t=e.beginComputePass();t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.dispatchWorkgroups(Math.ceil(this.outputTexture.width/4),Math.ceil(this.outputTexture.height/4)),t.end()}getOutputTexture(){return this.outputTexture}};var W=`struct VertexOutput {
   @builtin(position) Position : vec4<f32>,
   @location(0) fragUV : vec2<f32>,
 }
@@ -592,7 +591,7 @@ fn vert_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
   output.fragUV = uv[VertexIndex];
   return output;
 }
-`;var R=`@group(0) @binding(0) var mySampler: sampler;
+`;var z=`@group(0) @binding(0) var mySampler: sampler;
 @group(0) @binding(1) var tex_diff: texture_2d<f32>;
 @group(0) @binding(2) var tex_origin: texture_2d<f32>;
 
@@ -602,7 +601,7 @@ fn main(@location(0) fragUV: vec2<f32>) -> @location(0) vec4<f32> {
     let color_addon: vec4f = textureSample(tex_diff, mySampler, fragUV);
     return clamp(color_bilinear + color_addon, vec4<f32>(0., 0., 0., 0.), vec4<f32>(1., 1., 1., 1.));
 }
-`;var c=class{constructor({device:e,inputTextures:t,outputTextureSize:x,fragmentWGSL:o=R,name:r="overlay"}){let i=t.length;if(this.name=r,o===void 0)throw Error(`${r}: shader not defined.`);this.outputTexture=e.createTexture({label:`${r}: output texture`,size:[x[0],x[1],1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.STORAGE_BINDING});let f=e.createShaderModule({label:`${r}: vertex module`,code:V}),s=e.createShaderModule({label:`${r}: fragment module`,code:o}),u=[];u.push({binding:0,visibility:GPUShaderStage.FRAGMENT,sampler:{}});for(let a=1;a<=i;a+=1)u.push({binding:a,visibility:GPUShaderStage.FRAGMENT,texture:{}});let n=e.createBindGroupLayout({label:`${r}: bind group layout`,entries:u}),_=e.createPipelineLayout({label:`${r}: pipeline layout`,bindGroupLayouts:[n]});this.pipeline=e.createRenderPipeline({layout:_,vertex:{module:f,entryPoint:"vert_main"},fragment:{module:s,entryPoint:"main",targets:[{format:"rgba16float"}]},primitive:{topology:"triangle-list"}});let v=e.createSampler({magFilter:"linear",minFilter:"linear"}),g=[];g.push({binding:0,resource:v});for(let a=1;a<=i;a+=1)g.push({binding:a,resource:t[a-1].createView()});this.bindGroup=e.createBindGroup({label:`${r}: bind group`,layout:n,entries:g})}updateParam(e,t){throw new Error(`${this.constructor.name} has no param`)}pass(e){let t=e.beginRenderPass({colorAttachments:[{view:this.outputTexture.createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.draw(6),t.end()}getOutputTexture(){return this.outputTexture}};var P=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[M,C,A,E,I,B,D];this.pipelines.push(new p({device:e,inputTextures:[t],shaderWGSL:x[0],name:"conv2d_tf"}));for(let r=1;r<x.length;r+=1)this.pipelines.push(new p({device:e,inputTextures:[this.pipelines[r-1].getOutputTexture()],shaderWGSL:x[r],name:`conv2d_${r}_tf`}));let o=[];this.fillOutputTextures(o,0,7),this.pipelines.push(new p({device:e,inputTextures:o,shaderWGSL:k,name:"output"})),this.pipelines.push(new c({device:e,inputTextures:[t,this.pipelines[this.pipelines.length-1].getOutputTexture()],outputTextureSize:[t.width,t.height]}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}};var W=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x3
+`;var v=class{constructor({device:e,inputTextures:t,outputTextureSize:x,fragmentWGSL:o=z,name:r="overlay"}){let i=t.length;if(this.name=r,o===void 0)throw Error(`${r}: shader not defined.`);this.outputTexture=e.createTexture({label:`${r}: output texture`,size:[x[0],x[1],1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.STORAGE_BINDING});let f=e.createShaderModule({label:`${r}: vertex module`,code:W}),s=e.createShaderModule({label:`${r}: fragment module`,code:o}),u=[];u.push({binding:0,visibility:GPUShaderStage.FRAGMENT,sampler:{}});for(let p=1;p<=i;p+=1)u.push({binding:p,visibility:GPUShaderStage.FRAGMENT,texture:{}});let a=e.createBindGroupLayout({label:`${r}: bind group layout`,entries:u}),_=e.createPipelineLayout({label:`${r}: pipeline layout`,bindGroupLayouts:[a]});this.pipeline=e.createRenderPipeline({layout:_,vertex:{module:f,entryPoint:"vert_main"},fragment:{module:s,entryPoint:"main",targets:[{format:"rgba16float"}]},primitive:{topology:"triangle-list"}});let d=e.createSampler({magFilter:"linear",minFilter:"linear"}),c=[];c.push({binding:0,resource:d});for(let p=1;p<=i;p+=1)c.push({binding:p,resource:t[p-1].createView()});this.bindGroup=e.createBindGroup({label:`${r}: bind group`,layout:a,entries:c})}updateParam(e,t){throw new Error(`${this.constructor.name} has no param`)}pass(e){let t=e.beginRenderPass({colorAttachments:[{view:this.outputTexture.createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});t.setPipeline(this.pipeline),t.setBindGroup(0,this.bindGroup),t.draw(6),t.end()}getOutputTexture(){return this.outputTexture}};var O=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[A,E,I,B,D,k,K];this.pipelines.push(new n({device:e,inputTextures:[t],shaderWGSL:x[0],name:"conv2d_tf"}));for(let r=1;r<x.length;r+=1)this.pipelines.push(new n({device:e,inputTextures:[this.pipelines[r-1].getOutputTexture()],shaderWGSL:x[r],name:`conv2d_${r}_tf`}));let o=[];this.fillOutputTextures(o,0,7),this.pipelines.push(new n({device:e,inputTextures:o,shaderWGSL:V,name:"output"})),this.pipelines.push(new v({device:e,inputTextures:[t,this.pipelines[this.pipelines.length-1].getOutputTexture()],outputTextureSize:[t.width,t.height]}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}};var $=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x3
 // Name: conv2dtf
 // Inputs: ['MAIN']
 // Output: conv2d_tf
@@ -635,7 +634,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.046043985, 0.055581126, -0.08791638, -0.13022089);
   textureStore(conv2d_tf_tex, pixel.xy, result);
 }
-`;var z=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x3
+`;var H=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x3
 // Name: conv2dtf1
 // Inputs: ['MAIN']
 // Output: conv2d_tf1
@@ -668,7 +667,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.0022791293, -0.024132347, -0.57621074, 0.028573977);
   textureStore(conv2d_tf1_tex, pixel.xy, result);
 }
-`;var $=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var F=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d1tf
 // Inputs: ['conv2d_tf', 'conv2d_tf1']
 // Output: conv2d_1_tf
@@ -745,7 +744,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.018166734, -0.11002478, -0.05554318, -0.0988193);
   textureStore(conv2d_1_tf_tex, pixel.xy, result);
 }
-`;var H=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var X=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d1tf1
 // Inputs: ['conv2d_tf', 'conv2d_tf1']
 // Output: conv2d_1_tf1
@@ -822,7 +821,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.022609137, -0.028548084, 0.024431901, 0.010504478);
   textureStore(conv2d_1_tf1_tex, pixel.xy, result);
 }
-`;var F=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var Y=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d2tf
 // Inputs: ['conv2d_1_tf', 'conv2d_1_tf1']
 // Output: conv2d_2_tf
@@ -899,7 +898,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.022956269, 0.029688787, -0.070148066, -0.07163476);
   textureStore(conv2d_2_tf_tex, pixel.xy, result);
 }
-`;var X=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var q=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d2tf1
 // Inputs: ['conv2d_1_tf', 'conv2d_1_tf1']
 // Output: conv2d_2_tf1
@@ -976,7 +975,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.103826486, 0.045373913, 0.11565896, -0.06568643);
   textureStore(conv2d_2_tf1_tex, pixel.xy, result);
 }
-`;var Y=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var Z=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d3tf
 // Inputs: ['conv2d_2_tf', 'conv2d_2_tf1']
 // Output: conv2d_3_tf
@@ -1053,7 +1052,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.0001705175, -0.031081453, 0.010100773, -0.027214011);
   textureStore(conv2d_3_tf_tex, pixel.xy, result);
 }
-`;var q=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var Q=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d3tf1
 // Inputs: ['conv2d_2_tf', 'conv2d_2_tf1']
 // Output: conv2d_3_tf1
@@ -1130,7 +1129,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.012053958, -4.6962363e-05, 0.0020099226, -0.033494607);
   textureStore(conv2d_3_tf1_tex, pixel.xy, result);
 }
-`;var Z=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var j=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d4tf
 // Inputs: ['conv2d_3_tf', 'conv2d_3_tf1']
 // Output: conv2d_4_tf
@@ -1207,7 +1206,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.034743138, 0.012946433, -0.082333155, 0.07721756);
   textureStore(conv2d_4_tf_tex, pixel.xy, result);
 }
-`;var Q=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var J=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d4tf1
 // Inputs: ['conv2d_3_tf', 'conv2d_3_tf1']
 // Output: conv2d_4_tf1
@@ -1284,7 +1283,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.08895955, -0.027667087, 0.20500831, 0.00037762933);
   textureStore(conv2d_4_tf1_tex, pixel.xy, result);
 }
-`;var j=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var e0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d5tf
 // Inputs: ['conv2d_4_tf', 'conv2d_4_tf1']
 // Output: conv2d_5_tf
@@ -1361,7 +1360,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.043347504, -0.20504741, -0.037821215, -0.014486937);
   textureStore(conv2d_5_tf_tex, pixel.xy, result);
 }
-`;var J=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var t0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d5tf1
 // Inputs: ['conv2d_4_tf', 'conv2d_4_tf1']
 // Output: conv2d_5_tf1
@@ -1438,7 +1437,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.011865144, 0.11717201, -0.13823777, -0.059450272);
   textureStore(conv2d_5_tf1_tex, pixel.xy, result);
 }
-`;var e0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var x0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d6tf
 // Inputs: ['conv2d_5_tf', 'conv2d_5_tf1']
 // Output: conv2d_6_tf
@@ -1515,7 +1514,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.02981662, -0.26338395, -0.011632586, 0.15063232);
   textureStore(conv2d_6_tf_tex, pixel.xy, result);
 }
-`;var t0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var o0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d6tf1
 // Inputs: ['conv2d_5_tf', 'conv2d_5_tf1']
 // Output: conv2d_6_tf1
@@ -1592,7 +1591,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.18765923, -0.07697714, 0.028134674, -0.060966115);
   textureStore(conv2d_6_tf1_tex, pixel.xy, result);
 }
-`;var x0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var r0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d7tf
 // Inputs: ['conv2d_6_tf', 'conv2d_6_tf1']
 // Output: conv2d_7_tf
@@ -1669,7 +1668,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.19233678, 0.016725872, -0.008011114, -0.1977463);
   textureStore(conv2d_7_tf_tex, pixel.xy, result);
 }
-`;var o0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
+`;var i0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-4x3x3x16
 // Name: conv2d7tf1
 // Inputs: ['conv2d_6_tf', 'conv2d_6_tf1']
 // Output: conv2d_7_tf1
@@ -1746,7 +1745,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.26886886, 0.05874665, 0.10268232, 0.05833081);
   textureStore(conv2d_7_tf1_tex, pixel.xy, result);
 }
-`;var r0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-3x1x1x112
+`;var _0=`// Layer: Anime4K-v4.0-Restore-CNN-(VL)-Conv-3x1x1x112
 // Name: output
 // Inputs: ['MAIN', 'conv2d_1_tf', 'conv2d_1_tf1', 'conv2d_2_tf', 'conv2d_2_tf1', 'conv2d_3_tf', 'conv2d_3_tf1', 'conv2d_4_tf', 'conv2d_4_tf1', 'conv2d_5_tf', 'conv2d_5_tf1', 'conv2d_6_tf', 'conv2d_6_tf1', 'conv2d_7_tf', 'conv2d_7_tf1']
 // Output: output
@@ -1923,7 +1922,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.047567394, -0.02504617, -0.028163986, 0.0);
   textureStore(output_tex, pixel.xy, result);
 }
-`;var O=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[W,z,$,H,F,X,Y,q,Z,Q,j,J,e0,t0,x0,o0];this.pushPipeline(e,[t],x[0],"conv2d_tf"),this.pushPipeline(e,[t],x[1],"conv2d_tf_1");let o=[];for(let i=1;i<8;i+=1)o.length=0,this.fillOutputTextures(o,2*(i-1),2),this.pushPipeline(e,o,x[2*i],`conv2d_${i}_tf`),this.pushPipeline(e,o,x[2*i+1],`conv2d_${i}_tf_1`);let r=[];this.fillOutputTextures(r,2,14),this.pipelines.push(new p({device:e,inputTextures:r,shaderWGSL:r0,name:"output"})),this.pipelines.push(new c({device:e,inputTextures:[t,this.pipelines[this.pipelines.length-1].getOutputTexture()],outputTextureSize:[t.width,t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new p({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var i0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x3
+`;var w=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[$,H,F,X,Y,q,Z,Q,j,J,e0,t0,x0,o0,r0,i0];this.pushPipeline(e,[t],x[0],"conv2d_tf"),this.pushPipeline(e,[t],x[1],"conv2d_tf_1");let o=[];for(let i=1;i<8;i+=1)o.length=0,this.fillOutputTextures(o,2*(i-1),2),this.pushPipeline(e,o,x[2*i],`conv2d_${i}_tf`),this.pushPipeline(e,o,x[2*i+1],`conv2d_${i}_tf_1`);let r=[];this.fillOutputTextures(r,2,14),this.pipelines.push(new n({device:e,inputTextures:r,shaderWGSL:_0,name:"output"})),this.pipelines.push(new v({device:e,inputTextures:[t,this.pipelines[this.pipelines.length-1].getOutputTexture()],outputTextureSize:[t.width,t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new n({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var f0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x3
 // Name: conv2dtf
 // Inputs: ['MAIN']
 // Output: conv2d_tf
@@ -1956,7 +1955,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.014463938, -0.0031906287, 0.007015422, -0.003888468);
   textureStore(conv2d_tf_tex, pixel.xy, result);
 }
-`;var _0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var u0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d1tf
 // Inputs: ['conv2d_tf']
 // Output: conv2d_1_tf
@@ -2006,7 +2005,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.032014452, -0.020821465, 0.0826416, -0.002838458);
   textureStore(conv2d_1_tf_tex, pixel.xy, result);
 }
-`;var f0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var l0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d2tf
 // Inputs: ['conv2d_1_tf']
 // Output: conv2d_2_tf
@@ -2056,7 +2055,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.0766796, 0.08115133, -0.05703058, 0.14025708);
   textureStore(conv2d_2_tf_tex, pixel.xy, result);
 }
-`;var u0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var a0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d3tf
 // Inputs: ['conv2d_2_tf']
 // Output: conv2d_3_tf
@@ -2106,7 +2105,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.05101961, -0.060740646, -0.024465766, 0.058471628);
   textureStore(conv2d_3_tf_tex, pixel.xy, result);
 }
-`;var l0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var p0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d4tf
 // Inputs: ['conv2d_3_tf']
 // Output: conv2d_4_tf
@@ -2156,7 +2155,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.0015292584, -0.043625206, -0.09429898, -0.06280405);
   textureStore(conv2d_4_tf_tex, pixel.xy, result);
 }
-`;var a0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var n0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d5tf
 // Inputs: ['conv2d_4_tf']
 // Output: conv2d_5_tf
@@ -2206,7 +2205,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.04400571, -0.04015565, 0.0140529545, 0.05474095);
   textureStore(conv2d_5_tf_tex, pixel.xy, result);
 }
-`;var p0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
+`;var s0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x3x3x8
 // Name: conv2d6tf
 // Inputs: ['conv2d_5_tf']
 // Output: conv2d_6_tf
@@ -2256,7 +2255,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.02021373, 0.0014037411, 0.0012718709, 0.017278494);
   textureStore(conv2d_6_tf_tex, pixel.xy, result);
 }
-`;var n0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x1x1x56
+`;var c0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(M)-Conv-4x1x1x56
 // Name: conv2dlasttf
 // Inputs: ['conv2d_tf', 'conv2d_1_tf', 'conv2d_2_tf', 'conv2d_3_tf', 'conv2d_4_tf', 'conv2d_5_tf', 'conv2d_6_tf']
 // Output: conv2d_last_tf
@@ -2356,7 +2355,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.016836504, 0.010161949, 0.021351453, 0.01278978);
   textureStore(conv2d_last_tf_tex, pixel.xy, result);
 }
-`;var w=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[i0,_0,f0,u0,l0,a0,p0,n0];this.pushPipeline(e,[t],x[0],"conv2d_tf");for(let r=1;r<x.length-1;r+=1)this.pushPipeline(e,[this.pipelines[r-1].getOutputTexture()],x[r],`conv2d_${r}_tf`);let o=[];this.fillOutputTextures(o,0,7),this.pushPipeline(e,o,x[x.length-1],"conv2d_last_tf"),o.length=0,o.push(this.getOutputTexture()),o.push(this.getOutputTexture()),o.push(this.getOutputTexture()),this.pipelines.push(new y({device:e,inputTextures:o,name:"DepthToSpace"})),this.pipelines.push(new c({device:e,inputTextures:[t,this.getOutputTexture()],outputTextureSize:[2*t.width,2*t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new p({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var s0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x3
+`;var N=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[f0,u0,l0,a0,p0,n0,s0,c0];this.pushPipeline(e,[t],x[0],"conv2d_tf");for(let r=1;r<x.length-1;r+=1)this.pushPipeline(e,[this.pipelines[r-1].getOutputTexture()],x[r],`conv2d_${r}_tf`);let o=[];this.fillOutputTextures(o,0,7),this.pushPipeline(e,o,x[x.length-1],"conv2d_last_tf"),o.length=0,o.push(this.getOutputTexture()),o.push(this.getOutputTexture()),o.push(this.getOutputTexture()),this.pipelines.push(new y({device:e,inputTextures:o,name:"DepthToSpace"})),this.pipelines.push(new v({device:e,inputTextures:[t,this.getOutputTexture()],outputTextureSize:[2*t.width,2*t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new n({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var v0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x3
 // Name: conv2dtf
 // Inputs: ['MAIN']
 // Output: conv2d_tf
@@ -2389,7 +2388,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.0072128535, -0.05658625, 0.052939568, -0.1760861);
   textureStore(conv2d_tf_tex, pixel.xy, result);
 }
-`;var c0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x3
+`;var m0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x3
 // Name: conv2dtf1
 // Inputs: ['MAIN']
 // Output: conv2d_tf1
@@ -2422,7 +2421,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.007717166, -0.027800834, 0.0795002, 0.0053199283);
   textureStore(conv2d_tf1_tex, pixel.xy, result);
 }
-`;var v0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var g0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d1tf
 // Inputs: ['conv2d_tf', 'conv2d_tf1']
 // Output: conv2d_1_tf
@@ -2499,7 +2498,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.0216415, 0.09015036, -0.030761974, -0.26541537);
   textureStore(conv2d_1_tf_tex, pixel.xy, result);
 }
-`;var m0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var d0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d1tf1
 // Inputs: ['conv2d_tf', 'conv2d_tf1']
 // Output: conv2d_1_tf1
@@ -2576,7 +2575,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.060742114, -0.037577342, 0.055704296, 0.03134311);
   textureStore(conv2d_1_tf1_tex, pixel.xy, result);
 }
-`;var g0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var y0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d2tf
 // Inputs: ['conv2d_1_tf', 'conv2d_1_tf1']
 // Output: conv2d_2_tf
@@ -2653,7 +2652,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.06427697, -0.00039365015, 0.011889719, 0.060232002);
   textureStore(conv2d_2_tf_tex, pixel.xy, result);
 }
-`;var d0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var b0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d2tf1
 // Inputs: ['conv2d_1_tf', 'conv2d_1_tf1']
 // Output: conv2d_2_tf1
@@ -2730,7 +2729,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.0063728676, -0.029053684, -0.052831043, 0.006475641);
   textureStore(conv2d_2_tf1_tex, pixel.xy, result);
 }
-`;var y0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var h0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d3tf
 // Inputs: ['conv2d_2_tf', 'conv2d_2_tf1']
 // Output: conv2d_3_tf
@@ -2807,7 +2806,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.056541316, 0.041788545, -0.036094554, -0.021763096);
   textureStore(conv2d_3_tf_tex, pixel.xy, result);
 }
-`;var b0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var L0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d3tf1
 // Inputs: ['conv2d_2_tf', 'conv2d_2_tf1']
 // Output: conv2d_3_tf1
@@ -2884,7 +2883,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.07722432, -0.025165567, 0.034291282, -0.09902708);
   textureStore(conv2d_3_tf1_tex, pixel.xy, result);
 }
-`;var h0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var G0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d4tf
 // Inputs: ['conv2d_3_tf', 'conv2d_3_tf1']
 // Output: conv2d_4_tf
@@ -2961,7 +2960,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.04244928, -0.014280219, 0.017129054, -0.08807801);
   textureStore(conv2d_4_tf_tex, pixel.xy, result);
 }
-`;var L0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var P0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d4tf1
 // Inputs: ['conv2d_3_tf', 'conv2d_3_tf1']
 // Output: conv2d_4_tf1
@@ -3038,7 +3037,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.14375664, -0.0056876075, 0.052177623, 0.07152566);
   textureStore(conv2d_4_tf1_tex, pixel.xy, result);
 }
-`;var G0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var O0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d5tf
 // Inputs: ['conv2d_4_tf', 'conv2d_4_tf1']
 // Output: conv2d_5_tf
@@ -3115,7 +3114,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.024455175, 0.01669877, -0.066231176, 0.036848705);
   textureStore(conv2d_5_tf_tex, pixel.xy, result);
 }
-`;var P0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var w0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d5tf1
 // Inputs: ['conv2d_4_tf', 'conv2d_4_tf1']
 // Output: conv2d_5_tf1
@@ -3192,7 +3191,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.023832673, 0.03702965, -0.04749135, -0.10982549);
   textureStore(conv2d_5_tf1_tex, pixel.xy, result);
 }
-`;var O0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var N0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d6tf
 // Inputs: ['conv2d_5_tf', 'conv2d_5_tf1']
 // Output: conv2d_6_tf
@@ -3269,7 +3268,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.00590038, 0.03082865, 0.002111702, -0.03330112);
   textureStore(conv2d_6_tf_tex, pixel.xy, result);
 }
-`;var w0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
+`;var T0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x3x3x16
 // Name: conv2d6tf1
 // Inputs: ['conv2d_5_tf', 'conv2d_5_tf1']
 // Output: conv2d_6_tf1
@@ -3346,7 +3345,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.03573331, 0.032919675, 0.011109369, 0.008329268);
   textureStore(conv2d_6_tf1_tex, pixel.xy, result);
 }
-`;var N0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
+`;var S0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
 // Name: conv2dlasttf
 // Inputs: ['conv2d_tf', 'conv2d_tf1', 'conv2d_1_tf', 'conv2d_1_tf1', 'conv2d_2_tf', 'conv2d_2_tf1', 'conv2d_3_tf', 'conv2d_3_tf1', 'conv2d_4_tf', 'conv2d_4_tf1', 'conv2d_5_tf', 'conv2d_5_tf1', 'conv2d_6_tf', 'conv2d_6_tf1']
 // Output: conv2d_last_tf
@@ -3523,7 +3522,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(-0.10795144, -0.09953324, -0.055413827, -0.03875493);
   textureStore(conv2d_last_tf_tex, pixel.xy, result);
 }
-`;var T0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
+`;var U0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
 // Name: conv2dlasttf1
 // Inputs: ['conv2d_tf', 'conv2d_tf1', 'conv2d_1_tf', 'conv2d_1_tf1', 'conv2d_2_tf', 'conv2d_2_tf1', 'conv2d_3_tf', 'conv2d_3_tf1', 'conv2d_4_tf', 'conv2d_4_tf1', 'conv2d_5_tf', 'conv2d_5_tf1', 'conv2d_6_tf', 'conv2d_6_tf1']
 // Output: conv2d_last_tf1
@@ -3700,7 +3699,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.06026231, 0.040204916, 0.037672628, 0.023496555);
   textureStore(conv2d_last_tf1_tex, pixel.xy, result);
 }
-`;var S0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
+`;var M0=`// Layer: Anime4K-v3.2-Upscale-CNN-x2-(VL)-Conv-4x1x1x112
 // Name: conv2dlasttf2
 // Inputs: ['conv2d_tf', 'conv2d_tf1', 'conv2d_1_tf', 'conv2d_1_tf1', 'conv2d_2_tf', 'conv2d_2_tf1', 'conv2d_3_tf', 'conv2d_3_tf1', 'conv2d_4_tf', 'conv2d_4_tf1', 'conv2d_5_tf', 'conv2d_5_tf1', 'conv2d_6_tf', 'conv2d_6_tf1']
 // Output: conv2d_last_tf2
@@ -3877,7 +3876,7 @@ fn computeMain(@builtin(global_invocation_id) pixel: vec3u) {
   result += vec4f(0.069033325, 0.040207114, 0.027286075, 0.0065334598);
   textureStore(conv2d_last_tf2_tex, pixel.xy, result);
 }
-`;var N=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[s0,c0,v0,m0,g0,d0,y0,b0,h0,L0,G0,P0,O0,w0,N0,T0,S0];this.pushPipeline(e,[t],x[0],"conv2d_tf"),this.pushPipeline(e,[t],x[1],"conv2d_tf_1");let o=[];for(let i=1;i<7;i+=1)o.length=0,this.fillOutputTextures(o,2*(i-1),2),this.pushPipeline(e,o,x[2*i],`conv2d_${i}_tf`),this.pushPipeline(e,o,x[2*i+1],`conv2d_${i}_tf_1`);o.length=0,this.fillOutputTextures(o,0,this.pipelines.length);let r=x.length;for(let i=0;i<3;i+=1)this.pushPipeline(e,o,x[r-3+i],`conv2d_last_tf_${i}`);o.length=0,this.fillOutputTextures(o,this.pipelines.length-3,3),this.pipelines.push(new y({device:e,inputTextures:o,name:"DepthToSpace"})),this.pipelines.push(new c({device:e,inputTextures:[t,this.getOutputTexture()],outputTextureSize:[2*t.width,2*t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new p({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var U0=`struct VertexOutput {
+`;var T=class{constructor({device:e,inputTexture:t}){this.pipelines=[];let x=[v0,m0,g0,d0,y0,b0,h0,L0,G0,P0,O0,w0,N0,T0,S0,U0,M0];this.pushPipeline(e,[t],x[0],"conv2d_tf"),this.pushPipeline(e,[t],x[1],"conv2d_tf_1");let o=[];for(let i=1;i<7;i+=1)o.length=0,this.fillOutputTextures(o,2*(i-1),2),this.pushPipeline(e,o,x[2*i],`conv2d_${i}_tf`),this.pushPipeline(e,o,x[2*i+1],`conv2d_${i}_tf_1`);o.length=0,this.fillOutputTextures(o,0,this.pipelines.length);let r=x.length;for(let i=0;i<3;i+=1)this.pushPipeline(e,o,x[r-3+i],`conv2d_last_tf_${i}`);o.length=0,this.fillOutputTextures(o,this.pipelines.length-3,3),this.pipelines.push(new y({device:e,inputTextures:o,name:"DepthToSpace"})),this.pipelines.push(new v({device:e,inputTextures:[t,this.getOutputTexture()],outputTextureSize:[2*t.width,2*t.height]}))}updateParam(e,t){throw new Error("Method not implemented.")}pass(e){for(let t=0;t<this.pipelines.length;t+=1)this.pipelines[t].pass(e)}getOutputTexture(){return this.pipelines[this.pipelines.length-1].getOutputTexture()}pushPipeline(e,t,x,o){this.pipelines.push(new n({device:e,inputTextures:t,shaderWGSL:x,name:o}))}fillOutputTextures(e,t,x){for(let o=t;o<t+x;o+=1)e.push(this.pipelines[o].getOutputTexture())}};var C0=`struct VertexOutput {
   @builtin(position) Position : vec4<f32>,
   @location(0) fragUV : vec2<f32>,
 }
@@ -3907,4 +3906,4 @@ fn vert_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
   output.fragUV = uv[VertexIndex];
   return output;
 }
-`;var B1={balanced:[b,P,w],quality:[b,O,N]},M0=class{constructor(e=B1.balanced){this.pipelineClasses=e,this.video=null,this.canvas=null,this.device=null,this.stopped=!0,this.framesProcessed=0,this.onError=null}attachVideo(e,t){this.video=e,this.canvas=t}async start(){if(this.stopped===!1)return;let{video:e,canvas:t}=this;if(!e||!t)throw new Error("attachVideo first");e.readyState<e.HAVE_FUTURE_DATA&&await new Promise(l=>{e.addEventListener("loadeddata",l,{once:!0})});let x=typeof navigator<"u"&&navigator.gpu;if(!x)throw new Error("WebGPU not supported");let o=await x.requestAdapter();if(!o)throw new Error("WebGPU not supported");let r=await o.requestDevice();this.device=r,r.lost.then(l=>{if(!this.stopped&&l.reason!=="destroyed"&&(this.stopped=!0,typeof this.onError=="function"))try{this.onError(l)}catch{}}),r.addEventListener?.("uncapturederror",l=>{if(!this.stopped&&(this.stopped=!0,typeof this.onError=="function"))try{this.onError(l.error)}catch{}});let i=e.videoWidth,f=e.videoHeight;if(!i||!f)throw new Error("video has no dimensions yet");let s=t.getContext("webgpu"),u=x.getPreferredCanvasFormat();s.configure({device:r,format:u,alphaMode:"premultiplied"});let n=r.createTexture({size:[i,f,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT}),_=[],v=n;for(let l of this.pipelineClasses){let d=new l({device:r,inputTexture:v});_.push(d),v=d.getOutputTexture()}t.width=v.width,t.height=v.height;let g=r.createShaderModule({code:U0}),a=r.createBindGroupLayout({entries:[{binding:1,visibility:GPUShaderStage.FRAGMENT,sampler:{}},{binding:2,visibility:GPUShaderStage.FRAGMENT,texture:{}}]}),h=r.createRenderPipeline({layout:r.createPipelineLayout({bindGroupLayouts:[a]}),vertex:{module:g,entryPoint:"vert_main"},fragment:{module:g,entryPoint:"main",targets:[{format:u}]},primitive:{topology:"triangle-list"}}),L=r.createBindGroup({layout:a,entries:[{binding:1,resource:r.createSampler({magFilter:"linear",minFilter:"linear"})},{binding:2,resource:v.createView()}]});this.renderPipeline=h,this.outputBindGroup=L,this.presentationFormat=u,this.stopped=!1;let G=()=>{if(!this.stopped){try{e.paused||r.queue.copyExternalImageToTexture({source:e},{texture:n},[i,f]);let l=r.createCommandEncoder();_.forEach(C0=>C0.pass(l));let d=l.beginRenderPass({colorAttachments:[{view:s.getCurrentTexture().createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});d.setPipeline(h),d.setBindGroup(0,L),d.draw(6),d.end(),r.queue.submit([l.finish()]),this.framesProcessed+=1}catch(l){if(this.stopped=!0,typeof this.onError=="function")try{this.onError(l)}catch{}return}e.requestVideoFrameCallback(G)}};e.requestVideoFrameCallback(G)}async renderingHealthy(){if(this.stopped||!this.device||!this.renderPipeline||!this.outputBindGroup)return!0;try{let x=this.device.createTexture({size:[64,4,1],format:this.presentationFormat,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC}),o=this.device.createCommandEncoder(),r=o.beginRenderPass({colorAttachments:[{view:x.createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});r.setPipeline(this.renderPipeline),r.setBindGroup(0,this.outputBindGroup),r.draw(6),r.end();let i=256,f=this.device.createBuffer({size:i*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});if(o.copyTextureToBuffer({texture:x},{buffer:f,bytesPerRow:i,rowsPerImage:4},[64,4,1]),this.device.queue.submit([o.finish()]),!await Promise.race([f.mapAsync(GPUMapMode.READ).then(()=>!0),new Promise(_=>setTimeout(()=>_(!1),500))]))return f.destroy(),x.destroy(),!1;let u=new Uint8Array(f.getMappedRange()),n=0;for(let _=0;_<64*4;_++)n+=u[_*4]+u[_*4+1]+u[_*4+2];return f.unmap(),f.destroy(),x.destroy(),n>0?!0:!this.videoHasLuminance()}catch{return!0}}videoHasLuminance(){let e=document.createElement("canvas");e.width=32,e.height=2;let t=e.getContext("2d");t.drawImage(this.video,0,0,32,2);let x=t.getImageData(0,0,32,2).data,o=0;for(let r=0;r<32*2;r++)o+=x[r*4]+x[r*4+1]+x[r*4+2];return o>24}stop(){this.stopped=!0;try{this.device&&this.device.destroy()}catch{}this.device=null}detachVideo(){this.stop(),this.video=null,this.canvas=null}};export{P as CNNM,w as CNNx2M,b as ClampHighlights,B1 as PROFILES,M0 as WebGPUUpscaler};
+`;var k1={balanced:[b,O,N],quality:[b,w,T]},A0=class{constructor(e=k1.balanced){this.pipelineClasses=e,this.video=null,this.canvas=null,this.device=null,this.stopped=!0,this.framesProcessed=0,this.onError=null}attachVideo(e,t){this.video=e,this.canvas=t}async start(){if(this.stopped===!1)return;let{video:e,canvas:t}=this;if(!e||!t)throw new Error("attachVideo first");e.readyState<e.HAVE_FUTURE_DATA&&await new Promise(l=>{e.addEventListener("loadeddata",l,{once:!0})});let x=typeof navigator<"u"&&navigator.gpu;if(!x)throw new Error("WebGPU not supported (no navigator.gpu)");let o=(l,m,S)=>Promise.race([l,new Promise((K1,E0)=>setTimeout(()=>E0(new Error(S)),m))]),r=await o(x.requestAdapter(),3e3,"requestAdapter timed out");if(!r)throw new Error("no WebGPU adapter available (browser policy or GPU process)");let i=await o(r.requestDevice(),3e3,"requestDevice timed out");this.device=i,i.lost.then(l=>{if(!this.stopped&&l.reason!=="destroyed"&&(this.stopped=!0,typeof this.onError=="function"))try{this.onError(l)}catch{}}),i.addEventListener?.("uncapturederror",l=>{if(!this.stopped&&(this.stopped=!0,typeof this.onError=="function"))try{this.onError(l.error)}catch{}});let f=e.videoWidth,s=e.videoHeight;if(!f||!s)throw new Error("video has no dimensions yet");let u=t.getContext("webgpu"),a=x.getPreferredCanvasFormat();u.configure({device:i,format:a,alphaMode:"premultiplied"});let _=i.createTexture({size:[f,s,1],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT}),d=[],c=_;for(let l of this.pipelineClasses){let m=new l({device:i,inputTexture:c});d.push(m),c=m.getOutputTexture()}t.width=c.width,t.height=c.height;let p=i.createShaderModule({code:C0}),h=i.createBindGroupLayout({entries:[{binding:1,visibility:GPUShaderStage.FRAGMENT,sampler:{}},{binding:2,visibility:GPUShaderStage.FRAGMENT,texture:{}}]}),L=i.createRenderPipeline({layout:i.createPipelineLayout({bindGroupLayouts:[h]}),vertex:{module:p,entryPoint:"vert_main"},fragment:{module:p,entryPoint:"main",targets:[{format:a}]},primitive:{topology:"triangle-list"}}),G=i.createBindGroup({layout:h,entries:[{binding:1,resource:i.createSampler({magFilter:"linear",minFilter:"linear"})},{binding:2,resource:c.createView()}]});this.renderPipeline=L,this.outputBindGroup=G,this.presentationFormat=a,this.stopped=!1;let P=()=>{if(!this.stopped){try{e.paused||i.queue.copyExternalImageToTexture({source:e},{texture:_},[f,s]);let l=i.createCommandEncoder();d.forEach(S=>S.pass(l));let m=l.beginRenderPass({colorAttachments:[{view:u.getCurrentTexture().createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});m.setPipeline(L),m.setBindGroup(0,G),m.draw(6),m.end(),i.queue.submit([l.finish()]),this.framesProcessed+=1}catch(l){if(this.stopped=!0,typeof this.onError=="function")try{this.onError(l)}catch{}return}e.requestVideoFrameCallback(P)}};e.requestVideoFrameCallback(P)}async renderingHealthy(){if(this.stopped||!this.device||!this.renderPipeline||!this.outputBindGroup)return!0;try{let x=this.device.createTexture({size:[64,4,1],format:this.presentationFormat,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC}),o=this.device.createCommandEncoder(),r=o.beginRenderPass({colorAttachments:[{view:x.createView(),clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});r.setPipeline(this.renderPipeline),r.setBindGroup(0,this.outputBindGroup),r.draw(6),r.end();let i=256,f=this.device.createBuffer({size:i*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});if(o.copyTextureToBuffer({texture:x},{buffer:f,bytesPerRow:i,rowsPerImage:4},[64,4,1]),this.device.queue.submit([o.finish()]),!await Promise.race([f.mapAsync(GPUMapMode.READ).then(()=>!0),new Promise(_=>setTimeout(()=>_(!1),500))]))return f.destroy(),x.destroy(),!1;let u=new Uint8Array(f.getMappedRange()),a=0;for(let _=0;_<64*4;_++)a+=u[_*4]+u[_*4+1]+u[_*4+2];return f.unmap(),f.destroy(),x.destroy(),a>0?!0:!this.videoHasLuminance()}catch{return!0}}videoHasLuminance(){let e=document.createElement("canvas");e.width=32,e.height=2;let t=e.getContext("2d");t.drawImage(this.video,0,0,32,2);let x=t.getImageData(0,0,32,2).data,o=0;for(let r=0;r<32*2;r++)o+=x[r*4]+x[r*4+1]+x[r*4+2];return o>24}stop(){this.stopped=!0;try{this.device&&this.device.destroy()}catch{}this.device=null}detachVideo(){this.stop(),this.video=null,this.canvas=null}};export{O as CNNM,N as CNNx2M,b as ClampHighlights,k1 as PROFILES,A0 as WebGPUUpscaler};

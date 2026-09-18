@@ -2593,7 +2593,8 @@ test("a failing engine start() is caught and reverts to Off with a notice", asyn
 
   assert.equal(player.upscaleEnabled, false)
   assert.equal(player.activeUpscaleEngineId, null)
-  assert.ok(player.playerNoticeMessages.some((message) => message.includes("failed to start")))
+  assert.ok(player.playerNoticeMessages.some((message) =>
+    message.includes("failed to start (webgl: no adapter")))
 })
 
 test("enableUpscale awaits a slow async start before reporting success", async () => {
