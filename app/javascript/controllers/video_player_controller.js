@@ -152,6 +152,9 @@ export default class extends Controller {
     this.upscaleEnabled = false
     this.upscaler = null
     this.upscalePreferenceEnabled = this.loadUpscalePreference()
+    // Set while upscaling itself switched HDR playback off; turning the
+    // upscaler back off then restores HDR.
+    this.hdrDisabledByUpscale = false
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
@@ -294,6 +297,9 @@ export default class extends Controller {
     if (this.hasUpscaleCanvasTarget) {
       this.upscaleCanvasTarget.addEventListener("webglcontextlost", this.upscaleContextLostHandler)
     }
+    // Render the 4K toggle immediately (before any tracks/HDR state load)
+    // so it is always visible whenever the browser can run the upscaler.
+    this.renderUpscaleControls()
     this.restoreUpscale()
   }
 
@@ -3023,8 +3029,10 @@ export default class extends Controller {
     } catch {}
   }
 
-  // Mirrors Anime4K.js VideoUpscaler support checks (WebGL with float
-  // textures, plus the float-render extension attachVideo requires).
+  // Mirrors Anime4K.js VideoUpscaler.isSupported() exactly: WebGL with
+  // float textures (the CNN shaders need them). Deliberately no stricter —
+  // an extra extension check here would hide the toggle on browsers the
+  // library itself supports.
   upscaleSupported() {
     if (this.upscaleSupportedResult === undefined) {
       try {
@@ -3033,8 +3041,7 @@ export default class extends Controller {
         this.upscaleSupportedResult = Boolean(
           gl &&
           gl.getExtension("OES_texture_float") &&
-          gl.getExtension("OES_texture_float_linear") &&
-          gl.getExtension("EXT_color_buffer_half_float")
+          gl.getExtension("OES_texture_float_linear")
         )
       } catch {
         this.upscaleSupportedResult = false
@@ -3049,12 +3056,25 @@ export default class extends Controller {
   }
 
   async toggleUpscale() {
-    if (!this.upscaleSupported() || this.hdrEnabled) return
+    if (!this.upscaleSupported()) return
     if (this.upscaleEnabled) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
       this.disableUpscale()
+      // If enabling the upscaler switched HDR playback off, switching it
+      // back off restores HDR.
+      if (this.hdrDisabledByUpscale) {
+        this.hdrDisabledByUpscale = false
+        if (!this.hdrEnabled && this.hdrAvailable) this.toggleHdr()
+      }
       return
+    }
+    // Upscaled frames are SDR: when HDR playback is active, switch to SDR
+    // first. The viewer accepted the trade — 4K on, HDR off.
+    this.hdrDisabledByUpscale = false
+    if (this.hdrEnabled) {
+      this.hdrDisabledByUpscale = true
+      this.toggleHdr()
     }
     this.upscalePreferenceEnabled = true
     const ok = await this.enableUpscale()
@@ -3062,7 +3082,6 @@ export default class extends Controller {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
     }
-    this.renderUpscaleControls()
   }
 
   // Attaches the Anime4K pipeline to the canvas overlay: clamp highlights,
@@ -3116,9 +3135,10 @@ export default class extends Controller {
     await this.enableUpscale()
   }
 
-  // The upscale canvas renders SDR, so upscaling is suspended while HDR
-  // playback is active and resumes when the viewer switches back to SDR.
-  // Called from renderHdrControls, which runs on every HDR state change.
+  // The upscale canvas renders SDR frames, so while HDR playback is active
+  // the canvas is suspended (an SDR canvas over an HDR stream would wash
+  // the picture out) and resumes when HDR is switched back off. Called from
+  // renderHdrControls, which runs on every HDR state change.
   syncUpscaleControls() {
     if (this.hdrEnabled && this.upscaleEnabled) this.disableUpscale()
     if (!this.hdrEnabled && this.upscalePreferenceEnabled && !this.upscaleEnabled && this.upscaleSupported()) {
@@ -3131,17 +3151,14 @@ export default class extends Controller {
     if (!this.hasUpscaleControlsTarget || !this.hasUpscaleButtonTarget || !this.hasUpscaleButtonStateTarget) return
     this.upscaleControlsTarget.classList.toggle("hidden", !this.upscaleSupported())
     if (!this.upscaleSupported()) return
-    const available = !this.hdrEnabled
     const enabled = this.upscaleEnabled
-    this.upscaleButtonTarget.disabled = !available
     this.upscaleButtonTarget.setAttribute("aria-pressed", enabled ? "true" : "false")
     this.upscaleButtonTarget.setAttribute("aria-label", enabled ? "Disable upscaling" : "Enable upscaling")
-    this.upscaleButtonTarget.title = enabled ? "Anime4K upscaling on" : "Anime4K upscaling (client-side, 2x)"
+    this.upscaleButtonTarget.title = enabled ? "Anime4K upscaling on (SDR)" : "Anime4K upscaling (client-side, 2x — switches HDR off)"
     this.upscaleButtonStateTarget.textContent = enabled ? "ON" : "OFF"
     this.upscaleButtonTarget.classList.toggle("border-indigo-400/70", enabled)
     this.upscaleButtonTarget.classList.toggle("bg-indigo-500/15", enabled)
     this.upscaleButtonTarget.classList.toggle("text-indigo-300", enabled)
-    this.upscaleButtonTarget.classList.toggle("opacity-40", !available)
     this.upscaleButtonTarget.classList.toggle("border-white/20", !enabled)
     this.upscaleButtonTarget.classList.toggle("bg-black/60", !enabled)
     this.upscaleButtonTarget.classList.toggle("text-sv-text-muted", !enabled)

@@ -2158,6 +2158,8 @@ const makeUpscalePlayer = () => {
   player.upscaler = null
   player.upscalePreferenceEnabled = false
   player.hdrEnabled = false
+  player.hdrAvailable = true
+  player.hdrDisabledByUpscale = false
   player.videoTarget = { currentTime: 0 }
   const classes = new Set(["hidden"])
   player.hasUpscaleCanvasTarget = true
@@ -2232,6 +2234,52 @@ test("a failed module load leaves the player on plain video and preference off",
   assert.deepEqual(saved, [false])
 })
 
+test("enabling 4K while HDR is on switches HDR off; disabling 4K switches HDR back on", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  const hdrToggles = []
+  player.toggleHdr = () => { hdrToggles.push(player.hdrEnabled); player.hdrEnabled = !player.hdrEnabled }
+  player.hdrEnabled = true
+
+  await player.toggleUpscale()
+
+  // 4K on: HDR was switched off once.
+  assert.equal(player.upscaleEnabled, true)
+  assert.equal(player.hdrEnabled, false)
+  assert.equal(hdrToggles.length, 1)
+
+  await player.toggleUpscale()
+
+  // 4K off: HDR is restored.
+  assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.hdrEnabled, true)
+  assert.equal(hdrToggles.length, 2)
+  assert.equal(player.hdrDisabledByUpscale, false)
+})
+
+test("disabling 4K leaves HDR alone when the user turned HDR back on manually", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  const hdrToggles = []
+  player.toggleHdr = () => { hdrToggles.push(true); player.hdrEnabled = !player.hdrEnabled }
+
+  await player.toggleUpscale()
+  assert.equal(player.upscaleEnabled, true)
+  // HDR was already off when 4K was enabled: no HDR toggle fired.
+  assert.equal(hdrToggles.length, 0)
+
+  // Simulate: 4K had switched HDR off earlier, then the user re-enabled
+  // HDR themselves while 4K kept running.
+  player.hdrDisabledByUpscale = true
+  player.hdrEnabled = true
+
+  await player.toggleUpscale()
+
+  // HDR is already on — disabling 4K must not toggle it again.
+  assert.equal(hdrToggles.length, 0)
+  assert.equal(player.hdrEnabled, true)
+})
+
 test("HDR playback suspends upscaling and resumes it when HDR is off again", async () => {
   const player = makeUpscalePlayer()
   player.loadUpscaleModule = async () => fakeUpscaleModule()
@@ -2252,6 +2300,17 @@ test("HDR playback suspends upscaling and resumes it when HDR is off again", asy
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(player.upscaleEnabled, true)
   assert.equal(player.canvasClasses.has("hidden"), false)
+})
+
+test("a 4K toggle while HDR is unavailable simply upscales, no HDR toggle fires", async () => {
+  const player = makeUpscalePlayer()
+  player.hdrAvailable = false
+  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  player.toggleHdr = () => { throw new Error("toggleHdr must not run") }
+
+  await player.toggleUpscale()
+
+  assert.equal(player.upscaleEnabled, true)
 })
 
 test("upscale preference is opt-in only", () => {

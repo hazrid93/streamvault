@@ -302,10 +302,10 @@
         </button>
       </div>
 
-      <%# Anime4K client-side upscaling (WebGL). Offered whenever the
-          browser supports float WebGL textures; disabled while HDR
-          playback is active because the upscale canvas is SDR-only.
-          Zero server load — shaders run on the viewer's GPU. %>
+      <%# Anime4K client-side upscaling (WebGL). Always offered when the
+          browser supports float WebGL textures. Upscaled frames are SDR, so
+          enabling 4K switches HDR playback off and disabling it restores
+          HDR. Zero server load — shaders run on the viewer's GPU. %>
       <div data-video-player-target="upscaleControls" class="hidden">
         <button type="button"
                 data-video-player-target="upscaleButton"
