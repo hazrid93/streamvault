@@ -3204,8 +3204,25 @@ export default class extends Controller {
       canvas.style.height = `${Math.round(h)}px`
       canvas.style.left = `${Math.round((cw - w) / 2)}px`
       canvas.style.top = `${Math.round((ch - h) / 2)}px`
+      // The CSS fallback centers via m-auto + inset-0; once this explicit
+      // box is set, those auto margins must go — on Chromium the
+      // over-constrained box (inline left/top + inset-0 + m-auto)
+      // double-offsets the canvas out of the video's letterbox box, which
+      // reads as a strip of the frame floating above the picture.
+      canvas.style.margin = "0px"
     }
     this.updateUpscaleStats()
+  }
+
+  // Menu-facing labels for the info readout — ids are for storage, not eyes.
+  upscaleProfileLabel(profileId) {
+    return {
+      balanced: "Balanced",
+      balancedPlus: "Balanced+",
+      quality: "Quality",
+      ultra2x: "Ultra 2x",
+      ultra4x: "4x"
+    }[profileId] || profileId
   }
 
   // Stream info readout: engine · profile · bitmap size → on-screen box.
@@ -3220,7 +3237,8 @@ export default class extends Controller {
     const canvas = this.activeUpscaleEngineId === "webgl" ? this.upscaleWebglCanvasTarget : this.upscaleWebgpuCanvasTarget
     const bitmap = canvas && canvas.width ? `${canvas.width}×${canvas.height}` : "—"
     const box = canvas && canvas.style.width ? `${canvas.style.width}×${canvas.style.height}` : "css"
-    this.upscaleStatsTarget.textContent = `${this.activeUpscaleEngineId} · ${this.upscaleProfileId} · ${bitmap} → ${box}`
+    const engine = this.activeUpscaleEngineId === "webgpu" ? "WebGPU" : "WebGL"
+    this.upscaleStatsTarget.textContent = `${engine} · ${this.upscaleProfileLabel(this.upscaleProfileId)} · ${bitmap} → ${box}`
   }
 
   // ── Startup failure diagnostics ───────────────────────────────────
