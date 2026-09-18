@@ -2,11 +2,12 @@
  * Copyright (c) Anime4KWebBoost contributors; underlying Anime4K by bloc97
  * (https://github.com/bloc97/Anime4K). MIT License.
  * Slim base bundle for StreamVault built from the project's TypeScript source:
- * VideoUpscaler-style renderer (WebGPUUpscaler) taking a profile pipeline
- * chain, plus PROFILES (balanced, quality). Includes working stop()/teardown,
- * frame telemetry, async device.lost/uncapturederror hooks and a one-shot
- * renderingHealthy() readback raced with a timeout for the watchdog.
- * The 4x GAN chain lives in anime4k-webgpu-ultra.js.
+ * ClampHighlights -> Restore CNNM -> Upscale CNNx2M (SIMPLE_M profile) plus a
+ * custom renderer (WebGPUUpscaler) with a working stop()/teardown, frame
+ * telemetry (framesProcessed), async device.lost/uncapturederror hooks, and
+ * a one-shot renderingHealthy() readback (mapAsync raced with a timeout) for
+ * the controller's watchdog.
+ * Rebuilt with esbuild (loader: .wgsl=text) from master @ 58580db. */
 var U=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
 @group(0) @binding(1) var tex_out: texture_storage_2d<rgba16float, write>; // luminationX
 

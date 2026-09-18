@@ -1,9 +1,7 @@
 /* Anime4K-WebGPU ultra bundle — 4x profile only (ClampHighlights -> Restore
  * CNNM -> Upscale GANx4UUL). ~1.7MB of WGSL model weights, fetched only when
  * the viewer selects the 4x profile. Same upstream/ license as
- * anime4k-webgpu.js. */
-var A=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
-@group(0) @binding(1) var tex_out: texture_storage_2d<rgba16float, write>; // luminationX
+ * anime4k-webgpu.js. Rebuilt with esbuild from master @ 58580db. */
 var k=`@group(0) @binding(0) var tex_in: texture_2d<f32>; // original frame
 @group(0) @binding(1) var tex_out: texture_storage_2d<rgba16float, write>; // luminationX
 
