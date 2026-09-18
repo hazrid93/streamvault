@@ -52,6 +52,12 @@
       Stream info
     </button>
     <div data-video-player-target="sourceDetails" class="hidden mt-2 p-3 bg-black/80 rounded-lg text-xs leading-5 text-sv-text space-y-1 break-all">
+      <div class="flex items-center gap-2">
+        <span class="text-sv-text-muted">FPS</span>
+        <span data-video-player-target="fpsStats" class="font-mono text-white">—</span>
+        <%# Effective presentation rate (requestVideoFrameCallback) — drops
+            when the upscaler can't keep up. %>
+      </div>
       <% if @local_torrent_hash.present? %>
         <div data-video-player-target="localStats">Connecting to peers…</div>
       <% end %>
@@ -330,7 +336,7 @@
                 aria-expanded="false"
                 aria-label="Upscaling options"
                 title="Anime4K upscaling (client-side, 2x — switches HDR off)">
-          <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <svg data-video-player-target="upscaleIcon" class="h-3 w-3 text-sv-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>
             <path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15z"/>
           </svg>
@@ -338,7 +344,7 @@
           <span data-video-player-target="upscaleButtonState" class="sr-only">OFF</span>
         </button>
         <div data-video-player-target="upscaleMenu"
-             class="hidden absolute bottom-full right-0 mb-2 w-64 rounded-lg border border-white/10 bg-sv-bg-card/95 p-1.5 shadow-2xl backdrop-blur"
+             class="hidden absolute bottom-full right-0 mb-2 max-h-[60vh] w-64 overflow-y-auto overscroll-contain rounded-lg border border-white/10 bg-sv-bg-card/95 p-1.5 shadow-2xl backdrop-blur"
              role="menu"
              aria-label="Upscaling options">
           <div class="px-2.5 pb-1 pt-0.5 text-[0.6rem] font-bold uppercase tracking-widest text-sv-text-muted/60">Engine</div>

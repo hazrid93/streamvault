@@ -2217,6 +2217,11 @@ const makeUpscalePlayer = () => {
   }
   player.buttonClasses = buttonClasses.classes
   player.upscaleButtonStateTarget = { textContent: "OFF" }
+  player.iconClasses = makeClassListStub(["text-sv-text-muted"])
+  player.hasUpscaleIconTarget = true
+  player.upscaleIconTarget = { classList: player.iconClasses }
+  player.playerNoticeMessages = []
+  player.showPlayerNotice = (message) => player.playerNoticeMessages.push(message)
 
   player.hasUpscaleMenuTarget = true
   player.rows = []
@@ -2274,7 +2279,7 @@ test("selecting Off stops, detaches and hides the canvases", async () => {
   assert.equal(player.upscaleButtonStateTarget.textContent, "OFF")
 })
 
-test("a disabled (unsupported) engine row is inert", async () => {
+test("a disabled (unsupported) engine row explains itself instead of reacting", async () => {
   const player = makeUpscalePlayer()
   let loaded = 0
   player.loadUpscaleModule = async () => { loaded += 1; return fakeWebgpuModule() }
@@ -2286,6 +2291,7 @@ test("a disabled (unsupported) engine row is inert", async () => {
 
   assert.equal(loaded, 0)
   assert.equal(player.upscaleEnabled, false)
+  assert.ok(player.playerNoticeMessages.some((message) => message.includes("not supported")))
 })
 
 test("selecting the WebGPU engine loads the WebGPU module and uses its upscaler", async () => {
@@ -2347,6 +2353,7 @@ test("a failed module load leaves the player on plain video and preference off",
   assert.equal(player.upscaler, null)
   assert.equal(player.webglCanvasClasses.has("hidden"), true)
   assert.deepEqual(player.savedPreferences.filter(([k]) => k === "enabled").slice(-1), [["enabled", false]])
+  assert.ok(player.playerNoticeMessages.some((message) => message.includes("failed to start")))
 })
 
 test("enabling an engine while HDR is on switches HDR off; Off restores HDR", async () => {
@@ -2570,4 +2577,78 @@ test("a saved 4x profile restores on the next playback (lazy ultra module)", asy
 test("loadUpscalePreference profile validation falls back to balanced", () => {
   const player = new VideoPlayerController()
   assert.equal(player.loadUpscaleProfilePreference(), "balanced")
+})
+
+test("a failing engine start() is caught and reverts to Off with a notice", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => {
+    const module = fakeWebglModule()
+    module.VideoUpscaler = class extends FakeUpscaler {
+      start() { throw new Error("no adapter") }
+    }
+    return module
+  }
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+
+  assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.activeUpscaleEngineId, null)
+  assert.ok(player.playerNoticeMessages.some((message) => message.includes("failed to start")))
+})
+
+test("enableUpscale awaits a slow async start before reporting success", async () => {
+  const player = makeUpscalePlayer()
+  let started = false
+  player.loadUpscaleModule = async () => {
+    const module = fakeWebglModule()
+    module.VideoUpscaler = class extends FakeUpscaler {
+      async start() {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        started = true
+      }
+    }
+    return module
+  }
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+
+  assert.equal(started, true)
+  assert.equal(player.upscaleEnabled, true)
+})
+
+test("the 4K icon turns blue while upscaling is enabled", async () => {
+  const player = makeUpscalePlayer()
+  player.loadUpscaleModule = async () => fakeWebglModule()
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+  assert.equal(player.iconClasses.classes.has("text-indigo-400"), true)
+  assert.equal(player.iconClasses.classes.has("text-sv-text-muted"), false)
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("off")))
+  assert.equal(player.iconClasses.classes.has("text-indigo-400"), false)
+  assert.equal(player.iconClasses.classes.has("text-sv-text-muted"), true)
+})
+
+test("the fps monitor reports the presentation rate and stops cleanly", () => {
+  const player = makeUpscalePlayer()
+  let callback = null
+  player.videoTarget = { requestVideoFrameCallback: (cb) => { callback = cb } }
+  player.hasFpsStatsTarget = true
+  player.fpsStatsTarget = { textContent: "—" }
+
+  player.startFpsMonitor()
+
+  // Simulate 24fps presentation for ~1s.
+  let now = 1000
+  const frame = 1000 / 24
+  for (let i = 0; i < 25; i++) {
+    callback(now)
+    now += frame
+  }
+  assert.equal(player.fpsStatsTarget.textContent, "24")
+
+  player.stopFpsMonitor()
+  const frozen = player.fpsStatsTarget.textContent
+  callback(now + 5000)
+  assert.equal(player.fpsStatsTarget.textContent, frozen)
 })

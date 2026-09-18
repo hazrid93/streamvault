@@ -90,7 +90,7 @@ export default class extends Controller {
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats",
-      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "playerNotice", "backButton",
+      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "playerNotice", "fpsStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -172,6 +172,7 @@ export default class extends Controller {
     this.upscaleWebgpuFailed = false
     this.upscaleHealthTimer = null
     this.playerNoticeTimer = null
+    this.fpsFrameTimes = null
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
@@ -253,10 +254,11 @@ export default class extends Controller {
 
     this.ensureVideoSource()
 
-    // Show the source info toggle only when there are live local stats to
-    // display (seeders and transfer rates). Non-local streams have nothing
-    // to show now that the panel is stats-only.
-    if (this.hasLocalStatsTarget) this.sourceInfoTarget.classList.remove("hidden")
+    // Show the source info toggle on every stream: the panel always carries
+    // the live FPS readout (useful to gauge upscaling cost); local torrents
+    // additionally show seeder and transfer stats.
+    this.sourceInfoTarget.classList.remove("hidden")
+    this.startFpsMonitor()
     this.startLocalTorrentStatus()
     this.initializeCasting()
     this.visibilityChangeHandler = () => this.onVisibilityChange()
@@ -329,6 +331,7 @@ export default class extends Controller {
     }
     clearTimeout(this.upscaleHealthTimer)
     clearTimeout(this.playerNoticeTimer)
+    this.stopFpsMonitor()
     this.closeUpscalerMenu()
     this.disableUpscale()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
@@ -3137,6 +3140,40 @@ export default class extends Controller {
     return import(module)
   }
 
+  // ── FPS readout ───────────────────────────────────────────────────
+
+  // Measures the video's effective presentation rate through
+  // requestVideoFrameCallback — the same per-frame hook the upscalers use.
+  // If upscaling can't keep up, this number drops, which is exactly the
+  // impact the viewer wants to see. Rolling ~4s window, display-only.
+  startFpsMonitor() {
+    if (!this.hasFpsStatsTarget) return
+    const video = this.videoTarget
+    if (!video || typeof video.requestVideoFrameCallback !== "function") return
+    this.fpsFrameTimes = []
+    const FPS_WINDOW_MS = 4000
+    const tick = (now) => {
+      if (this.fpsFrameTimes === null) return
+      this.fpsFrameTimes.push(now)
+      while (this.fpsFrameTimes.length > 2 && now - this.fpsFrameTimes[0] > FPS_WINDOW_MS) {
+        this.fpsFrameTimes.shift()
+      }
+      if (this.fpsFrameTimes.length >= 2) {
+        const span = now - this.fpsFrameTimes[0]
+        if (span > 0) {
+          const fps = (this.fpsFrameTimes.length - 1) * 1000 / span
+          this.fpsStatsTarget.textContent = fps >= 10 ? fps.toFixed(0) : fps.toFixed(1)
+        }
+      }
+      video.requestVideoFrameCallback(tick)
+    }
+    video.requestVideoFrameCallback(tick)
+  }
+
+  stopFpsMonitor() {
+    this.fpsFrameTimes = null
+  }
+
   // ── 4K menu ───────────────────────────────────────────────────────
 
   toggleUpscalerMenu() {
@@ -3153,10 +3190,15 @@ export default class extends Controller {
     return Boolean(this.hasUpscaleMenuTarget && !this.upscaleMenuTarget.classList.contains("hidden"))
   }
 
-  // Menu row action: "off" or an engine id. Disabled rows never react.
+  // Menu row action: "off" or an engine id. Disabled rows explain themselves
+  // instead of silently ignoring the tap.
   async selectUpscalerEngine(event) {
     const row = event.currentTarget
-    if (row.getAttribute("aria-disabled") === "true") return
+    if (row.getAttribute("aria-disabled") === "true") {
+      const label = row.dataset.upscaleEngine === "webgpu" ? "WebGPU upscaling" : "WebGL upscaling"
+      this.showPlayerNotice(`${label} is not supported in this browser`)
+      return
+    }
     const engineId = row.dataset.upscaleEngine
     this.closeUpscalerMenu()
 
@@ -3197,6 +3239,7 @@ export default class extends Controller {
     if (!ok) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
+      this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
     }
   }
 
@@ -3205,7 +3248,10 @@ export default class extends Controller {
   // and always persists for future playback.
   async selectUpscalerProfile(event) {
     const row = event.currentTarget
-    if (row.getAttribute("aria-disabled") === "true") return
+    if (row.getAttribute("aria-disabled") === "true") {
+      this.showPlayerNotice("Upscaling is not supported in this browser")
+      return
+    }
     const profileId = row.dataset.upscaleProfile
     if (!UPSCALE_PROFILE_IDS.includes(profileId) || profileId === this.upscaleProfileId) return
     this.closeUpscalerMenu()
@@ -3222,6 +3268,7 @@ export default class extends Controller {
     if (!ok) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
+      this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
     }
   }
 
@@ -3249,19 +3296,29 @@ export default class extends Controller {
           ? new module.VideoUpscaler(shaderChain)
           : new module.WebGPUUpscaler(shaderChain)
       }
-      this.upscaler.attachVideo(this.videoTarget, canvas)
+      const upscaler = this.upscaler
+      upscaler.attachVideo(this.videoTarget, canvas)
       canvas.classList.remove("hidden")
-      this.upscaler.start()
+      // Async GPU failure hooks must be wired BEFORE start(): adapter /
+      // device requests can fail (or the device be lost) during start.
+      if (engineId === "webgpu" && typeof upscaler.renderingHealthy === "function") {
+        upscaler.onError = () => this.failWebgpuUpscale("hit a rendering error")
+      }
+      // Await start(): adapter/device requests and first shader compilation
+      // can take over a second on phones; a rejected start() must land in
+      // this catch block, not become an unhandled rejection.
+      await upscaler.start()
+      // The engine may have died (onError -> disableUpscale) or been
+      // replaced while awaiting start.
+      if (this.upscaler !== upscaler || this.hdrEnabled) return false
       this.upscaleEnabled = true
       this.activeUpscaleEngineId = engineId
       this.renderUpscaleControls()
-      // WebGPU video upload paths are young in WebKit: verify shortly after
-      // start that frames actually render (and are not blank), else fall
-      // back. The mature WebGL engine needs no such check (its context-lost
-      // handler covers it).
-      if (engineId === "webgpu" && typeof this.upscaler.renderingHealthy === "function") {
-        this.upscaler.onError = () => this.failWebgpuUpscale("hit a rendering error")
-        this.upscaleHealthTimer = setTimeout(() => this.checkWebgpuUpscaleHealth(this.upscaler), UPSCALE_HEALTH_CHECK_DELAY_MS)
+      // Watchdog only AFTER start() resolved — scheduling it earlier kills
+      // healthy engines that are still compiling shaders on mobile GPUs
+      // (the exact symptom of 4K silently reverting to Off on iOS).
+      if (engineId === "webgpu" && typeof upscaler.renderingHealthy === "function") {
+        this.upscaleHealthTimer = setTimeout(() => this.checkWebgpuUpscaleHealth(upscaler), UPSCALE_HEALTH_CHECK_DELAY_MS)
       }
       return true
     } catch (error) {
@@ -3393,6 +3450,11 @@ export default class extends Controller {
     this.upscaleButtonTarget.classList.toggle("border-white/20", !enabled)
     this.upscaleButtonTarget.classList.toggle("bg-black/60", !enabled)
     this.upscaleButtonTarget.classList.toggle("text-sv-text-muted", !enabled)
+    // The 4K icon turns blue while upscaling runs.
+    if (this.hasUpscaleIconTarget) {
+      this.upscaleIconTarget.classList.toggle("text-indigo-400", enabled)
+      this.upscaleIconTarget.classList.toggle("text-sv-text-muted", !enabled)
+    }
     this.renderUpscaleMenu()
   }
 
