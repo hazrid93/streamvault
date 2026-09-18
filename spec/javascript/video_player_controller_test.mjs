@@ -2173,18 +2173,48 @@ const makeUpscalePlayer = () => {
   player.hasUpscaleControlsTarget = true
   player.hasUpscaleButtonTarget = true
   player.hasUpscaleButtonStateTarget = true
-  player.upscaleControlsTarget = { classList: { toggle: () => {} } }
+  player.upscaleControlsTarget = { classList: { toggle: () => {}, remove: () => {} } }
+  player.upscaleButtonStateTarget = { textContent: "OFF" }
+  player.saveUpscalePreference = () => {}
+  player.canvasClasses = classes
+  // Capture real classList toggle state for renderUpscaleControls checks.
+  player.buttonClasses = new Set()
   player.upscaleButtonTarget = {
     attributes: {},
     disabled: false,
     setAttribute(name, value) { this.attributes[name] = value },
-    classList: { toggle: () => {} }
+    classList: {
+      toggle(name, on) { on ? player.buttonClasses.add(name) : player.buttonClasses.delete(name) }
+    }
   }
-  player.upscaleButtonStateTarget = { textContent: "OFF" }
-  player.saveUpscalePreference = () => {}
-  player.canvasClasses = classes
   return player
 }
+
+test("the 4K button is always visible, disabled with a tooltip when unsupported", () => {
+  const player = makeUpscalePlayer()
+  player.upscaleSupportedResult = false
+  const revealed = []
+  player.upscaleControlsTarget = {
+    classList: { remove: (name) => revealed.push(name), toggle: () => {} }
+  }
+
+  player.renderUpscaleControls()
+
+  // Revealed (not hidden) and not pressable on unsupported browsers.
+  assert.deepEqual(revealed, ["hidden"])
+  assert.equal(player.upscaleButtonTarget.disabled, true)
+  assert.ok(player.buttonClasses.has("opacity-40"))
+  assert.ok(player.buttonClasses.has("cursor-not-allowed"))
+  assert.equal(player.upscaleButtonTarget.attributes["aria-pressed"], "false")
+  assert.match(player.upscaleButtonTarget.title, /not supported in this browser/)
+
+  // Supported browser: pressable.
+  player.upscaleSupportedResult = true
+  player.renderUpscaleControls()
+  assert.equal(player.upscaleButtonTarget.disabled, false)
+  assert.ok(!player.buttonClasses.has("opacity-40"))
+  assert.ok(!player.buttonClasses.has("cursor-not-allowed"))
+})
 
 test("toggling the 4K button lazily attaches and starts the upscaler", async () => {
   const player = makeUpscalePlayer()

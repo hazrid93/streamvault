@@ -3149,16 +3149,24 @@ export default class extends Controller {
 
   renderUpscaleControls() {
     if (!this.hasUpscaleControlsTarget || !this.hasUpscaleButtonTarget || !this.hasUpscaleButtonStateTarget) return
-    this.upscaleControlsTarget.classList.toggle("hidden", !this.upscaleSupported())
-    if (!this.upscaleSupported()) return
+    // Always visible: unsupported browsers (e.g. iOS, whose WebGL lacks the
+    // float textures the CNN shaders need) render the button disabled with
+    // an explanatory tooltip instead of hiding the feature entirely.
+    this.upscaleControlsTarget.classList.remove("hidden")
+    const supported = this.upscaleSupported()
     const enabled = this.upscaleEnabled
+    this.upscaleButtonTarget.disabled = !supported
     this.upscaleButtonTarget.setAttribute("aria-pressed", enabled ? "true" : "false")
     this.upscaleButtonTarget.setAttribute("aria-label", enabled ? "Disable upscaling" : "Enable upscaling")
-    this.upscaleButtonTarget.title = enabled ? "Anime4K upscaling on (SDR)" : "Anime4K upscaling (client-side, 2x — switches HDR off)"
+    this.upscaleButtonTarget.title = !supported
+      ? "Anime4K upscaling not supported in this browser"
+      : (enabled ? "Anime4K upscaling on (SDR)" : "Anime4K upscaling (client-side, 2x — switches HDR off)")
     this.upscaleButtonStateTarget.textContent = enabled ? "ON" : "OFF"
     this.upscaleButtonTarget.classList.toggle("border-indigo-400/70", enabled)
     this.upscaleButtonTarget.classList.toggle("bg-indigo-500/15", enabled)
     this.upscaleButtonTarget.classList.toggle("text-indigo-300", enabled)
+    this.upscaleButtonTarget.classList.toggle("opacity-40", !supported)
+    this.upscaleButtonTarget.classList.toggle("cursor-not-allowed", !supported)
     this.upscaleButtonTarget.classList.toggle("border-white/20", !enabled)
     this.upscaleButtonTarget.classList.toggle("bg-black/60", !enabled)
     this.upscaleButtonTarget.classList.toggle("text-sv-text-muted", !enabled)
