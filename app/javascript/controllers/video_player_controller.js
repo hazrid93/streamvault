@@ -90,7 +90,7 @@ export default class extends Controller {
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats",
-      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "playerNotice", "fpsStats", "backButton",
+      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "playerNotice", "upscaleDiagnostic", "upscaleDiagnosticText", "fpsStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -173,6 +173,10 @@ export default class extends Controller {
     this.upscaleHealthTimer = null
     this.playerNoticeTimer = null
     this.fpsFrameTimes = null
+    // Details of the last upscaler startup failure, rendered in the
+    // diagnostic panel (with copy button) so viewers without devtools can
+    // report the real reason.
+    this.upscaleStartError = null
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
@@ -333,6 +337,8 @@ export default class extends Controller {
     clearTimeout(this.playerNoticeTimer)
     this.stopFpsMonitor()
     this.closeUpscalerMenu()
+    this.closeUpscaleDiagnostic()
+    this.upscaleStartError = null
     this.disableUpscale()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
     this.localStatusInterval = null
@@ -3140,6 +3146,49 @@ export default class extends Controller {
     return import(module)
   }
 
+  // ── Startup failure diagnostics ───────────────────────────────────
+
+  // Persistent panel with the full failure details + copy button, so a
+  // viewer on a phone (no devtools) can capture and report the real reason.
+  showUpscaleDiagnostic() {
+    if (!this.upscaleStartError || !this.hasUpscaleDiagnosticTarget || !this.hasUpscaleDiagnosticTextTarget) return
+    const e = this.upscaleStartError
+    this.upscaleDiagnosticTextTarget.textContent =
+      `StreamVault upscaler failed to start\n` +
+      `engine: ${e.engine} (profile: ${e.profile})\n` +
+      `${e.gpu}\n` +
+      `error: ${e.message}\n` +
+      `user agent: ${e.userAgent}`
+    this.upscaleDiagnosticTarget.classList.remove("hidden")
+  }
+
+  closeUpscaleDiagnostic() {
+    if (this.hasUpscaleDiagnosticTarget) this.upscaleDiagnosticTarget.classList.add("hidden")
+  }
+
+  async copyUpscaleDiagnostic() {
+    const text = this.hasUpscaleDiagnosticTextTarget ? this.upscaleDiagnosticTextTarget.textContent : ""
+    if (!text) return
+    let copied = false
+    try {
+      await navigator.clipboard.writeText(text)
+      copied = true
+    } catch {
+      // Fallback for browsers without the async clipboard API.
+      try {
+        const area = document.createElement("textarea")
+        area.value = text
+        area.style.position = "fixed"
+        area.style.opacity = "0"
+        document.body.appendChild(area)
+        area.select()
+        copied = document.execCommand("copy")
+        area.remove()
+      } catch {}
+    }
+    this.showPlayerNotice(copied ? "Diagnostic copied to clipboard" : "Copy failed — long-press the text to select it")
+  }
+
   // ── FPS readout ───────────────────────────────────────────────────
 
   // Measures the video's effective presentation rate through
@@ -3239,7 +3288,11 @@ export default class extends Controller {
     if (!ok) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
-      this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
+      // Only show a generic toast when the failure path didn't already
+      // present the diagnostic panel (e.g. HDR raced on mid-start).
+      if (!this.upscaleStartError) {
+        this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
+      }
     }
   }
 
@@ -3268,7 +3321,9 @@ export default class extends Controller {
     if (!ok) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
-      this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
+      if (!this.upscaleStartError) {
+        this.showPlayerNotice("Upscaling failed to start on this device — playing the original video.")
+      }
     }
   }
 
@@ -3279,6 +3334,7 @@ export default class extends Controller {
   // playing.
   async enableUpscale() {
     if (this.upscaleEnabled || this.hdrEnabled) return false
+    this.upscaleStartError = null
     const engineId = this.upscaleEngineId
     const profileId = this.upscaleProfileId
     const engine = this.upscaleEngineById(engineId)
@@ -3323,12 +3379,20 @@ export default class extends Controller {
       return true
     } catch (error) {
       console.warn("[VideoPlayer] Anime4K upscaling unavailable", error)
-      // Surface the engine + real error: "failed to start" alone hides
-      // whether the device lacks adapters, rejects a shader, or broke on
-      // context creation — the message text tells us which.
-      const reason = error && error.message ? String(error.message).slice(0, 90) : "unknown error"
+      // Full details go to the persistent diagnostic panel (with a copy
+      // button) — a truncated toast can't be read off-screen and generic
+      // messages hide the actual reason.
+      this.upscaleStartError = {
+        engine: engineId,
+        profile: profileId,
+        message: error && error.message ? String(error.message) : String(error),
+        gpu: engineId === "webgpu"
+          ? (this.webgpuApiPresent() ? "navigator.gpu present" : "navigator.gpu missing")
+          : (this.upscaleWebglSupported() ? "WebGL float textures OK" : "WebGL float textures missing"),
+        userAgent: (typeof navigator !== "undefined" && navigator.userAgent) || "unknown"
+      }
       this.disableUpscale()
-      this.showPlayerNotice(`Upscaling failed to start (${engineId}: ${reason})`)
+      this.showUpscaleDiagnostic()
       return false
     }
   }

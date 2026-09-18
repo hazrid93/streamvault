@@ -2222,6 +2222,12 @@ const makeUpscalePlayer = () => {
   player.upscaleIconTarget = { classList: player.iconClasses }
   player.playerNoticeMessages = []
   player.showPlayerNotice = (message) => player.playerNoticeMessages.push(message)
+  player.diagnosticShown = 0
+  player.hasUpscaleDiagnosticTarget = true
+  player.hasUpscaleDiagnosticTextTarget = true
+  player.upscaleDiagnosticTarget = { classList: makeClassListStub(["hidden"]) }
+  player.upscaleDiagnosticTextTarget = { textContent: "" }
+  player.showUpscaleDiagnostic = () => { player.diagnosticShown += 1 }
 
   player.hasUpscaleMenuTarget = true
   player.rows = []
@@ -2353,7 +2359,8 @@ test("a failed module load leaves the player on plain video and preference off",
   assert.equal(player.upscaler, null)
   assert.equal(player.webglCanvasClasses.has("hidden"), true)
   assert.deepEqual(player.savedPreferences.filter(([k]) => k === "enabled").slice(-1), [["enabled", false]])
-  assert.ok(player.playerNoticeMessages.some((message) => message.includes("failed to start")))
+  assert.equal(player.diagnosticShown, 1)
+  assert.deepEqual(player.playerNoticeMessages, [])
 })
 
 test("enabling an engine while HDR is on switches HDR off; Off restores HDR", async () => {
@@ -2579,7 +2586,7 @@ test("loadUpscalePreference profile validation falls back to balanced", () => {
   assert.equal(player.loadUpscaleProfilePreference(), "balanced")
 })
 
-test("a failing engine start() is caught and reverts to Off with a notice", async () => {
+test("a failing engine start() shows the diagnostic panel, not a generic toast", async () => {
   const player = makeUpscalePlayer()
   player.loadUpscaleModule = async () => {
     const module = fakeWebglModule()
@@ -2593,8 +2600,11 @@ test("a failing engine start() is caught and reverts to Off with a notice", asyn
 
   assert.equal(player.upscaleEnabled, false)
   assert.equal(player.activeUpscaleEngineId, null)
-  assert.ok(player.playerNoticeMessages.some((message) =>
-    message.includes("failed to start (webgl: no adapter")))
+  // The real reason reached the panel; the generic toast did not overwrite.
+  assert.equal(player.diagnosticShown, 1)
+  assert.equal(player.upscaleStartError.message, "no adapter")
+  assert.equal(player.upscaleStartError.engine, "webgl")
+  assert.deepEqual(player.playerNoticeMessages, [])
 })
 
 test("enableUpscale awaits a slow async start before reporting success", async () => {
@@ -2652,4 +2662,44 @@ test("the fps monitor reports the presentation rate and stops cleanly", () => {
   const frozen = player.fpsStatsTarget.textContent
   callback(now + 5000)
   assert.equal(player.fpsStatsTarget.textContent, frozen)
+})
+
+test("the diagnostic panel renders full details and copies them to the clipboard", async () => {
+  const player = makeUpscalePlayer()
+  player.showUpscaleDiagnostic = VideoPlayerController.prototype.showUpscaleDiagnostic.bind(player)
+  const copied = []
+  // The controller runs inside the vm realm: patch ITS navigator.
+  context.navigator.clipboard = { writeText: async (text) => { copied.push(text); return true } }
+  const vmUserAgent = context.navigator.userAgent
+
+  player.upscaleStartError = {
+    engine: "webgpu", profile: "balanced",
+    message: "no WebGPU adapter available (browser policy or GPU process)",
+    gpu: "navigator.gpu present",
+    userAgent: vmUserAgent
+  }
+  player.showUpscaleDiagnostic()
+
+  assert.equal(player.upscaleDiagnosticTarget.classList.classes.has("hidden"), false)
+  assert.ok(player.upscaleDiagnosticTextTarget.textContent.includes("engine: webgpu"))
+  assert.ok(player.upscaleDiagnosticTextTarget.textContent.includes("no WebGPU adapter available"))
+  assert.ok(player.upscaleDiagnosticTextTarget.textContent.includes(vmUserAgent))
+
+  await player.copyUpscaleDiagnostic()
+  assert.equal(copied.length, 1)
+  assert.ok(copied[0].includes("engine: webgpu"))
+  assert.ok(player.playerNoticeMessages.some((message) => message.includes("copied")))
+
+  delete context.navigator.clipboard
+})
+
+test("closeUpscaleDiagnostic hides the panel", () => {
+  const player = makeUpscalePlayer()
+  player.showUpscaleDiagnostic = VideoPlayerController.prototype.showUpscaleDiagnostic.bind(player)
+  player.upscaleStartError = { engine: "webgl", profile: "balanced", message: "x", gpu: "y", userAgent: "z" }
+  player.showUpscaleDiagnostic()
+  assert.equal(player.upscaleDiagnosticTarget.classList.classes.has("hidden"), false)
+
+  player.closeUpscaleDiagnostic()
+  assert.equal(player.upscaleDiagnosticTarget.classList.classes.has("hidden"), true)
 })
