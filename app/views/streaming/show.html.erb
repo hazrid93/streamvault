@@ -82,7 +82,7 @@
   <%# Upscaler startup-failure diagnostics: full details plus a copy
      button, since viewers on phones have no console. Dismissable. %>
   <div data-video-player-target="upscaleDiagnostic"
-       class="hidden absolute left-1/2 z-40 w-[min(92vw,28rem)] -translate-x-1/2 rounded-lg border border-white/10 bg-sv-bg-card/95 p-3 shadow-2xl backdrop-blur"
+       class="hidden absolute left-1/2 z-40 w-[min(92vw,28rem)] -translate-x-1/2 rounded-lg border border-white/20 bg-black/80 p-3 shadow-2xl"
        style="bottom: calc(env(safe-area-inset-bottom, 0px) + 6rem);"
        role="alertdialog" aria-label="Upscaling failure details">
     <div class="mb-1.5 flex items-center justify-between">
@@ -347,6 +347,16 @@
           switches HDR playback off and disabling it restores HDR. Zero
           server load — shaders run on the viewer's GPU. %>
       <div data-video-player-target="upscaleControls" class="hidden relative">
+        <%# "Applying" spinner — engine starts (adapter + shader compile)
+            and the 4x profile's ~2MB module download can take seconds. %>
+        <span data-video-player-target="upscaleSpinner"
+              class="hidden absolute right-full top-1/2 mr-1.5 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-md border border-indigo-400/50 bg-indigo-500/10 px-1.5 py-1 text-[10px] font-black tracking-wider text-indigo-300">
+          <svg class="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+          </svg>
+          <span>4K applying</span>
+        </span>
         <button type="button"
                 data-video-player-target="upscaleButton"
                 data-action="click->video-player#toggleUpscalerMenu"
@@ -364,7 +374,7 @@
           <span data-video-player-target="upscaleButtonState" class="sr-only">OFF</span>
         </button>
         <div data-video-player-target="upscaleMenu"
-             class="hidden absolute bottom-full right-0 mb-2 max-h-[60vh] w-64 overflow-y-auto overscroll-contain rounded-lg border border-white/10 bg-sv-bg-card/95 p-1.5 shadow-2xl backdrop-blur"
+             class="hidden absolute bottom-full right-0 mb-2 max-h-[60vh] w-64 overflow-y-auto overscroll-contain rounded-lg border border-white/20 bg-black/80 p-1.5 shadow-2xl"
              role="menu"
              aria-label="Upscaling options">
           <div class="px-2.5 pb-1 pt-0.5 text-[0.6rem] font-bold uppercase tracking-widest text-sv-text-muted/60">Engine</div>
