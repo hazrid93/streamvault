@@ -348,9 +348,11 @@
           server load — shaders run on the viewer's GPU. %>
       <div data-video-player-target="upscaleControls" class="hidden relative">
         <%# "Applying" spinner — engine starts (adapter + shader compile)
-            and the 4x profile's ~2MB module download can take seconds. %>
+            and the 4x profile's ~2MB module download can take seconds.
+            Sits directly above the 4K button: the menu closes the instant
+            an option is picked, so the two never overlap. %>
         <span data-video-player-target="upscaleSpinner"
-              class="hidden absolute right-full top-1/2 mr-1.5 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-md border border-indigo-400/50 bg-indigo-500/10 px-1.5 py-1 text-[10px] font-black tracking-wider text-indigo-300">
+              class="hidden absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-md border border-indigo-400/50 bg-black/80 px-1.5 py-1 text-[10px] font-black tracking-wider text-indigo-300">
           <svg class="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
