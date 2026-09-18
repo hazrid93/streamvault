@@ -66,6 +66,13 @@ const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditab
 const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // Anime4K client-side upscaling is opt-in (heavier GPU feature than HDR).
 const UPSCALE_PREFERENCE_KEY = "streamvault:upscale-enabled"
+const UPSCALE_ENGINE_PREFERENCE_KEY = "streamvault:upscale-engine"
+const UPSCALE_PROFILE_PREFERENCE_KEY = "streamvault:upscale-profile"
+// Profile ids shared by both engine bundles.
+const UPSCALE_PROFILE_IDS = ["balanced", "quality", "ultra4x"]
+// WebGPU video upload paths are young in WebKit: if the engine renders
+// nothing (or blank frames) shortly after start, fall back this fast.
+const UPSCALE_HEALTH_CHECK_DELAY_MS = 1200
 // The subtitle overlay is pinned just above the controls bar while the
 // controls are visible, then dropped toward the bottom of the screen
 // when the controls auto-hide, so it doesn't float above an invisible
@@ -83,7 +90,7 @@ export default class extends Controller {
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats",
-      "upscaleCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "backButton",
+      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "playerNotice", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -152,9 +159,19 @@ export default class extends Controller {
     this.upscaleEnabled = false
     this.upscaler = null
     this.upscalePreferenceEnabled = this.loadUpscalePreference()
+    this.upscaleEngineId = this.loadUpscaleEnginePreference()
+    this.upscaleProfileId = this.loadUpscaleProfilePreference()
+    // Engine actually running (may differ from the preferred one after a
+    // fallback, e.g. saved WebGL preference opened on iOS).
+    this.activeUpscaleEngineId = null
     // Set while upscaling itself switched HDR playback off; turning the
     // upscaler back off then restores HDR.
     this.hdrDisabledByUpscale = false
+    // WebGPU engine session health: blacklisted after a rendering failure
+    // so the menu stops offering it until the page is reloaded.
+    this.upscaleWebgpuFailed = false
+    this.upscaleHealthTimer = null
+    this.playerNoticeTimer = null
     this.directPlayActive = false
     this.startupOverlayHideTimer = null
     this.dragMoveHandler = null
@@ -287,18 +304,17 @@ export default class extends Controller {
     // Track progress every 5s
     this.startProgressTracking()
 
-    // Client-side Anime4K upscaling (WebGL) is strictly opt-in and lazy: the
-    // ~160KB shader module is only downloaded when the saved preference is
-    // on. A lost WebGL context falls back to plain video playback.
+    // Client-side Anime4K upscaling (WebGL or WebGPU) is strictly opt-in and
+    // lazy: the ~100-160KB shader module is only downloaded when the saved
+    // preference is on. A lost WebGL context falls back to plain video.
     this.upscaleContextLostHandler = () => {
       console.warn("[VideoPlayer] WebGL context lost — disabling upscaling")
       this.disableUpscale()
     }
-    if (this.hasUpscaleCanvasTarget) {
-      this.upscaleCanvasTarget.addEventListener("webglcontextlost", this.upscaleContextLostHandler)
+    if (this.hasUpscaleWebglCanvasTarget) {
+      this.upscaleWebglCanvasTarget.addEventListener("webglcontextlost", this.upscaleContextLostHandler)
     }
-    // Render the 4K toggle immediately (before any tracks/HDR state load)
-    // so it is always visible whenever the browser can run the upscaler.
+    // Render the 4K toggle + engine menu immediately so it is always visible.
     this.renderUpscaleControls()
     this.restoreUpscale()
   }
@@ -308,9 +324,12 @@ export default class extends Controller {
     this.invalidateMsePipeline()
     this.stopHlsSession()
     this.stopProgressTracking()
-    if (this.hasUpscaleCanvasTarget && this.upscaleContextLostHandler) {
-      this.upscaleCanvasTarget.removeEventListener("webglcontextlost", this.upscaleContextLostHandler)
+    if (this.hasUpscaleWebglCanvasTarget && this.upscaleContextLostHandler) {
+      this.upscaleWebglCanvasTarget.removeEventListener("webglcontextlost", this.upscaleContextLostHandler)
     }
+    clearTimeout(this.upscaleHealthTimer)
+    clearTimeout(this.playerNoticeTimer)
+    this.closeUpscalerMenu()
     this.disableUpscale()
     if (this.localStatusInterval) clearInterval(this.localStatusInterval)
     this.localStatusInterval = null
@@ -3023,52 +3042,145 @@ export default class extends Controller {
     }
   }
 
+  loadUpscaleEnginePreference() {
+    try {
+      const saved = window.localStorage.getItem(UPSCALE_ENGINE_PREFERENCE_KEY)
+      return saved === "webgpu" ? "webgpu" : "webgl"
+    } catch {
+      return "webgl"
+    }
+  }
+
   saveUpscalePreference(enabled) {
     try {
       window.localStorage.setItem(UPSCALE_PREFERENCE_KEY, enabled ? "1" : "0")
     } catch {}
   }
 
+  saveUpscaleEnginePreference(engineId) {
+    try {
+      window.localStorage.setItem(UPSCALE_ENGINE_PREFERENCE_KEY, engineId)
+    } catch {}
+  }
+
+  loadUpscaleProfilePreference() {
+    try {
+      const saved = window.localStorage.getItem(UPSCALE_PROFILE_PREFERENCE_KEY)
+      return UPSCALE_PROFILE_IDS.includes(saved) ? saved : "balanced"
+    } catch {
+      return "balanced"
+    }
+  }
+
+  saveUpscaleProfilePreference(profileId) {
+    try {
+      window.localStorage.setItem(UPSCALE_PROFILE_PREFERENCE_KEY, profileId)
+    } catch {}
+  }
+
+  // Quality tiers offered in the 4K menu; shared ids across both engines.
+  upscaleProfiles() {
+    return [
+      { id: "balanced", hint: "2x · fast, balanced" },
+      { id: "quality", hint: "2x · sharper, heavier" },
+      { id: "ultra4x", hint: "4x · low-res sources, strong GPU" }
+    ]
+  }
+
+  // Engine registry for the 4K menu. Both render the same Anime4K SIMPLE_M
+  // chain (ClampHighlights -> Restore CNNM -> 2x CNN upscale) client-side;
+  // they differ only in GPU API and device reach:
+  // - WebGL: virtually every desktop/Android browser (needs float textures).
+  // - WebGPU: newer browsers; notably the ONLY option on iOS (26+), whose
+  //   WebGL lacks the float textures the WebGL engine requires.
+  upscaleEngines() {
+    return [
+      { id: "webgl", hint: "2x · most devices", supported: this.upscaleWebglSupported() },
+      { id: "webgpu", hint: "2x · newer devices, incl. iPhone (iOS 26+)", supported: this.webgpuApiPresent() && !this.upscaleWebgpuFailed }
+    ]
+  }
+
+  upscaleEngineById(engineId) {
+    return this.upscaleEngines().find((engine) => engine.id === engineId)
+  }
+
+  webgpuApiPresent() {
+    return typeof navigator !== "undefined" && Boolean(navigator.gpu)
+  }
+
   // Mirrors Anime4K.js VideoUpscaler.isSupported() exactly: WebGL with
   // float textures (the CNN shaders need them). Deliberately no stricter —
-  // an extra extension check here would hide the toggle on browsers the
+  // an extra extension check here would disable the engine on browsers the
   // library itself supports.
-  upscaleSupported() {
-    if (this.upscaleSupportedResult === undefined) {
+  upscaleWebglSupported() {
+    if (this.upscaleWebglSupportedResult === undefined) {
       try {
         const canvas = document.createElement("canvas")
         const gl = canvas.getContext("webgl")
-        this.upscaleSupportedResult = Boolean(
+        this.upscaleWebglSupportedResult = Boolean(
           gl &&
           gl.getExtension("OES_texture_float") &&
           gl.getExtension("OES_texture_float_linear")
         )
       } catch {
-        this.upscaleSupportedResult = false
+        this.upscaleWebglSupportedResult = false
       }
     }
-    return this.upscaleSupportedResult
+    return this.upscaleWebglSupportedResult
   }
 
   // Overridable for tests; resolved through the import map in the browser.
-  loadUpscaleModule() {
-    return import("anime4k")
+  // The 4x profile lives in separate lazy bundles (~2MB of model weights)
+  // so only viewers who pick 4x download it.
+  loadUpscaleModule(engineId, profileId) {
+    const module = profileId === "ultra4x" ? `${engineId}-ultra` : engineId
+    return import(module)
   }
 
-  async toggleUpscale() {
-    if (!this.upscaleSupported()) return
-    if (this.upscaleEnabled) {
+  // ── 4K menu ───────────────────────────────────────────────────────
+
+  toggleUpscalerMenu() {
+    if (this.hasUpscaleMenuTarget) {
+      this.upscaleMenuTarget.classList.toggle("hidden")
+    }
+  }
+
+  closeUpscalerMenu() {
+    if (this.hasUpscaleMenuTarget) this.upscaleMenuTarget.classList.add("hidden")
+  }
+
+  upscaleMenuOpen() {
+    return Boolean(this.hasUpscaleMenuTarget && !this.upscaleMenuTarget.classList.contains("hidden"))
+  }
+
+  // Menu row action: "off" or an engine id. Disabled rows never react.
+  async selectUpscalerEngine(event) {
+    const row = event.currentTarget
+    if (row.getAttribute("aria-disabled") === "true") return
+    const engineId = row.dataset.upscaleEngine
+    this.closeUpscalerMenu()
+
+    if (engineId === "off" || !engineId) {
       this.upscalePreferenceEnabled = false
       this.saveUpscalePreference(false)
-      this.disableUpscale()
+      if (this.upscaleEnabled) this.disableUpscale()
       // If enabling the upscaler switched HDR playback off, switching it
       // back off restores HDR.
       if (this.hdrDisabledByUpscale) {
         this.hdrDisabledByUpscale = false
         if (!this.hdrEnabled && this.hdrAvailable) this.toggleHdr()
       }
+      this.renderUpscaleControls()
       return
     }
+
+    const engine = this.upscaleEngineById(engineId)
+    if (!engine || !engine.supported) return
+    // Same engine already running: nothing to do.
+    if (this.upscaleEnabled && this.activeUpscaleEngineId === engineId) return
+
+    this.upscaleEngineId = engineId
+    this.saveUpscaleEnginePreference(engineId)
     // Upscaled frames are SDR: when HDR playback is active, switch to SDR
     // first. The viewer accepted the trade — 4K on, HDR off.
     this.hdrDisabledByUpscale = false
@@ -3077,6 +3189,10 @@ export default class extends Controller {
       this.toggleHdr()
     }
     this.upscalePreferenceEnabled = true
+    this.saveUpscalePreference(true)
+    // Engine switch: tear the running engine down before starting the new
+    // one (a canvas can hold only one context type, ever).
+    if (this.upscaleEnabled) this.disableUpscale()
     const ok = await this.enableUpscale()
     if (!ok) {
       this.upscalePreferenceEnabled = false
@@ -3084,30 +3200,69 @@ export default class extends Controller {
     }
   }
 
-  // Attaches the Anime4K pipeline to the canvas overlay: clamp highlights,
-  // restore (line-art reconstruction) then a 2x CNN upscale — the SIMPLE_M
-  // profile, which the Anime4K.js README recommends as the balanced preset.
-  // Fails softly (unsupported browser, module load error, HDR switched on
-  // mid-load): the plain video keeps playing.
+  // Menu row action for the quality section: "balanced" / "quality" /
+  // "ultra4x". Applies immediately (engine restart) when upscaling runs,
+  // and always persists for future playback.
+  async selectUpscalerProfile(event) {
+    const row = event.currentTarget
+    if (row.getAttribute("aria-disabled") === "true") return
+    const profileId = row.dataset.upscaleProfile
+    if (!UPSCALE_PROFILE_IDS.includes(profileId) || profileId === this.upscaleProfileId) return
+    this.closeUpscalerMenu()
+
+    this.upscaleProfileId = profileId
+    this.saveUpscaleProfilePreference(profileId)
+    if (!this.upscaleEnabled) {
+      this.renderUpscaleControls()
+      return
+    }
+    // Restart the running engine with the new chain.
+    this.disableUpscale()
+    const ok = await this.enableUpscale()
+    if (!ok) {
+      this.upscalePreferenceEnabled = false
+      this.saveUpscalePreference(false)
+    }
+  }
+
+  // Attaches the selected engine's Anime4K pipeline to its canvas overlay:
+  // clamp highlights, restore (line-art reconstruction) then a 2x CNN
+  // upscale — the SIMPLE_M profile. Fails softly (unsupported browser,
+  // module load error, HDR switched on mid-load): the plain video keeps
+  // playing.
   async enableUpscale() {
-    if (this.upscaleEnabled || !this.upscaleSupported() || this.hdrEnabled) return false
-    if (!this.hasUpscaleCanvasTarget) return false
+    if (this.upscaleEnabled || this.hdrEnabled) return false
+    const engineId = this.upscaleEngineId
+    const profileId = this.upscaleProfileId
+    const engine = this.upscaleEngineById(engineId)
+    if (!engine || !engine.supported) return false
+    const canvas = engineId === "webgl" ? this.upscaleWebglCanvasTarget : this.upscaleWebgpuCanvasTarget
+    if (!canvas) return false
     try {
-      const module = await this.loadUpscaleModule()
+      const module = await this.loadUpscaleModule(engineId, profileId)
       // HDR may have been switched on while the module loaded.
       if (this.hdrEnabled) return false
+      const shaderChain = module.PROFILES?.[profileId] || module.PROFILES?.balanced
+      if (!shaderChain) return false
       if (!this.upscaler) {
-        this.upscaler = new module.VideoUpscaler([
-          module.Anime4K_Clamp_Highlights,
-          module.Anime4K_Restore_CNN_M,
-          module.Anime4K_Upscale_CNN_x2_M
-        ])
+        this.upscaler = engineId === "webgl"
+          ? new module.VideoUpscaler(shaderChain)
+          : new module.WebGPUUpscaler(shaderChain)
       }
-      this.upscaler.attachVideo(this.videoTarget, this.upscaleCanvasTarget)
-      this.upscaleCanvasTarget.classList.remove("hidden")
+      this.upscaler.attachVideo(this.videoTarget, canvas)
+      canvas.classList.remove("hidden")
       this.upscaler.start()
       this.upscaleEnabled = true
+      this.activeUpscaleEngineId = engineId
       this.renderUpscaleControls()
+      // WebGPU video upload paths are young in WebKit: verify shortly after
+      // start that frames actually render (and are not blank), else fall
+      // back. The mature WebGL engine needs no such check (its context-lost
+      // handler covers it).
+      if (engineId === "webgpu" && typeof this.upscaler.renderingHealthy === "function") {
+        this.upscaler.onError = () => this.failWebgpuUpscale("hit a rendering error")
+        this.upscaleHealthTimer = setTimeout(() => this.checkWebgpuUpscaleHealth(this.upscaler), UPSCALE_HEALTH_CHECK_DELAY_MS)
+      }
       return true
     } catch (error) {
       console.warn("[VideoPlayer] Anime4K upscaling unavailable", error)
@@ -3117,7 +3272,10 @@ export default class extends Controller {
   }
 
   disableUpscale() {
+    clearTimeout(this.upscaleHealthTimer)
+    this.upscaleHealthTimer = null
     this.upscaleEnabled = false
+    this.activeUpscaleEngineId = null
     if (this.upscaler) {
       try {
         this.upscaler.stop()
@@ -3125,23 +3283,88 @@ export default class extends Controller {
       } catch {}
       this.upscaler = null
     }
-    if (this.hasUpscaleCanvasTarget) this.upscaleCanvasTarget.classList.add("hidden")
+    if (this.hasUpscaleWebglCanvasTarget) this.upscaleWebglCanvasTarget.classList.add("hidden")
+    if (this.hasUpscaleWebgpuCanvasTarget) this.upscaleWebgpuCanvasTarget.classList.add("hidden")
     this.renderUpscaleControls()
+  }
+
+  // Watchdog: the WebGPU engine started but may still render nothing (dead
+  // loop) or all-black frames (WebKit copyExternalImageToTexture bug). Both
+  // leave the viewer staring at a blank/stuck canvas, so verify and fall
+  // back to plain video (or the WebGL engine) with a notice.
+  async checkWebgpuUpscaleHealth(upscaler) {
+    this.upscaleHealthTimer = null
+    if (!this.upscaleEnabled || this.activeUpscaleEngineId !== "webgpu" || this.upscaler !== upscaler) return
+
+    const playing = !this.videoTarget.paused && this.videoTarget.currentTime > 0
+    if (playing && upscaler.framesProcessed === 0) {
+      this.failWebgpuUpscale("rendered no frames")
+      return
+    }
+    if (upscaler.framesProcessed > 0) {
+      const healthy = await upscaler.renderingHealthy()
+      // Engine may have changed while awaiting the readback.
+      if (!this.upscaleEnabled || this.activeUpscaleEngineId !== "webgpu" || this.upscaler !== upscaler) return
+      if (!healthy) this.failWebgpuUpscale("rendered blank output")
+    }
+  }
+
+  // Blacklist the WebGPU engine for this session and keep the viewer
+  // watching: fall back to WebGL when available, otherwise plain video.
+  failWebgpuUpscale(reason) {
+    if (this.upscaleWebgpuFailed) return
+    this.upscaleWebgpuFailed = true
+    console.warn(`[VideoPlayer] WebGPU upscaling failed (${reason}) — falling back`)
+    this.disableUpscale()
+    if (this.upscaleWebglSupported()) {
+      this.upscaleEngineId = "webgl"
+      this.saveUpscaleEnginePreference("webgl")
+      this.enableUpscale().then((ok) => {
+        this.showPlayerNotice(ok
+          ? "WebGPU upscaling failed on this device — switched to the WebGL engine."
+          : "WebGPU upscaling failed on this device — playing the original video.")
+      })
+    } else {
+      this.upscalePreferenceEnabled = false
+      this.saveUpscalePreference(false)
+      this.showPlayerNotice("WebGPU upscaling failed on this device — playing the original video.")
+    }
+  }
+
+  // Transient, non-blocking notice above the controls (used for upscaler
+  // fallbacks; never intercepts taps).
+  showPlayerNotice(message, duration = 4000) {
+    if (!this.hasPlayerNoticeTarget) return
+    clearTimeout(this.playerNoticeTimer)
+    this.playerNoticeTarget.textContent = message
+    this.playerNoticeTarget.classList.remove("hidden")
+    this.playerNoticeTimer = setTimeout(() => {
+      if (this.hasPlayerNoticeTarget) this.playerNoticeTarget.classList.add("hidden")
+    }, duration)
   }
 
   async restoreUpscale() {
     if (!this.upscalePreferenceEnabled || this.upscaleEnabled) return
-    if (!this.upscaleSupported() || this.hdrEnabled) return
+    if (this.hdrEnabled) return
+    let engine = this.upscaleEngineById(this.upscaleEngineId)
+    if (!engine || !engine.supported) {
+      // Saved engine unusable here (e.g. WebGL saved, opened on iOS):
+      // fall back to any supported engine so the preference still applies.
+      engine = this.upscaleEngines().find((candidate) => candidate.supported)
+      if (!engine) return
+      this.upscaleEngineId = engine.id
+      this.saveUpscaleEnginePreference(engine.id)
+    }
     await this.enableUpscale()
   }
 
-  // The upscale canvas renders SDR frames, so while HDR playback is active
-  // the canvas is suspended (an SDR canvas over an HDR stream would wash
-  // the picture out) and resumes when HDR is switched back off. Called from
+  // The upscale canvases render SDR frames, so while HDR playback is active
+  // they are suspended (an SDR canvas over an HDR stream would wash the
+  // picture out) and resume when HDR is switched back off. Called from
   // renderHdrControls, which runs on every HDR state change.
   syncUpscaleControls() {
     if (this.hdrEnabled && this.upscaleEnabled) this.disableUpscale()
-    if (!this.hdrEnabled && this.upscalePreferenceEnabled && !this.upscaleEnabled && this.upscaleSupported()) {
+    if (!this.hdrEnabled && this.upscalePreferenceEnabled && !this.upscaleEnabled) {
       this.restoreUpscale()
     }
     this.renderUpscaleControls()
@@ -3149,27 +3372,73 @@ export default class extends Controller {
 
   renderUpscaleControls() {
     if (!this.hasUpscaleControlsTarget || !this.hasUpscaleButtonTarget || !this.hasUpscaleButtonStateTarget) return
-    // Always visible: unsupported browsers (e.g. iOS, whose WebGL lacks the
-    // float textures the CNN shaders need) render the button disabled with
-    // an explanatory tooltip instead of hiding the feature entirely.
+    // Always visible: on browsers where no engine can run (rare) the button
+    // renders disabled with an explanatory tooltip instead of vanishing.
     this.upscaleControlsTarget.classList.remove("hidden")
-    const supported = this.upscaleSupported()
+    const anySupported = this.upscaleEngines().some((engine) => engine.supported)
     const enabled = this.upscaleEnabled
-    this.upscaleButtonTarget.disabled = !supported
+    this.upscaleButtonTarget.disabled = !anySupported
     this.upscaleButtonTarget.setAttribute("aria-pressed", enabled ? "true" : "false")
-    this.upscaleButtonTarget.setAttribute("aria-label", enabled ? "Disable upscaling" : "Enable upscaling")
-    this.upscaleButtonTarget.title = !supported
+    this.upscaleButtonTarget.setAttribute("aria-expanded", this.upscaleMenuOpen() ? "true" : "false")
+    this.upscaleButtonTarget.setAttribute("aria-haspopup", "menu")
+    this.upscaleButtonTarget.title = !anySupported
       ? "Anime4K upscaling not supported in this browser"
       : (enabled ? "Anime4K upscaling on (SDR)" : "Anime4K upscaling (client-side, 2x — switches HDR off)")
     this.upscaleButtonStateTarget.textContent = enabled ? "ON" : "OFF"
     this.upscaleButtonTarget.classList.toggle("border-indigo-400/70", enabled)
     this.upscaleButtonTarget.classList.toggle("bg-indigo-500/15", enabled)
     this.upscaleButtonTarget.classList.toggle("text-indigo-300", enabled)
-    this.upscaleButtonTarget.classList.toggle("opacity-40", !supported)
-    this.upscaleButtonTarget.classList.toggle("cursor-not-allowed", !supported)
+    this.upscaleButtonTarget.classList.toggle("opacity-40", !anySupported)
+    this.upscaleButtonTarget.classList.toggle("cursor-not-allowed", !anySupported)
     this.upscaleButtonTarget.classList.toggle("border-white/20", !enabled)
     this.upscaleButtonTarget.classList.toggle("bg-black/60", !enabled)
     this.upscaleButtonTarget.classList.toggle("text-sv-text-muted", !enabled)
+    this.renderUpscaleMenu()
+  }
+
+  renderUpscaleMenu() {
+    if (!this.hasUpscaleMenuTarget) return
+    const anySupported = this.upscaleEngines().some((engine) => engine.supported)
+    const rows = this.upscaleMenuTarget.querySelectorAll("[data-upscale-engine], [data-upscale-profile]")
+    rows.forEach((row) => {
+      const engineId = row.dataset.upscaleEngine
+      const profileId = row.dataset.upscaleProfile
+      const check = row.querySelector("[data-upscale-check]")
+      if (profileId) {
+        // Quality rows: selectable whenever any engine can run; the choice
+        // persists and applies to whatever engine is active.
+        const selected = profileId === this.upscaleProfileId
+        row.setAttribute("aria-disabled", anySupported ? "false" : "true")
+        row.classList.toggle("opacity-40", !anySupported)
+        row.classList.toggle("cursor-not-allowed", !anySupported)
+        row.classList.toggle("hover:bg-white/5", anySupported)
+        row.classList.toggle("hover:text-white", anySupported)
+        row.classList.toggle("text-indigo-300", selected)
+        row.classList.toggle("bg-indigo-500/10", selected)
+        if (check) check.classList.toggle("hidden", !selected)
+        return
+      }
+      if (engineId === "off") {
+        const selected = !this.upscaleEnabled
+        row.classList.toggle("text-indigo-300", selected)
+        row.classList.toggle("bg-indigo-500/10", selected)
+        if (check) check.classList.toggle("hidden", !selected)
+        return
+      }
+      const engine = this.upscaleEngineById(engineId)
+      const supported = Boolean(engine && engine.supported)
+      const selected = this.upscaleEnabled && this.activeUpscaleEngineId === engineId
+      row.setAttribute("aria-disabled", supported ? "false" : "true")
+      row.classList.toggle("opacity-40", !supported)
+      row.classList.toggle("cursor-not-allowed", !supported)
+      row.classList.toggle("hover:bg-white/5", supported)
+      row.classList.toggle("hover:text-white", supported)
+      row.classList.toggle("text-indigo-300", selected)
+      row.classList.toggle("bg-indigo-500/10", selected)
+      if (check) check.classList.toggle("hidden", !selected)
+      const hint = row.querySelector("[data-upscale-hint]")
+      if (hint) hint.textContent = supported ? engine.hint : "Not supported in this browser"
+    })
   }
 
   deviceSupportsHdr() {
@@ -4127,12 +4396,14 @@ export default class extends Controller {
   }
 
   onDocumentClick(event) {
-    if (!this.trackMenuOpen()) return
+    if (!this.trackMenuOpen() && !this.upscaleMenuOpen()) return
     if (this.hasAudioControlsTarget && this.audioControlsTarget.contains(event.target)) return
     if (this.hasSubtitleControlsTarget && this.subtitleControlsTarget.contains(event.target)) return
     if (this.hasSpeedButtonTarget && this.speedButtonTarget.contains(event.target)) return
+    if (this.hasUpscaleControlsTarget && this.upscaleControlsTarget.contains(event.target)) return
 
     this.closeTrackMenus()
+    this.closeUpscalerMenu()
   }
 
   // ── Fullscreen ────────────────────────────────────────────────────

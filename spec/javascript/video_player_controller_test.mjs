@@ -2144,216 +2144,430 @@ class FakeUpscaler {
   detachVideo() { this.attached = null }
 }
 
-const fakeUpscaleModule = () => ({
-  VideoUpscaler: FakeUpscaler,
-  Anime4K_Clamp_Highlights: "clamp",
-  Anime4K_Restore_CNN_M: "restore",
-  Anime4K_Upscale_CNN_x2_M: "upscale"
-})
+const fakeProfiles = {
+  balanced: ["clamp", "restore", "upscale"],
+  quality: ["clamp", "restore-vl", "upscale-vl"],
+  ultra4x: ["clamp", "restore", "upscale-gan-4x"]
+}
+
+const fakeWebglModule = () => ({ VideoUpscaler: FakeUpscaler, PROFILES: fakeProfiles })
+const fakeWebgpuModule = () => ({ WebGPUUpscaler: FakeUpscaler, PROFILES: fakeProfiles })
+
+const makeClassListStub = (initial = []) => {
+  const classes = new Set(initial)
+  return {
+    classes,
+    add: (name) => classes.add(name),
+    remove: (name) => classes.delete(name),
+    contains: (name) => classes.has(name),
+    toggle: (name, on) => {
+      if (on === undefined) on = !classes.has(name)
+      on ? classes.add(name) : classes.delete(name)
+    }
+  }
+}
+
+const makeMenuRow = (engineId, profileId) => {
+  const attrs = {}
+  const row = {
+    dataset: profileId ? { upscaleProfile: profileId } : { upscaleEngine: engineId },
+    getAttribute: (name) => attrs[name],
+    setAttribute: (name, value) => { attrs[name] = value },
+    classList: makeClassListStub(),
+    hint: { textContent: "" },
+    check: { classList: makeClassListStub(["hidden"]) }
+  }
+  row.querySelector = (selector) => (selector === "[data-upscale-hint]" ? row.hint : row.check)
+  return row
+}
 
 const makeUpscalePlayer = () => {
   const player = new VideoPlayerController()
-  player.upscaleSupportedResult = true
+  player.upscaleWebglSupportedResult = true
   player.upscaleEnabled = false
   player.upscaler = null
   player.upscalePreferenceEnabled = false
+  player.upscaleEngineId = "webgl"
+  player.upscaleProfileId = "balanced"
+  player.activeUpscaleEngineId = null
   player.hdrEnabled = false
   player.hdrAvailable = true
   player.hdrDisabledByUpscale = false
   player.videoTarget = { currentTime: 0 }
-  const classes = new Set(["hidden"])
-  player.hasUpscaleCanvasTarget = true
-  player.upscaleCanvasTarget = {
-    classList: {
-      add: (name) => classes.add(name),
-      remove: (name) => classes.delete(name),
-      toggle: (name, on) => { on ? classes.add(name) : classes.delete(name) }
-    }
-  }
+
+  const webglCanvas = makeClassListStub(["hidden"])
+  const webgpuCanvas = makeClassListStub(["hidden"])
+  player.hasUpscaleWebglCanvasTarget = true
+  player.hasUpscaleWebgpuCanvasTarget = true
+  player.upscaleWebglCanvasTarget = { classList: webglCanvas }
+  player.upscaleWebgpuCanvasTarget = { classList: webgpuCanvas }
+  player.webglCanvasClasses = webglCanvas.classes
+  player.webgpuCanvasClasses = webgpuCanvas.classes
+
   player.hasUpscaleControlsTarget = true
+  player.upscaleControlsTarget = { classList: makeClassListStub(["hidden"]) }
   player.hasUpscaleButtonTarget = true
   player.hasUpscaleButtonStateTarget = true
-  player.upscaleControlsTarget = { classList: { toggle: () => {}, remove: () => {} } }
-  player.upscaleButtonStateTarget = { textContent: "OFF" }
-  player.saveUpscalePreference = () => {}
-  player.canvasClasses = classes
-  // Capture real classList toggle state for renderUpscaleControls checks.
-  player.buttonClasses = new Set()
+  const buttonClasses = makeClassListStub()
   player.upscaleButtonTarget = {
     attributes: {},
     disabled: false,
     setAttribute(name, value) { this.attributes[name] = value },
-    classList: {
-      toggle(name, on) { on ? player.buttonClasses.add(name) : player.buttonClasses.delete(name) }
-    }
+    classList: buttonClasses
   }
+  player.buttonClasses = buttonClasses.classes
+  player.upscaleButtonStateTarget = { textContent: "OFF" }
+
+  player.hasUpscaleMenuTarget = true
+  player.rows = []
+  player.upscaleMenuTarget = {
+    classList: makeClassListStub(["hidden"]),
+    querySelectorAll: (selector) => (
+      selector.includes("data-upscale-engine") || selector.includes("data-upscale-profile") ? player.rows : []
+    )
+  }
+  player.menuClasses = player.upscaleMenuTarget.classList.classes
+
+  player.savedPreferences = []
+  player.saveUpscalePreference = (enabled) => player.savedPreferences.push(["enabled", enabled])
+  player.saveUpscaleEnginePreference = (engineId) => player.savedPreferences.push(["engine", engineId])
+  player.saveUpscaleProfilePreference = (profileId) => player.savedPreferences.push(["profile", profileId])
   return player
 }
 
-test("the 4K button is always visible, disabled with a tooltip when unsupported", () => {
+const rowEvent = (row) => ({ currentTarget: row })
+
+test("selecting the WebGL engine row lazily attaches and starts the upscaler", async () => {
   const player = makeUpscalePlayer()
-  player.upscaleSupportedResult = false
-  const revealed = []
-  player.upscaleControlsTarget = {
-    classList: { remove: (name) => revealed.push(name), toggle: () => {} }
-  }
+  const loaded = []
+  player.loadUpscaleModule = async (engineId, profileId) => { loaded.push([engineId, profileId]); return fakeWebglModule() }
+  const row = makeMenuRow("webgl")
 
-  player.renderUpscaleControls()
+  await player.selectUpscalerEngine(rowEvent(row))
 
-  // Revealed (not hidden) and not pressable on unsupported browsers.
-  assert.deepEqual(revealed, ["hidden"])
-  assert.equal(player.upscaleButtonTarget.disabled, true)
-  assert.ok(player.buttonClasses.has("opacity-40"))
-  assert.ok(player.buttonClasses.has("cursor-not-allowed"))
-  assert.equal(player.upscaleButtonTarget.attributes["aria-pressed"], "false")
-  assert.match(player.upscaleButtonTarget.title, /not supported in this browser/)
-
-  // Supported browser: pressable.
-  player.upscaleSupportedResult = true
-  player.renderUpscaleControls()
-  assert.equal(player.upscaleButtonTarget.disabled, false)
-  assert.ok(!player.buttonClasses.has("opacity-40"))
-  assert.ok(!player.buttonClasses.has("cursor-not-allowed"))
-})
-
-test("toggling the 4K button lazily attaches and starts the upscaler", async () => {
-  const player = makeUpscalePlayer()
-  const modules = []
-  player.loadUpscaleModule = async () => { modules.push(1); return fakeUpscaleModule() }
-
-  await player.toggleUpscale()
-
-  assert.equal(modules.length, 1)
+  assert.deepEqual(loaded, [["webgl", "balanced"]])
   assert.equal(player.upscaleEnabled, true)
+  assert.equal(player.activeUpscaleEngineId, "webgl")
   assert.ok(player.upscaler instanceof FakeUpscaler)
   assert.deepEqual(Array.from(player.upscaler.shaders, String), ["clamp", "restore", "upscale"])
-  assert.equal(player.upscaler.started, true)
   assert.equal(player.upscaler.attached[0], player.videoTarget)
-  assert.equal(player.upscaler.attached[1], player.upscaleCanvasTarget)
-  assert.equal(player.canvasClasses.has("hidden"), false)
-  assert.equal(player.upscaleButtonTarget.attributes["aria-pressed"], "true")
+  assert.equal(player.upscaler.attached[1], player.upscaleWebglCanvasTarget)
+  assert.equal(player.webglCanvasClasses.has("hidden"), false)
+  assert.equal(player.webgpuCanvasClasses.has("hidden"), true)
+  assert.equal(player.upscaleButtonStateTarget.textContent, "ON")
 })
 
-test("toggling the 4K button off stops, detaches and hides the canvas", async () => {
+test("selecting Off stops, detaches and hides the canvases", async () => {
   const player = makeUpscalePlayer()
-  player.loadUpscaleModule = async () => fakeUpscaleModule()
-  await player.toggleUpscale()
+  player.loadUpscaleModule = async () => fakeWebglModule()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
   const upscaler = player.upscaler
 
-  await player.toggleUpscale()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("off")))
 
   assert.equal(player.upscaleEnabled, false)
+  assert.equal(player.activeUpscaleEngineId, null)
   assert.equal(player.upscaler, null)
   assert.equal(upscaler.started, false)
   assert.equal(upscaler.attached, null)
-  assert.equal(player.canvasClasses.has("hidden"), true)
+  assert.equal(player.webglCanvasClasses.has("hidden"), true)
   assert.equal(player.upscaleButtonStateTarget.textContent, "OFF")
+})
+
+test("a disabled (unsupported) engine row is inert", async () => {
+  const player = makeUpscalePlayer()
+  let loaded = 0
+  player.loadUpscaleModule = async () => { loaded += 1; return fakeWebgpuModule() }
+  player.webgpuApiPresent = () => false
+  const row = makeMenuRow("webgpu")
+  row.setAttribute("aria-disabled", "true")
+
+  await player.selectUpscalerEngine(rowEvent(row))
+
+  assert.equal(loaded, 0)
+  assert.equal(player.upscaleEnabled, false)
+})
+
+test("selecting the WebGPU engine loads the WebGPU module and uses its upscaler", async () => {
+  const player = makeUpscalePlayer()
+  player.webgpuApiPresent = () => true
+  const loaded = []
+  player.loadUpscaleModule = async (engineId, profileId) => {
+    loaded.push([engineId, profileId])
+    return engineId === "webgpu" ? fakeWebgpuModule() : fakeWebglModule()
+  }
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgpu")))
+
+  assert.deepEqual(loaded, [["webgpu", "balanced"]])
+  assert.equal(player.upscaleEnabled, true)
+  assert.equal(player.activeUpscaleEngineId, "webgpu")
+  assert.ok(player.upscaler instanceof FakeUpscaler)
+  assert.equal(player.upscaler.attached[1], player.upscaleWebgpuCanvasTarget)
+  assert.equal(player.webgpuCanvasClasses.has("hidden"), false)
+  assert.equal(player.webglCanvasClasses.has("hidden"), true)
+  assert.deepEqual(player.savedPreferences, [["engine", "webgpu"], ["enabled", true]])
+})
+
+test("switching engines stops the running engine first", async () => {
+  const player = makeUpscalePlayer()
+  player.webgpuApiPresent = () => true
+  player.loadUpscaleModule = async (engineId) => (engineId === "webgpu" ? fakeWebgpuModule() : fakeWebglModule())
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+  const webglUpscaler = player.upscaler
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgpu")))
+
+  assert.equal(webglUpscaler.started, false)
+  assert.equal(webglUpscaler.attached, null)
+  assert.equal(player.activeUpscaleEngineId, "webgpu")
+  assert.ok(player.upscaler !== webglUpscaler)
+  assert.equal(player.webglCanvasClasses.has("hidden"), true)
+})
+
+test("selecting the engine already running is a no-op", async () => {
+  const player = makeUpscalePlayer()
+  let loads = 0
+  player.loadUpscaleModule = async () => { loads += 1; return fakeWebglModule() }
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+
+  assert.equal(loads, 1)
+  assert.equal(player.upscaleEnabled, true)
 })
 
 test("a failed module load leaves the player on plain video and preference off", async () => {
   const player = makeUpscalePlayer()
-  player.loadUpscaleModule = async () => { throw new Error("no WebGL") }
-  const saved = []
-  player.saveUpscalePreference = (enabled) => saved.push(enabled)
+  player.loadUpscaleModule = async () => { throw new Error("no WebGPU") }
 
-  await player.toggleUpscale()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
 
   assert.equal(player.upscaleEnabled, false)
   assert.equal(player.upscaler, null)
-  assert.equal(player.canvasClasses.has("hidden"), true)
-  assert.deepEqual(saved, [false])
+  assert.equal(player.webglCanvasClasses.has("hidden"), true)
+  assert.deepEqual(player.savedPreferences.filter(([k]) => k === "enabled").slice(-1), [["enabled", false]])
 })
 
-test("enabling 4K while HDR is on switches HDR off; disabling 4K switches HDR back on", async () => {
+test("enabling an engine while HDR is on switches HDR off; Off restores HDR", async () => {
   const player = makeUpscalePlayer()
-  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  player.loadUpscaleModule = async () => fakeWebglModule()
   const hdrToggles = []
   player.toggleHdr = () => { hdrToggles.push(player.hdrEnabled); player.hdrEnabled = !player.hdrEnabled }
   player.hdrEnabled = true
 
-  await player.toggleUpscale()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
 
-  // 4K on: HDR was switched off once.
   assert.equal(player.upscaleEnabled, true)
   assert.equal(player.hdrEnabled, false)
   assert.equal(hdrToggles.length, 1)
 
-  await player.toggleUpscale()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("off")))
 
-  // 4K off: HDR is restored.
   assert.equal(player.upscaleEnabled, false)
   assert.equal(player.hdrEnabled, true)
   assert.equal(hdrToggles.length, 2)
-  assert.equal(player.hdrDisabledByUpscale, false)
 })
 
-test("disabling 4K leaves HDR alone when the user turned HDR back on manually", async () => {
+test("disabling via Off leaves HDR alone when the user re-enabled it manually", async () => {
   const player = makeUpscalePlayer()
-  player.loadUpscaleModule = async () => fakeUpscaleModule()
+  player.loadUpscaleModule = async () => fakeWebglModule()
   const hdrToggles = []
   player.toggleHdr = () => { hdrToggles.push(true); player.hdrEnabled = !player.hdrEnabled }
 
-  await player.toggleUpscale()
-  assert.equal(player.upscaleEnabled, true)
-  // HDR was already off when 4K was enabled: no HDR toggle fired.
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
   assert.equal(hdrToggles.length, 0)
 
-  // Simulate: 4K had switched HDR off earlier, then the user re-enabled
-  // HDR themselves while 4K kept running.
   player.hdrDisabledByUpscale = true
   player.hdrEnabled = true
 
-  await player.toggleUpscale()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("off")))
 
-  // HDR is already on — disabling 4K must not toggle it again.
   assert.equal(hdrToggles.length, 0)
   assert.equal(player.hdrEnabled, true)
 })
 
 test("HDR playback suspends upscaling and resumes it when HDR is off again", async () => {
   const player = makeUpscalePlayer()
-  player.loadUpscaleModule = async () => fakeUpscaleModule()
-  await player.toggleUpscale()
+  player.loadUpscaleModule = async () => fakeWebglModule()
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
   assert.equal(player.upscaleEnabled, true)
 
-  // HDR on: renderHdrControls calls syncUpscaleControls.
   player.hdrEnabled = true
   player.syncUpscaleControls()
   assert.equal(player.upscaleEnabled, false)
-  assert.equal(player.canvasClasses.has("hidden"), true)
+  assert.equal(player.webglCanvasClasses.has("hidden"), true)
 
-  // HDR off with the preference still saved: upscaling comes back.
-  // syncUpscaleControls kicks off the restore without awaiting it.
   player.hdrEnabled = false
   player.upscalePreferenceEnabled = true
   player.syncUpscaleControls()
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(player.upscaleEnabled, true)
-  assert.equal(player.canvasClasses.has("hidden"), false)
+  assert.equal(player.webglCanvasClasses.has("hidden"), false)
 })
 
-test("a 4K toggle while HDR is unavailable simply upscales, no HDR toggle fires", async () => {
+test("a saved unsupported engine falls back to a supported one (iOS case)", async () => {
   const player = makeUpscalePlayer()
-  player.hdrAvailable = false
-  player.loadUpscaleModule = async () => fakeUpscaleModule()
-  player.toggleHdr = () => { throw new Error("toggleHdr must not run") }
+  player.upscaleWebglSupportedResult = false
+  player.webgpuApiPresent = () => true
+  player.upscalePreferenceEnabled = true
+  player.upscaleEngineId = "webgl"
+  const loaded = []
+  player.loadUpscaleModule = async (engineId, profileId) => {
+    loaded.push([engineId, profileId])
+    return engineId === "webgpu" ? fakeWebgpuModule() : fakeWebglModule()
+  }
 
-  await player.toggleUpscale()
+  await player.restoreUpscale()
 
+  assert.deepEqual(loaded, [["webgpu", "balanced"]])
   assert.equal(player.upscaleEnabled, true)
+  assert.equal(player.activeUpscaleEngineId, "webgpu")
+  assert.deepEqual(player.savedPreferences, [["engine", "webgpu"]])
+})
+
+test("the menu renders every engine; unsupported ones disabled with a note", () => {
+  const player = makeUpscalePlayer()
+  player.webgpuApiPresent = () => false
+  const off = makeMenuRow("off")
+  const webgl = makeMenuRow("webgl")
+  const webgpu = makeMenuRow("webgpu")
+  player.rows = [off, webgl, webgpu]
+
+  player.renderUpscaleMenu()
+
+  assert.equal(off.getAttribute("aria-disabled"), undefined)
+  assert.equal(off.check.classList.classes.has("hidden"), false)
+  assert.equal(webgl.getAttribute("aria-disabled"), "false")
+  assert.equal(webgl.hint.textContent.includes("most devices"), true)
+  assert.equal(webgpu.getAttribute("aria-disabled"), "true")
+  assert.equal(webgpu.classList.classes.has("opacity-40"), true)
+  assert.equal(webgpu.classList.classes.has("cursor-not-allowed"), true)
+  assert.equal(webgpu.hint.textContent, "Not supported in this browser")
+})
+
+test("the 4K button is always visible, disabled only when no engine is supported", () => {
+  const player = makeUpscalePlayer()
+  player.upscaleWebglSupportedResult = true
+  player.webgpuApiPresent = () => false
+
+  player.renderUpscaleControls()
+
+  assert.equal(player.upscaleControlsTarget.classList.classes.has("hidden"), false)
+  assert.equal(player.upscaleButtonTarget.disabled, false)
+
+  player.upscaleWebglSupportedResult = false
+  player.renderUpscaleControls()
+
+  assert.equal(player.upscaleButtonTarget.disabled, true)
+  assert.match(player.upscaleButtonTarget.title, /not supported in this browser/)
+})
+
+test("the menu opens and closes from the button", () => {
+  const player = makeUpscalePlayer()
+
+  player.toggleUpscalerMenu()
+  assert.equal(player.upscaleMenuOpen(), true)
+
+  player.toggleUpscalerMenu()
+  assert.equal(player.upscaleMenuOpen(), false)
+
+  player.toggleUpscalerMenu()
+  player.closeUpscalerMenu()
+  assert.equal(player.upscaleMenuOpen(), false)
 })
 
 test("upscale preference is opt-in only", () => {
   const player = new VideoPlayerController()
-  // No localStorage in the test context: default off, unlike HDR.
   assert.equal(player.loadUpscalePreference(), false)
+  assert.equal(player.loadUpscaleEnginePreference(), "webgl")
 })
 
-test("upscaler availability requires WebGL float textures", () => {
-  const player = new VideoPlayerController()
-  assert.equal(player.upscaleSupported(), false)
+const makeProfileRow = (profileId) => makeMenuRow(null, profileId)
 
-  const good = new VideoPlayerController()
-  good.upscaleSupportedResult = true
-  assert.equal(good.upscaleSupported(), true)
+test("selecting a quality profile persists it and restarts the running engine with the new chain", async () => {
+  const player = makeUpscalePlayer()
+  const loaded = []
+  player.loadUpscaleModule = async (engineId, profileId) => {
+    loaded.push([engineId, profileId])
+    return fakeWebglModule()
+  }
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+  const firstUpscaler = player.upscaler
+  assert.deepEqual(firstUpscaler.shaders, fakeProfiles.balanced)
+
+  await player.selectUpscalerProfile(rowEvent(makeProfileRow("ultra4x")))
+
+  assert.equal(player.upscaleProfileId, "ultra4x")
+  assert.deepEqual(loaded, [["webgl", "balanced"], ["webgl", "ultra4x"]])
+  assert.equal(player.upscaleEnabled, true)
+  assert.ok(player.upscaler !== firstUpscaler)
+  assert.deepEqual(player.upscaler.shaders, fakeProfiles.ultra4x)
+  assert.deepEqual(player.savedPreferences.filter(([k]) => k === "profile" || k === "engine").slice(-1), [["profile", "ultra4x"]])
+})
+
+test("selecting a profile while upscaling is off just persists the choice", async () => {
+  const player = makeUpscalePlayer()
+  let loaded = 0
+  player.loadUpscaleModule = async () => { loaded += 1; return fakeWebglModule() }
+
+  await player.selectUpscalerProfile(rowEvent(makeProfileRow("quality")))
+
+  assert.equal(player.upscaleProfileId, "quality")
+  assert.equal(loaded, 0)
+  assert.equal(player.upscaleEnabled, false)
+})
+
+test("selecting the profile already active is a no-op", async () => {
+  const player = makeUpscalePlayer()
+  let loads = 0
+  player.loadUpscaleModule = async () => { loads += 1; return fakeWebglModule() }
+  await player.selectUpscalerEngine(rowEvent(makeMenuRow("webgl")))
+
+  await player.selectUpscalerProfile(rowEvent(makeProfileRow("balanced")))
+
+  assert.equal(loads, 1)
+})
+
+test("quality rows render selected/disabled states", () => {
+  const player = makeUpscalePlayer()
+  const balanced = makeProfileRow("balanced")
+  const quality = makeProfileRow("quality")
+  const ultra = makeProfileRow("ultra4x")
+  player.rows = [makeMenuRow("off"), makeMenuRow("webgl"), balanced, quality, ultra]
+
+  player.renderUpscaleMenu()
+
+  assert.equal(balanced.getAttribute("aria-disabled"), "false")
+  assert.equal(balanced.check.classList.classes.has("hidden"), false) // selected (default)
+  assert.equal(quality.getAttribute("aria-disabled"), "false")
+  assert.equal(quality.check.classList.classes.has("hidden"), true)
+
+  // No engine can run: rows disabled.
+  player.upscaleWebglSupportedResult = false
+  player.renderUpscaleMenu()
+  assert.equal(ultra.getAttribute("aria-disabled"), "true")
+  assert.equal(ultra.classList.classes.has("opacity-40"), true)
+})
+
+test("a saved 4x profile restores on the next playback (lazy ultra module)", async () => {
+  const player = makeUpscalePlayer()
+  player.upscaleProfileId = "ultra4x"
+  player.upscalePreferenceEnabled = true
+  const loaded = []
+  player.loadUpscaleModule = async (engineId, profileId) => {
+    loaded.push([engineId, profileId])
+    return engineId === "webgl" ? fakeWebglModule() : fakeWebgpuModule()
+  }
+
+  await player.restoreUpscale()
+
+  assert.deepEqual(loaded, [["webgl", "ultra4x"]])
+  assert.deepEqual(player.upscaler.shaders, fakeProfiles.ultra4x)
+  assert.equal(player.upscaleEnabled, true)
+})
+
+test("loadUpscalePreference profile validation falls back to balanced", () => {
+  const player = new VideoPlayerController()
+  assert.equal(player.loadUpscaleProfilePreference(), "balanced")
 })
