@@ -69,7 +69,7 @@ const UPSCALE_PREFERENCE_KEY = "streamvault:upscale-enabled"
 const UPSCALE_ENGINE_PREFERENCE_KEY = "streamvault:upscale-engine"
 const UPSCALE_PROFILE_PREFERENCE_KEY = "streamvault:upscale-profile"
 // Profile ids shared by both engine bundles.
-const UPSCALE_PROFILE_IDS = ["balanced", "quality", "ultra2x", "ultra4x"]
+const UPSCALE_PROFILE_IDS = ["balanced", "balancedPlus", "quality", "ultra2x", "ultra4x"]
 // WebGPU video upload paths are young in WebKit: if the engine renders
 // nothing (or blank frames) shortly after start, fall back this fast.
 const UPSCALE_HEALTH_CHECK_DELAY_MS = 1200
@@ -3108,9 +3108,10 @@ export default class extends Controller {
   // Quality tiers offered in the 4K menu; shared ids across both engines.
   upscaleProfiles() {
     return [
-      { id: "balanced", hint: "2x · fast, balanced" },
-      { id: "quality", hint: "2x · sharper, heavier" },
-      { id: "ultra2x", hint: "2x · sharpest 2x, heaviest" },
+      { id: "balanced", hint: "2x · fast, Mode A (M+M)" },
+      { id: "balancedPlus", hint: "2x · VL restore + M upscale — quality where it's visible (~1.6x cost)" },
+      { id: "quality", hint: "2x · VL+VL — ~4x cost" },
+      { id: "ultra2x", hint: "2x · UL+UL — heaviest 2x" },
       { id: "ultra4x", hint: "4x · low-res sources only (≤720p)" }
     ]
   }
