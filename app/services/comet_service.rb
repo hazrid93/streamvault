@@ -27,6 +27,11 @@ class CometService
   LANGUAGE_PATTERNS = TorrentioService::LANGUAGE_PATTERNS
   STREAMS_CACHE_TTL = 1.hour
   STREAM_CACHE_VERSION = 2
+  # Provider discovery is an interactive request. Comet normally answers in a
+  # few seconds and performs longer refreshes in the background; keeping a
+  # Puma thread blocked for two minutes makes the Turbo frame look permanent
+  # and lets a handful of slow searches exhaust the web thread pool.
+  REQUEST_TIMEOUT_SECONDS = 30
 
   def self.comet_url
     ENV.fetch("COMET_URL", "")
@@ -43,7 +48,7 @@ class CometService
       f.response :json
       f.response :follow_redirects
       f.adapter Faraday.default_adapter
-      f.options.timeout = 120
+      f.options.timeout = REQUEST_TIMEOUT_SECONDS
       f.options.open_timeout = 5
       f.proxy = self.class.comet_proxy if self.class.comet_proxy.present?
     end
@@ -62,7 +67,12 @@ class CometService
       fetch_streams_uncached(imdb_id, type, season: season, episode: episode)
     end
 
-    return ServiceResult.success([]) if parsed.nil?
+    if parsed.nil?
+      return ServiceResult.failure(
+        @last_error_message || "Comet is temporarily unavailable. Please try again.",
+        @last_error_code
+      )
+    end
 
     # Apply per-request language filtering + sorting on the cached (or
     # freshly fetched) parsed streams — cheap, no upstream call.
@@ -82,25 +92,48 @@ class CometService
   # a transient Comet outage doesn't stick).  An empty 404 returns []
   # (cacheable — avoids re-hammering Comet for content with no streams).
   def fetch_streams_uncached(imdb_id, type, season: nil, episode: nil)
+    @last_error_message = nil
+    @last_error_code = nil
     path = build_stream_path(imdb_id, type, season: season, episode: episode)
     response = @comet.get(path)
 
     if response.success? && response.body.is_a?(Hash) && response.body["streams"]
-      parse_streams(response.body["streams"])
+      raw_streams = response.body["streams"]
+      parsed = parse_streams(raw_streams)
+
+      # Comet represents transient states (another request is scraping, first
+      # search still running, metadata unavailable) and debrid errors (e.g.
+      # "No active subscription" for an expired RealDebrid plan) as fake
+      # Stremio streams. They have no torrent identity and must not be cached
+      # as a playable source for an hour. Surface a retryable provider error
+      # instead.
+      if parsed.empty? && raw_streams.any? && raw_streams.all? { |stream| comet_notice?(stream) }
+        notice_text = raw_streams.flat_map { |stream| [ stream["name"], stream["description"] ] }.compact.join(" ")
+        @last_error_code = debrid_key_error_text?(notice_text) ? RD_KEY_ERROR_CODE : nil
+        @last_error_message = comet_notice_message(raw_streams)
+        Rails.logger.info("[CometService] notice-only response for #{redact_path(path)}")
+        nil
+      else
+        parsed
+      end
     elsif response.status == 404
       []
     else
-      Rails.logger.error("[CometService] streams request failed: HTTP #{response.status} for #{path}")
+      @last_error_message = "Comet could not return streams (HTTP #{response.status}). Please try again."
+      Rails.logger.error("[CometService] streams request failed: HTTP #{response.status} for #{redact_path(path)}")
       nil
     end
   rescue Faraday::TimeoutError
-    Rails.logger.error("[CometService] streams request timed out for #{path}")
+    @last_error_message = "Comet took too long to respond. Please try again."
+    Rails.logger.error("[CometService] streams request timed out for #{redact_path(path)}")
     nil
   rescue Faraday::ConnectionFailed => e
-    Rails.logger.error("[CometService] streams connection failed: #{e.message}")
+    @last_error_message = "Could not connect to Comet. Please try again."
+    Rails.logger.error("[CometService] streams connection failed for #{redact_path(path)}: #{e.message}")
     nil
   rescue StandardError => e
-    Rails.logger.error("[CometService] streams error: #{e.message}")
+    @last_error_message = "Comet could not load streams. Please try again."
+    Rails.logger.error("[CometService] streams error for #{redact_path(path)}: #{e.message}")
     nil
   end
 
@@ -162,7 +195,9 @@ class CometService
   #   behaviorHints.videoSize  => file size in bytes
   #   behaviorHints.bingeGroup => "comet|realdebrid|<sha1_info_hash>"
   def parse_streams(raw_streams)
-    raw_streams.map do |s|
+    raw_streams.filter_map do |s|
+      next if comet_notice?(s)
+
       description = s["description"].to_s
       behavior_hints = s["behaviorHints"] || {}
       filename = behavior_hints["filename"].to_s
@@ -200,6 +235,52 @@ class CometService
         compatibility_score: compatibility_score(video_codec: video_codec, audio_codec: audio_codec, container: container)
       }
     end
+  end
+
+  # A notice is any stream without torrent identity: real streams always
+  # carry an infoHash (Torrentio shape) or a behaviorHints.bingeGroup
+  # ("comet|realdebrid|<sha1>", Comet shape). Identity-less entries are
+  # Comet placeholders (scraping in progress) or debrid errors ("[❌]
+  # realdebrid: No active subscription") — never playable sources, whatever
+  # their wording.
+  def comet_notice?(stream)
+    return false unless stream.is_a?(Hash)
+
+    stream["infoHash"].blank? && stream.dig("behaviorHints", "bingeGroup").blank?
+  end
+
+  # Error code surfaced to callers when Comet reports the configured
+  # RealDebrid key as unusable (expired subscription, revoked token). The
+  # stream list controller uses it to retry keyless so local torrent
+  # playback keeps a full list.
+  RD_KEY_ERROR_CODE = :rd_key_invalid
+  RD_KEY_ERROR_PATTERN = /
+    no\s+active\s+subscription|
+    renew\s+your\s+debrid|
+    invalid\s+api\s+key|
+    bad\s+token|
+    (?:api\s*)?unauthori[sz]ed
+  /ix
+
+  def debrid_key_error_text?(text)
+    RD_KEY_ERROR_PATTERN.match?(text.to_s)
+  end
+
+  def comet_notice_message(streams)
+    text = streams.flat_map { |stream| [ stream["name"], stream["description"] ] }.compact.join(" ")
+    if debrid_key_error_text?(text)
+      "RealDebrid reports no active subscription for the configured API key. Renew your plan or update the key in Settings."
+    elsif text.match?(/scraping in progress|first search/i)
+      "Comet is still searching. Please retry in a few seconds."
+    else
+      "Comet could not return streams. Please try again."
+    end
+  end
+
+  # Comet's base64 configuration segment contains the RealDebrid key. Never
+  # write that segment to the Rails log when reporting provider failures.
+  def redact_path(path)
+    path.to_s.sub(%r{\A/[^/]+(?=/stream/)}, "/[REDACTED]")
   end
 
   def filter_by_preferred_languages(streams, preferred_languages, default_language: nil)

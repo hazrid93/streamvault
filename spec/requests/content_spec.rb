@@ -103,7 +103,7 @@ RSpec.describe "Content", type: :request do
       stub_request(:get, %r{torrentio\.strem\.fun/stream/movie/tt1375666\.json})
         .to_return(
           status: 200,
-          body: { streams: [{ title: "Inception 1080p 👤 42", infoHash: "a" * 40, fileIdx: 0, behaviorHints: { filename: "Inception.mkv" } }] }.to_json,
+          body: { streams: [ { title: "Inception 1080p 👤 42", infoHash: "a" * 40, fileIdx: 0, behaviorHints: { filename: "Inception.mkv" } } ] }.to_json,
           headers: { "Content-Type" => "application/json" }
         )
 
@@ -122,6 +122,70 @@ RSpec.describe "Content", type: :request do
       expect(response).to have_http_status(:ok)
       expect(response.body).to include("This stream provider is not configured")
       expect(response.body).to include('id="stream_provider_unknown_movie"')
+    end
+
+    it "shows a provider timeout without repeating the slow request for local mode" do
+      user.update!(realdebrid_api_key: "test-rd-key", streaming_preference: "automatic")
+      provider = instance_double(CometService)
+      allow(provider).to receive(:streams)
+        .and_return(ServiceResult.failure("Comet took too long to respond. Please try again."))
+      allow(StreamProvider).to receive(:provider).and_return(
+        { id: "comet", label: "Comet", service: provider }
+      )
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+
+      get content_stream_results_path(type: "movie", imdb_id: "tt1375666", provider: "comet")
+
+      expect(response).to have_http_status(:ok)
+      expect(response.body).to include("Comet took too long to respond")
+      expect(provider).to have_received(:streams).once
+    end
+
+    it "retries keyless when the saved RD key has no active subscription" do
+      user.update!(realdebrid_api_key: "test-rd-key", streaming_preference: "automatic")
+      original_comet_url = ENV["COMET_URL"]
+      ENV["STREAM_PROVIDER"] = "comet"
+      ENV["COMET_URL"] = "http://comet.example.com"
+      allow(LocalTorrentService).to receive(:enabled?).and_return(true)
+
+      # Keyed request: Comet answers with a single "No active subscription"
+      # notice. Keyless request: the full torrent list.
+      stub_request(:get, %r{comet\.example\.com/[^/]+/stream/movie/tt1375666\.json})
+        .to_return(
+          status: 200,
+          body: { "streams" => [ {
+            "name" => "[❌] realdebrid",
+            "description" => "realdebrid: No active subscription.\nPlease renew your debrid account.",
+            "url" => "https://comet.feels.legal"
+          } ] }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+      stub_request(:get, %r{comet\.example\.com/stream/movie/tt1375666\.json})
+        .to_return(
+          status: 200,
+          body: { "streams" => [ {
+            "name" => "[⬇️] Comet 1080p",
+            "description" => "📄 Inception 2010 1080p BluRay x264-YTS.mkv\n👤 24 💾 1.8 GB 🔎 Torrents.csv",
+            "behaviorHints" => {
+              "bingeGroup" => "comet|realdebrid|#{'a' * 40}",
+              "filename" => "Inception 2010 1080p BluRay x264-YTS.mkv",
+              "videoSize" => 1_932_735_283
+            }
+          } ] }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+
+      begin
+        get content_stream_results_path(type: "movie", imdb_id: "tt1375666", provider: "comet", title: "Inception")
+
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("Inception 2010 1080p")
+        expect(response.body).to include("no active subscription")
+        expect(response.body).not_to include("[❌] realdebrid")
+        expect(WebMock).to(have_requested(:get, %r{comet\.example\.com/stream/movie/tt1375666\.json}))
+      ensure
+        ENV["COMET_URL"] = original_comet_url
+      end
     end
   end
 

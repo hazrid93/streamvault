@@ -6,6 +6,10 @@
       <span class="font-mono text-[0.65rem] text-sv-success">READY</span>
     </div>
 
+    <% if @streams_warning.present? %>
+      <p class="mb-2 rounded-lg bg-sv-warning/10 px-3 py-2 text-xs leading-4 text-sv-warning"><%= @streams_warning %></p>
+    <% end %>
+
     <% if @streams_error.present? %>
       <p class="rounded-lg bg-sv-warning/10 px-3 py-2 text-xs text-sv-warning"><%= @streams_error %></p>
     <% elsif @streams.empty? %>

@@ -109,6 +109,75 @@ RSpec.describe CometService do
       result = service.streams("tt1375666", "movie")
       expect(result).to be_failure
     end
+
+    it "does not cache Comet's temporary scraping notice as a stream" do
+      notice = {
+        "name" => "[INFO] Comet",
+        "description" => "Scraping in progress, please try again in a few seconds...",
+        "url" => "https://comet.feels.legal"
+      }
+      stub_streams("tt5550001", "movie", [ notice ])
+
+      result = service.streams("tt5550001", "movie")
+
+      expect(result).to be_failure
+      expect(result.error_message).to include("still searching")
+      expect(ApiCache.find_by(key: service.stream_cache_key("tt5550001", "movie"))).to be_nil
+    end
+
+    it "keeps real results when Comet includes a first-search notice beside them" do
+      notice = {
+        "name" => "[INFO] Comet",
+        "description" => "First search for this media - More results will be available in a few seconds...",
+        "url" => "https://comet.feels.legal"
+      }
+      stub_streams("tt5550002", "movie", [ notice, cached_stream ])
+
+      result = service.streams("tt5550002", "movie")
+
+      expect(result).to be_success
+      expect(result.data.size).to eq(1)
+      expect(result.data.first[:filename]).to include("Guardians")
+    end
+
+    it "reports an expired RealDebrid subscription as a key error, not a stream" do
+      notice = {
+        "name" => "[❌] realdebrid",
+        "description" => "realdebrid: No active subscription.\nPlease renew your debrid account.",
+        "url" => "https://comet.feels.legal"
+      }
+      stub_streams("tt5550003", "movie", [ notice ])
+
+      result = service.streams("tt5550003", "movie")
+
+      expect(result).to be_failure
+      expect(result.error_code).to eq(:rd_key_invalid)
+      expect(result.error_message).to include("no active subscription")
+      expect(result.error_message).to include("Settings")
+      expect(ApiCache.find_by(key: service.stream_cache_key("tt5550003", "movie"))).to be_nil
+    end
+
+    it "drops a debrid error notice when real streams are returned beside it" do
+      notice = {
+        "name" => "[❌] realdebrid",
+        "description" => "realdebrid: No active subscription.\nPlease renew your debrid account.",
+        "url" => "https://comet.feels.legal"
+      }
+      stub_streams("tt5550004", "movie", [ notice, cached_stream ])
+
+      result = service.streams("tt5550004", "movie")
+
+      expect(result).to be_success
+      expect(result.data.size).to eq(1)
+      expect(result.data.first[:filename]).to include("Guardians")
+    end
+
+    it "bounds interactive provider requests to thirty seconds" do
+      connection = service.instance_variable_get(:@comet)
+
+      expect(connection.options.timeout).to eq(described_class::REQUEST_TIMEOUT_SECONDS)
+      expect(described_class::REQUEST_TIMEOUT_SECONDS).to eq(30)
+    end
   end
 
   # Regression coverage for the Comet metadata parsing fix. Comet puts the
@@ -226,6 +295,15 @@ RSpec.describe CometService do
         .at_least_once
       expect(WebMock).not_to have_requested(:get, %r{comet\.example\.com/[^/]+/stream/movie/tt1375666\.json})
     end
+
+    it "redacts the base64 debrid configuration from diagnostic paths" do
+      path = service.send(:build_stream_path, "tt1375666", "movie")
+      redacted = service.send(:redact_path, path)
+
+      expect(redacted).to eq("/[REDACTED]/stream/movie/tt1375666.json")
+      expect(redacted).not_to include(rd_api_key)
+      expect(redacted).not_to include(path.split("/")[1])
+    end
   end
 end
 
@@ -247,13 +325,12 @@ RSpec.describe StreamProvider do
       expect(providers.first).to be_a(TorrentioService)
     end
 
-    it "returns Comet then Torrentio when STREAM_PROVIDER=comet" do
+    it "returns only Comet when STREAM_PROVIDER=comet" do
       ENV["STREAM_PROVIDER"] = "comet"
       ENV["COMET_URL"] = "http://comet:8000"
       providers = described_class.providers(rd_api_key: "key")
-      expect(providers.length).to eq(2)
+      expect(providers.length).to eq(1)
       expect(providers.first).to be_a(CometService)
-      expect(providers.last).to be_a(TorrentioService)
     end
 
     it "returns Comet then Torrentio when STREAM_PROVIDER=auto and COMET_URL set" do

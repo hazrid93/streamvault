@@ -137,13 +137,19 @@ class ContentController < ApplicationController
       default_language: current_user.default_stream_language
     )
 
-    # An expired/unauthorized RD key can make an RD-configured provider return
-    # no list at all. Automatic/local mode retries that same provider without
-    # RD configuration so local playback choices still appear.
-    if (result.failure? || result.data.empty?) && LocalTorrentService.enabled? &&
-       current_user.streaming_preference != "realdebrid" && current_user.has_realdebrid_key?
+    # An RD-configured provider can return a successful empty list while local
+    # torrent choices still exist — or fail outright when the stored RD key is
+    # dead (expired subscription, revoked token: Comet answers with a single
+    # "No active subscription" notice). Retry both cases without RD
+    # configuration so local torrent playback keeps a full stream list.
+    # Do not retry other provider failures (especially timeouts): that would
+    # run the same slow search twice and keep this Turbo frame loading for up
+    # to a minute before it could display the original error.
+    dead_rd_key = result.failure? && result.error_code == :rd_key_invalid
+    if LocalTorrentService.enabled? && current_user.streaming_preference != "realdebrid" &&
+       ((result.success? && result.data.empty? && current_user.has_realdebrid_key?) || dead_rd_key)
       local_entry = StreamProvider.provider(@provider_id, rd_api_key: nil)
-      result = local_entry.fetch(:service).streams(
+      local_result = local_entry&.fetch(:service)&.streams(
         @imdb_id,
         @type,
         season: @season,
@@ -151,7 +157,14 @@ class ContentController < ApplicationController
         title: params[:title],
         preferred_languages: current_user.preferred_stream_languages,
         default_language: current_user.default_stream_language
-      ) if local_entry
+      )
+      # The empty-list case keeps its original unconditional replacement. On
+      # a dead key, keep the (clearer) RD error unless the keyless listing
+      # succeeded — and tell the viewer why only local sources are listed.
+      if local_result && (local_result.success? || result.success?)
+        result = local_result
+        @streams_warning = "RealDebrid reported no active subscription for your saved API key — showing local torrent sources only. Renew RealDebrid or update the key in Settings." if dead_rd_key
+      end
     end
 
     @streams = result.success? ? result.data : []
