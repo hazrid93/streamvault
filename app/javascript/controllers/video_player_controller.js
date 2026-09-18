@@ -69,7 +69,7 @@ const UPSCALE_PREFERENCE_KEY = "streamvault:upscale-enabled"
 const UPSCALE_ENGINE_PREFERENCE_KEY = "streamvault:upscale-engine"
 const UPSCALE_PROFILE_PREFERENCE_KEY = "streamvault:upscale-profile"
 // Profile ids shared by both engine bundles.
-const UPSCALE_PROFILE_IDS = ["balanced", "quality", "ultra4x"]
+const UPSCALE_PROFILE_IDS = ["balanced", "quality", "ultra2x", "ultra4x"]
 // WebGPU video upload paths are young in WebKit: if the engine renders
 // nothing (or blank frames) shortly after start, fall back this fast.
 const UPSCALE_HEALTH_CHECK_DELAY_MS = 1200
@@ -90,7 +90,7 @@ export default class extends Controller {
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
       "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats",
-      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "upscaleSpinner", "playerNotice", "upscaleDiagnostic", "upscaleDiagnosticText", "fpsStats", "backButton",
+      "upscaleWebglCanvas", "upscaleWebgpuCanvas", "upscaleControls", "upscaleButton", "upscaleButtonState", "upscaleMenu", "upscaleIcon", "upscaleSpinner", "playerNotice", "upscaleDiagnostic", "upscaleDiagnosticText", "upscaleStats", "fpsStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -3110,7 +3110,8 @@ export default class extends Controller {
     return [
       { id: "balanced", hint: "2x · fast, balanced" },
       { id: "quality", hint: "2x · sharper, heavier" },
-      { id: "ultra4x", hint: "4x · low-res sources, strong GPU" }
+      { id: "ultra2x", hint: "2x · sharpest 2x, heaviest" },
+      { id: "ultra4x", hint: "4x · low-res sources only (≤720p)" }
     ]
   }
 
@@ -3203,6 +3204,22 @@ export default class extends Controller {
       canvas.style.left = `${Math.round((cw - w) / 2)}px`
       canvas.style.top = `${Math.round((ch - h) / 2)}px`
     }
+    this.updateUpscaleStats()
+  }
+
+  // Stream info readout: engine · profile · bitmap size → on-screen box.
+  // Lets the viewer confirm at a glance what is actually rendering (and
+  // report it if the picture looks wrong).
+  updateUpscaleStats() {
+    if (!this.hasUpscaleStatsTarget) return
+    if (!this.upscaleEnabled || !this.activeUpscaleEngineId) {
+      this.upscaleStatsTarget.textContent = "off"
+      return
+    }
+    const canvas = this.activeUpscaleEngineId === "webgl" ? this.upscaleWebglCanvasTarget : this.upscaleWebgpuCanvasTarget
+    const bitmap = canvas && canvas.width ? `${canvas.width}×${canvas.height}` : "—"
+    const box = canvas && canvas.style.width ? `${canvas.style.width}×${canvas.style.height}` : "css"
+    this.upscaleStatsTarget.textContent = `${this.activeUpscaleEngineId} · ${this.upscaleProfileId} · ${bitmap} → ${box}`
   }
 
   // ── Startup failure diagnostics ───────────────────────────────────
@@ -3674,6 +3691,7 @@ export default class extends Controller {
       this.upscaleIconTarget.classList.toggle("text-indigo-400", enabled)
       this.upscaleIconTarget.classList.toggle("text-sv-text-muted", !enabled)
     }
+    this.updateUpscaleStats()
     this.renderUpscaleMenu()
   }
 
@@ -4704,6 +4722,15 @@ export default class extends Controller {
     }
 
     if (this.isIOS()) {
+      // iPhone native fullscreen is WebKit's OS video player: it shows the
+      // raw video element only — the upscale canvas (an HTML overlay)
+      // cannot participate, so the viewer would silently lose upscaling.
+      // The in-page player already fills the viewport (fixed inset-0), so
+      // with 4K on, stay in-page and say why.
+      if (this.upscaleEnabled) {
+        this.showPlayerNotice("iPhone fullscreen plays the original video — 4K upscaling shows in-page only.")
+        return
+      }
       if (!this.enterNativeFullscreen()) console.warn("Fullscreen is not supported by this browser")
       return
     }

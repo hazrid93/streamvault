@@ -58,6 +58,12 @@
         <%# Effective presentation rate (requestVideoFrameCallback) — drops
             when the upscaler can't keep up. %>
       </div>
+      <div class="flex items-center gap-2">
+        <span class="text-sv-text-muted">4K</span>
+        <span data-video-player-target="upscaleStats" class="font-mono text-white">off</span>
+        <%# Active upscaler state: engine · profile · bitmap → on-screen box.
+            Confirms at a glance what is actually rendering. %>
+      </div>
       <% if @local_torrent_hash.present? %>
         <div data-video-player-target="localStats">Connecting to peers…</div>
       <% end %>
@@ -104,12 +110,12 @@
      video underneath. Never intercepts pointer events. Separate canvases
      per engine: a canvas can hold only one context type, ever. %>
   <canvas data-video-player-target="upscaleWebglCanvas"
-          class="hidden absolute inset-0 h-full w-full"
+          class="hidden absolute inset-0 m-auto max-h-full max-w-full"
           style="object-fit: contain; pointer-events: none;"
           aria-hidden="true">
   </canvas>
   <canvas data-video-player-target="upscaleWebgpuCanvas"
-          class="hidden absolute inset-0 h-full w-full"
+          class="hidden absolute inset-0 m-auto max-h-full max-w-full"
           style="object-fit: contain; pointer-events: none;"
           aria-hidden="true">
   </canvas>
@@ -429,12 +435,22 @@
             <span data-upscale-check class="hidden text-indigo-300">✓</span>
           </button>
           <button type="button" role="menuitemradio"
+                  data-upscale-profile="ultra2x"
+                  data-action="click->video-player#selectUpscalerProfile"
+                  class="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs text-sv-text-muted transition-colors hover:bg-white/5 hover:text-white">
+            <span class="flex flex-col">
+              <span class="font-semibold">2x · Ultra</span>
+              <span class="text-[0.65rem] text-sv-text-muted/70">sharpest 2x restore — no 8K blow-up</span>
+            </span>
+            <span data-upscale-check class="hidden text-indigo-300">✓</span>
+          </button>
+          <button type="button" role="menuitemradio"
                   data-upscale-profile="ultra4x"
                   data-action="click->video-player#selectUpscalerProfile"
                   class="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs text-sv-text-muted transition-colors hover:bg-white/5 hover:text-white">
             <span class="flex flex-col">
               <span class="font-semibold">4x · Ultra</span>
-              <span class="text-[0.65rem] text-sv-text-muted/70">best for low-res sources; ~2MB download, strong GPU</span>
+              <span class="text-[0.65rem] text-sv-text-muted/70">low-res sources only (≤720p); ~2MB download</span>
             </span>
             <span data-upscale-check class="hidden text-indigo-300">✓</span>
           </button>
