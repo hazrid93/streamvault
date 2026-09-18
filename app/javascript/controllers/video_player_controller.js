@@ -3364,7 +3364,10 @@ export default class extends Controller {
       // Async GPU failure hooks must be wired BEFORE start(): adapter /
       // device requests can fail (or the device be lost) during start.
       if (engineId === "webgpu" && typeof upscaler.renderingHealthy === "function") {
-        upscaler.onError = () => this.failWebgpuUpscale("hit a rendering error")
+        upscaler.onError = (error) => {
+          const text = error && (error.message || error.reason) ? String(error.message || error.reason) : String(error || "unknown")
+          this.failWebgpuUpscale(`async rendering error: ${text}`, `frames=${upscaler.framesProcessed}`)
+        }
       }
       // Await start(): adapter/device requests and first shader compilation
       // can take over a second on phones; a rejected start() must land in
@@ -3428,25 +3431,42 @@ export default class extends Controller {
     this.upscaleHealthTimer = null
     if (!this.upscaleEnabled || this.activeUpscaleEngineId !== "webgpu" || this.upscaler !== upscaler) return
 
-    const playing = !this.videoTarget.paused && this.videoTarget.currentTime > 0
+    const video = this.videoTarget
+    const videoState = `paused=${video && video.paused} currentTime=${video ? Math.floor(video.currentTime || 0) : "?"} readyState=${video ? video.readyState : "?"} frames=${upscaler.framesProcessed}`
+
+    const playing = video && !video.paused && (video.currentTime || 0) > 0
     if (playing && upscaler.framesProcessed === 0) {
-      this.failWebgpuUpscale("rendered no frames")
+      this.failWebgpuUpscale("rendered no frames while playing", videoState)
       return
     }
-    if (upscaler.framesProcessed > 0) {
-      const healthy = await upscaler.renderingHealthy()
+    if (upscaler.framesProcessed > 0 && typeof upscaler.renderingHealthy === "function") {
+      // Engine contract: {healthy, detail} (older bundles: boolean).
+      const verdict = await upscaler.renderingHealthy()
+      const healthy = typeof verdict === "boolean" ? verdict : verdict.healthy
+      const detail = typeof verdict === "object" && verdict.detail ? verdict.detail : "no detail"
       // Engine may have changed while awaiting the readback.
       if (!this.upscaleEnabled || this.activeUpscaleEngineId !== "webgpu" || this.upscaler !== upscaler) return
-      if (!healthy) this.failWebgpuUpscale("rendered blank output")
+      if (!healthy) this.failWebgpuUpscale(`blank output (${detail})`, videoState)
     }
   }
 
   // Blacklist the WebGPU engine for this session and keep the viewer
   // watching: fall back to WebGL when available, otherwise plain video.
-  failWebgpuUpscale(reason) {
+  // Watchdog failures open the diagnostic panel too (reason + video/frames
+  // state) — a toast alone can't distinguish dead-loop from blank output.
+  failWebgpuUpscale(reason, extraState = null) {
     if (this.upscaleWebgpuFailed) return
     this.upscaleWebgpuFailed = true
     console.warn(`[VideoPlayer] WebGPU upscaling failed (${reason}) — falling back`)
+    if (extraState) {
+      this.upscaleStartError = {
+        engine: "webgpu",
+        profile: this.upscaleProfileId,
+        message: `engine failed after start: ${reason}${extraState ? `; ${extraState}` : ""}`,
+        gpu: this.webgpuApiPresent() ? "navigator.gpu present" : "navigator.gpu missing",
+        userAgent: (typeof navigator !== "undefined" && navigator.userAgent) || "unknown"
+      }
+    }
     this.disableUpscale()
     if (this.upscaleWebglSupported()) {
       this.upscaleEngineId = "webgl"
@@ -3461,6 +3481,7 @@ export default class extends Controller {
       this.saveUpscalePreference(false)
       this.showPlayerNotice("WebGPU upscaling failed on this device — playing the original video.")
     }
+    if (extraState) this.showUpscaleDiagnostic()
   }
 
   // Transient, non-blocking notice above the controls (used for upscaler
