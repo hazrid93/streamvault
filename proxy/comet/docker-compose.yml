@@ -38,6 +38,9 @@ services:
       ADMIN_DASHBOARD_PASSWORD: ${ADMIN_DASHBOARD_PASSWORD:-change-me-now}
       CONFIGURE_PAGE_PASSWORD: ${CONFIGURE_PAGE_PASSWORD:-}
       # ── Scrapers (independent of Torrentio) ──────────────────────
+      # Never honor multi-minute Retry-After values during an interactive
+      # stream search. Other concurrent scrapers can still return results.
+      RATELIMIT_MAX_RETRIES: ${RATELIMIT_MAX_RETRIES:-0}
       # Jackett: self-hosted indexer aggregator. Scrapes torrent
       # sites directly (1337x, TPB, etc.) — no dependency on the
       # Torrentio API. Requires API key (see setup step 3).

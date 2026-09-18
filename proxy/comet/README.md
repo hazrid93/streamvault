@@ -175,7 +175,9 @@ Replace `comet.example.com` with your domain (DNS A record → VPS IP). Caddy ha
 
 **Comet works but StreamVault ignores it** — Check `STREAM_PROVIDER` is set to `auto` or `comet` (not `torrentio`), and `COMET_URL` is set. Restart StreamVault after changing `.env`.
 
-**Streams are slow on first search** — Normal. Jackett scrapes torrent sites live on first request. Subsequent searches are cached. Enable the background scraper to pre-cache popular content.
+**Streams are slow on first search** — Jackett and the other live sources normally finish within a few seconds. Keep `RATELIMIT_MAX_RETRIES=0`: public sources can return `Retry-After` values of several minutes, and waiting for those retries holds the entire stream response open even when other scrapers have already finished. Subsequent searches are cached. Enable the background scraper to pre-cache popular content.
+
+**The Available streams card stays on SEARCHING** — Check `docker compose logs comet` for `429 Too Many Requests` followed by a long `Retrying in ...s` message. Set `RATELIMIT_MAX_RETRIES=0` and recreate Comet with `docker compose up -d --force-recreate comet`.
 
 ## Requirements
 
