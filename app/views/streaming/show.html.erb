@@ -43,17 +43,17 @@
     <% end %>
   </div>
 
-  <%# Source info (top right, auto-hides) %>
+  <%# Source info (top right, auto-hides) — live local transfer stats only.
+     Hidden entirely for non-local streams: there are no seeder/transfer
+     numbers to show once the URL/filename rows are gone. %>
   <div data-video-player-target="sourceInfo" class="hidden absolute top-4 right-4 z-10 max-w-lg opacity-100 transition-opacity duration-500"
        style="top: calc(env(safe-area-inset-top, 0px) + 1rem); right: calc(env(safe-area-inset-right, 0px) + 1rem);">
     <button data-action="click->video-player#toggleSourceInfo" data-video-player-target="sourceToggle" class="px-2 py-1 bg-black/60 rounded text-xs text-sv-text-muted hover:text-white transition-colors">
       Stream info
     </button>
-    <div data-video-player-target="sourceDetails" class="hidden mt-2 p-3 bg-black/80 rounded-lg text-xs text-sv-text-muted space-y-1 break-all">
-      <p><span class="text-sv-text">Source:</span> <span data-video-player-target="sourceUrl"></span></p>
-      <p><span class="text-sv-text">File:</span> <span data-video-player-target="sourceFilename"></span></p>
+    <div data-video-player-target="sourceDetails" class="hidden mt-2 p-3 bg-black/80 rounded-lg text-xs leading-5 text-sv-text space-y-1 break-all">
       <% if @local_torrent_hash.present? %>
-        <p class="border-t border-white/10 pt-2 text-sv-success"><span class="text-sv-text">Local:</span> <span data-video-player-target="localStats">Connecting to peers…</span></p>
+        <div data-video-player-target="localStats">Connecting to peers…</div>
       <% end %>
     </div>
   </div>
@@ -68,7 +68,7 @@
   <%# Primary touch controls. This group floats over the center of the movie
       and follows the exact same visibility state as the player menu below. %>
   <div data-video-player-target="topControls"
-       class="absolute top-1/2 left-1/2 z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-3 sm:gap-4 text-white opacity-100 transition-opacity duration-500"
+       class="absolute top-1/2 left-1/2 z-30 flex -translate-x-1/2 -translate-y-1/2 items-center gap-3 sm:gap-4 text-white opacity-100 transition-opacity duration-500"
        role="group"
        aria-label="Playback controls">
     <button type="button"

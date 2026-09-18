@@ -2001,3 +2001,137 @@ test("a newer HLS seek aborts stale bootstrap work and stops its late session", 
     context.setTimeout = previousSetTimeout
   }
 })
+
+test("repeated skip taps accumulate into one debounced restart at the last target", () => {
+  const player = new VideoPlayerController()
+  const restarts = []
+  player.knownDuration = 6000
+  player.videoTarget = { currentTime: 100 }
+  player.startSecondsValue = 0
+  player.directPlayActive = true
+  player.remuxDirectPlay = false
+  player.userSeekTargetSeconds = null
+  player.userSeekDebounceTimer = null
+  player.currentTimeTarget = { textContent: "" }
+  player.updateSeekVisuals = () => {}
+  player.showOverlayUi = () => {}
+  player.restartPlaybackAt = (position) => { restarts.push(position) }
+
+  player.skip(10)
+  player.skip(10)
+  player.skip(10)
+  player.skip(-10)
+
+  // No restart fires while the user keeps tapping — the timeline moves
+  // immediately instead.
+  assert.deepEqual(restarts, [])
+  assert.equal(player.userSeekTargetSeconds, 120)
+  assert.equal(player.currentTimeTarget.textContent, "2:00")
+
+  player.commitUserSeek()
+
+  assert.deepEqual(restarts, [120])
+  assert.equal(player.userSeekTargetSeconds, null)
+})
+
+test("a direct seek restart supersedes a pending skip debounce", () => {
+  const player = new VideoPlayerController()
+  player.hlsSessionId = null
+  player.directPlayActive = true
+  player.remuxDirectPlay = false
+  player.videoTarget = { currentTime: 300, buffered: { length: 0 } }
+  player.startSecondsValue = 0
+  player.element = { dataset: {} }
+  player.streamingUrlValue = "/transcode?url=https%3A%2F%2Fexample.test%2Fmovie.mp4"
+  player.selectedAudioStream = null
+  player.selectedSubtitleStream = null
+  player.subtitleTracks = []
+  player.showSeekingOverlay = () => {}
+  player.clearSubtitleCues = () => {}
+  player.reloadTextSubtitlesAt = () => {}
+  player.resetProgressBaseline = () => {}
+  player.stopProgressWatchdog = () => {}
+  player.startProgressWatchdog = () => {}
+  player.setupMseSource = () => {}
+  player.knownDuration = 6000
+  player.currentTimeTarget = { textContent: "" }
+  player.updateSeekVisuals = () => {}
+  player.showOverlayUi = () => {}
+  player.userSeekTargetSeconds = 500
+  player.userSeekDebounceTimer = setTimeout(() => {}, 10_000)
+
+  player.restartPlaybackAt(420)
+
+  // The bar drag won: the stale skip target and its debounce are gone.
+  assert.equal(player.userSeekTargetSeconds, null)
+  assert.equal(player.userSeekDebounceTimer, null)
+
+  player.commitUserSeek()
+})
+
+test("seek overlays never block the controls; retry overlays opt in", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set(["hidden", "pointer-events-none"])
+  player.hasSeekingOverlayMessageTarget = false
+  player.seekingOverlayTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name),
+      toggle: (name, on) => { on ? classes.add(name) : classes.delete(name) }
+    }
+  }
+
+  player.showSeekingOverlay("Seeking...")
+  assert.equal(classes.has("hidden"), false)
+  assert.equal(classes.has("pointer-events-none"), true)
+
+  player.showSeekingOverlay("Stream error — tap to retry", { interactive: true })
+  assert.equal(classes.has("pointer-events-none"), false)
+})
+
+test("the stream info toggle collapses back to the button on a second tap", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set(["hidden"])
+  player.sourceDetailsTarget = {
+    classList: {
+      add: (name) => classes.add(name),
+      remove: (name) => classes.delete(name),
+      toggle: (name) => { classes.has(name) ? classes.delete(name) : classes.add(name) },
+      contains: (name) => classes.has(name)
+    }
+  }
+  player.backButtonTarget = { style: {} }
+  player.sourceInfoTarget = { style: {} }
+  player.controlsTarget = { style: {} }
+  player.topControlsTarget = { style: {} }
+  player.hasSubtitleOverlayTarget = false
+  player.clearUiHideTimer = () => {}
+  player.scheduleUiHide = () => {}
+
+  player.toggleSourceInfo()
+  assert.equal(classes.has("hidden"), false)
+
+  player.toggleSourceInfo()
+  assert.equal(classes.has("hidden"), true)
+})
+
+test("hideOverlayUi collapses an open stats panel so it never sticks open", () => {
+  const player = new VideoPlayerController()
+  const classes = new Set()
+  player.backButtonTarget = { style: {} }
+  player.sourceInfoTarget = { style: {} }
+  player.controlsTarget = { style: {} }
+  player.topControlsTarget = { style: {} }
+  player.hasSubtitleOverlayTarget = false
+  player.videoTarget = { paused: false }
+  player.trackMenuOpen = () => false
+  player.positionSubtitleOverlay = () => {}
+  player.hasSourceDetailsTarget = true
+  player.sourceDetailsTarget = {
+    classList: { add: (name) => classes.add(name) }
+  }
+
+  player.hideOverlayUi()
+
+  assert.equal(classes.has("hidden"), true)
+})

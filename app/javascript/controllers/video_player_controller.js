@@ -43,6 +43,10 @@ const MSE_FORWARD_BUFFER_HIGH_WATER_SECONDS = 30
 const MSE_RETAIN_BEHIND_SECONDS = 15
 const MSE_QUOTA_RETRY_MS = 500
 const RECOVERY_HEALTHY_PROGRESS_SECONDS = 5
+// Repeated skip-button taps accumulate into one debounced restart, so the
+// stream loads from the last pressed position instead of restarting the
+// transcode session once per tap.
+const USER_SEEK_DEBOUNCE_MS = 400
 const BUFFER_AHEAD_MAX_WAIT_MS = 15000
 // After a stall, rebuild a meaningful cushion before resuming so a heavy
 // transcode does not enter a rapid stall/resume loop.
@@ -76,7 +80,7 @@ export default class extends Controller {
       "seekPreview", "seekPreviewImage", "seekPreviewLoading", "seekPreviewError", "seekPreviewTime", "seekPreviewPointer",
       "playButton", "playIcon", "pauseIcon", "currentTime", "durationDisplay",
       "volumeIcon", "muteIcon", "startupOverlay", "seekingOverlay",
-      "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "sourceUrl", "sourceFilename", "localStats", "backButton",
+      "seekingOverlayMessage", "sourceInfo", "sourceToggle", "sourceDetails", "localStats", "backButton",
       "audioControls", "audioMenu", "audioOptions", "audioButtonLabel",
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
@@ -178,6 +182,8 @@ export default class extends Controller {
     this.mseQuotaRetryTimer = null
     this.mseBacklogWaiters = []
     this.pendingSeekSeconds = null
+    this.userSeekTargetSeconds = null
+    this.userSeekDebounceTimer = null
     this.stallWatchdogTimer = null
     this.bufferingOverlayTimer = null
     this.lastProgressTime = 0
@@ -221,10 +227,10 @@ export default class extends Controller {
 
     this.ensureVideoSource()
 
-    // Show source info
-    this.sourceInfoTarget.classList.remove("hidden")
-    this.sourceUrlTarget.textContent = this.streamingUrlValue
-    this.sourceFilenameTarget.textContent = this.filenameValue || "Unknown"
+    // Show the source info toggle only when there are live local stats to
+    // display (seeders and transfer rates). Non-local streams have nothing
+    // to show now that the panel is stats-only.
+    if (this.hasLocalStatsTarget) this.sourceInfoTarget.classList.remove("hidden")
     this.startLocalTorrentStatus()
     this.initializeCasting()
     this.visibilityChangeHandler = () => this.onVisibilityChange()
@@ -475,7 +481,11 @@ export default class extends Controller {
 
       const down = this.formatByteRate(status.download_speed)
       const up = this.formatByteRate(status.upload_speed)
-      this.localStatsTarget.textContent = `${status.seeders || 0} seeders · ${status.peers || 0} peers · ↓ ${down} · ↑ ${up}`
+      this.localStatsTarget.innerHTML =
+        `<span class="text-sv-text-muted">Seeders</span> <span class="font-mono text-white">${status.seeders || 0}</span> · ` +
+        `<span class="text-sv-text-muted">Peers</span> <span class="font-mono text-white">${status.peers || 0}</span><br>` +
+        `<span class="text-sv-text-muted">↓ Download</span> <span class="font-mono text-sv-success">${down}</span> · ` +
+        `<span class="text-sv-text-muted">↑ Upload</span> <span class="font-mono text-sv-success">${up}</span>`
     } catch (error) {
       console.warn("Local torrent status failed:", error)
     }
@@ -1943,7 +1953,7 @@ export default class extends Controller {
     if (this.isSeeking) return
     if (this.streamRecoveryAttempts >= STREAM_MAX_RECOVERY_ATTEMPTS) {
       console.warn("HLS recovery limit reached — giving up.")
-      this.showSeekingOverlay("Stream stalled — tap to retry")
+      this.showSeekingOverlay("Stream stalled — tap to retry", { interactive: true })
       const overlay = this.seekingOverlayTarget
       const onRetry = () => {
         overlay.removeEventListener("click", onRetry)
@@ -2463,9 +2473,45 @@ export default class extends Controller {
   }
 
   // Skip forward/backward by a number of seconds (±10s default).
+  // Repeated taps accumulate into one debounced restart: the timeline and
+  // clock move immediately, and a single session restart loads from the
+  // LAST pressed position once the user stops tapping.
   skip(deltaSeconds) {
-    const target = Math.max(0, Math.min(this.knownDuration, this.currentPlaybackPosition() + deltaSeconds))
-    this.restartPlaybackAt(Math.floor(target))
+    if (this.knownDuration <= 0) return
+    // Accumulate from the pending skip target (or an in-flight restart's
+    // queued target) so rapid taps chain: three forward presses seek +30s
+    // from where the user started, not three restarts from wherever
+    // playback happens to be sitting.
+    const base = this.userSeekTargetSeconds ?? this.pendingSeekSeconds ?? this.currentPlaybackPosition()
+    const target = Math.max(0, Math.min(this.knownDuration, Math.floor(base + deltaSeconds)))
+    this.userSeekTargetSeconds = target
+    this.currentTimeTarget.textContent = this.formatTime(target)
+    this.updateSeekVisuals(target / this.knownDuration)
+    this.clearUserSeekDebounce()
+    this.userSeekDebounceTimer = setTimeout(() => this.commitUserSeek(), USER_SEEK_DEBOUNCE_MS)
+    this.showOverlayUi()
+  }
+
+  // Fire one restart at the last skip target once the user stops tapping.
+  // Until then no session starts, so repeated presses never queue restarts
+  // (or hit the hls/start throttle) one per tap.
+  commitUserSeek() {
+    this.userSeekDebounceTimer = null
+    const target = this.userSeekTargetSeconds
+    this.userSeekTargetSeconds = null
+    if (target === null) return
+    // The newest skip target supersedes anything the seek bar queued behind
+    // an in-flight restart.
+    this.pendingSeekSeconds = null
+    if (!this.isSeeking && target === Math.floor(this.currentPlaybackPosition())) return
+    this.restartPlaybackAt(target)
+  }
+
+  clearUserSeekDebounce() {
+    if (this.userSeekDebounceTimer) {
+      clearTimeout(this.userSeekDebounceTimer)
+      this.userSeekDebounceTimer = null
+    }
   }
 
   skipBack() {
@@ -2616,7 +2662,7 @@ export default class extends Controller {
     })
 
     if (this.isHls()) {
-      this.showSeekingOverlay("Stream error — tap to retry")
+      this.showSeekingOverlay("Stream error — tap to retry", { interactive: true })
       const overlay = this.seekingOverlayTarget
       const onRetry = () => {
         overlay.removeEventListener("click", onRetry)
@@ -4573,6 +4619,10 @@ export default class extends Controller {
     }
     if (this.isSeeking) {
       this.pendingSeekSeconds = targetSeconds
+      // Show where the queued seek is headed even though the restart itself
+      // waits for the in-flight one to finish.
+      this.currentTimeTarget.textContent = this.formatTime(targetSeconds)
+      this.updateSeekVisuals(targetSeconds / this.knownDuration)
       return
     }
     this.restartPlaybackAt(targetSeconds)
@@ -4581,6 +4631,11 @@ export default class extends Controller {
   }
 
   restartPlaybackAt(targetSeconds) {
+    // A direct restart (seek bar drag, recovery, HDR switch) supersedes any
+    // pending skip debounce — its target is stale.
+    this.clearUserSeekDebounce()
+    this.userSeekTargetSeconds = null
+
     if (this.liveCaptionsEnabled) this.restartLiveCaptionsAt(targetSeconds)
 
     if (this.isHls()) {
@@ -4823,15 +4878,14 @@ export default class extends Controller {
 
   // ── Seeking overlay ───────────────────────────────────────────────
 
-  showSeekingOverlay(message = "Seeking...") {
+  showSeekingOverlay(message = "Seeking...", { interactive = false } = {}) {
     if (this.hasSeekingOverlayMessageTarget) this.seekingOverlayMessageTarget.textContent = message
-    if (this.isSeeking) {
-      // Seeking/error overlays ARE interactive (e.g. onVideoError
-      // adds a click-to-retry handler). Remove pointer-events-none
-      // that showBufferingOverlay may have set.
-      this.seekingOverlayTarget.classList.remove("pointer-events-none")
-      this.seekingOverlayTarget.classList.remove("hidden")
-    }
+    this.seekingOverlayTarget.classList.remove("hidden")
+    // The spinner is feedback, not a modal. User seeks keep every control
+    // tappable (skip buttons, seek bar) while the new position loads, so
+    // the user can keep seeking. Only overlays that install a
+    // click-to-retry handler opt into intercepting taps.
+    this.seekingOverlayTarget.classList.toggle("pointer-events-none", !interactive)
   }
 
   bufferedRangesDebug() {
@@ -4892,6 +4946,9 @@ export default class extends Controller {
       this.topControlsTarget.style.opacity = "0"
       this.topControlsTarget.style.pointerEvents = "none"
       this.positionSubtitleOverlay(false)
+      // Collapse the stats panel with the controls so it never reappears
+      // stuck open — the toggle button starts fresh next time.
+      if (this.hasSourceDetailsTarget) this.sourceDetailsTarget.classList.add("hidden")
     }
   }
 
