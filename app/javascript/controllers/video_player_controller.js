@@ -3431,6 +3431,11 @@ export default class extends Controller {
   // module load error, HDR switched on mid-load): the plain video keeps
   // playing.
   async enableUpscale() {
+    // Single-flight: internal callers (restoreUpscale via HDR/track control
+    // rendering, failWebgpuUpscale's fallback) can fire while a previous
+    // start is still awaiting adapter/device on slow devices — a re-entrant
+    // call would see the not-yet-sized canvas and kill the healthy start.
+    if (this.upscaleApplying) return false
     if (this.upscaleEnabled || this.hdrEnabled) return false
     this.upscaleStartError = null
     const engineId = this.upscaleEngineId
@@ -3479,7 +3484,9 @@ export default class extends Controller {
       // texture would stretch the picture INSIDE the letterbox box, which
       // looks exactly like the layout bug; report it distinctly instead.
       // (WebGL excluded: that library sizes its own canvas asynchronously.)
-      if (engineId === "webgpu" && canvas.width && canvas.height && this.videoTarget.videoWidth) {
+      // A never-sized canvas (browser default 300x150) is not an aspect
+      // failure — start() sizing it is what this await was for.
+      if (engineId === "webgpu" && canvas.width > 1 && canvas.height > 1 && this.videoTarget.videoWidth) {
         const videoAspect = this.videoTarget.videoWidth / this.videoTarget.videoHeight
         const canvasAspect = canvas.width / canvas.height
         if (Math.abs(canvasAspect - videoAspect) > 0.01) {
