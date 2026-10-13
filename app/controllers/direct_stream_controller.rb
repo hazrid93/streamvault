@@ -6,8 +6,6 @@ class DirectStreamController < ApplicationController
 
   before_action :authenticate_user!
 
-  MAX_REDIRECTS = 5
-
   # GET /direct_stream?url=... — transparent HTTP proxy for direct play.
   # Forwards the request to the RealDebrid CDN with auth headers and Range
   # passthrough, so the browser's <video> element downloads at network speed

@@ -54,7 +54,11 @@ RSpec.describe "DirectStream", type: :request do
 
     it "allows only the configured TorrServer origin without leaking the RD key" do
       previous = ENV["LOCAL_TORRENT_ENABLED"]
+      previous_username = ENV["TORRSERVER_USERNAME"]
+      previous_password = ENV["TORRSERVER_PASSWORD"]
       ENV["LOCAL_TORRENT_ENABLED"] = "true"
+      ENV["TORRSERVER_USERNAME"] = "torrserver"
+      ENV["TORRSERVER_PASSWORD"] = "secret"
       local_url = "http://torrserver:8090/stream/Movie.mkv?link=#{'a' * 40}&index=1&play="
       stub_request(:get, local_url)
         .to_return(status: 206, body: "data", headers: { "Content-Type" => "video/x-matroska" })
@@ -65,6 +69,8 @@ RSpec.describe "DirectStream", type: :request do
         .with { |request| request.headers["Authorization"].to_s.start_with?("Basic ") && !request.headers["Authorization"].include?("test_key") }
     ensure
       ENV["LOCAL_TORRENT_ENABLED"] = previous
+      ENV["TORRSERVER_USERNAME"] = previous_username
+      ENV["TORRSERVER_PASSWORD"] = previous_password
     end
 
     it "rejects a different port on the local torrent hostname" do

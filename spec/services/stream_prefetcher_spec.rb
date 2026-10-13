@@ -39,7 +39,7 @@ RSpec.describe StreamPrefetcher do
     ApiCache.upsert("cinemeta:catalog/movie/top///50", items)
   end
 
-  it "warms only useful movie keys with bounded real upstream concurrency" do
+  it "warms only useful movie keys with bounded real upstream concurrency", truncation: true do
     movies = 8.times.map do |index|
       { "imdb_id" => "tt300000#{index}", "type" => "movie" }
     end

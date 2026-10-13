@@ -48,7 +48,9 @@ class TmdbService
       fetch_recommendations_uncached(imdb_id)
     end
 
-    ServiceResult.success(results || [])
+    return ServiceResult.failure("Not found on TMDB") if results.nil?
+
+    ServiceResult.success(results)
   rescue Faraday::TimeoutError
     Rails.logger.error("[TmdbService] request timed out")
     ServiceResult.failure("TMDB request timed out")

@@ -62,6 +62,9 @@ RSpec.configure do |config|
   end
 
   config.around(:each) do |example|
+    # Examples that write from worker threads need committed rows: a
+    # transaction held by the main thread would lock SQLite for them.
+    DatabaseCleaner.strategy = example.metadata[:truncation] ? :truncation : :transaction
     DatabaseCleaner.cleaning do
       example.run
     end

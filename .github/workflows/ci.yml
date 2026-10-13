@@ -39,6 +39,38 @@ jobs:
       - name: Scan for security vulnerabilities in JavaScript dependencies
         run: bin/importmap audit
 
+  test:
+    runs-on: ubuntu-latest
+    env:
+      RAILS_ENV: test
+      BUNDLE_WITHOUT: production
+      # Throwaway keys: the test database only holds factory data.
+      ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY: ci-test-primary-key-0123456789abcdef
+      ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY: ci-test-deterministic-key-0123456789
+      ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT: ci-test-key-derivation-salt-012345
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare test database and CSS
+        run: bin/rails db:test:prepare tailwindcss:build
+
+      - name: Run Ruby tests
+        run: bundle exec rspec
+
+      - name: Run JavaScript tests
+        run: node --test spec/javascript/*.mjs
+
   lint:
     runs-on: ubuntu-latest
     env:

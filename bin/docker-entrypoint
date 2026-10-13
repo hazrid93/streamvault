@@ -3,6 +3,9 @@
 # If running the rails server then create or migrate existing database
 if [ "${@: -2:1}" == "./bin/rails" ] && [ "${@: -1:1}" == "server" ]; then
   ./bin/rails db:prepare
+  # A restart kills every ffmpeg child. Drop their HLS rows and segments so
+  # the cleanup job never signals a stale PID that now belongs to a new stream.
+  ./bin/rails runner 'HlsSessionRecord.delete_all; FileUtils.rm_rf(Rails.root.join("tmp", "hls"))'
 fi
 
 exec "${@}"

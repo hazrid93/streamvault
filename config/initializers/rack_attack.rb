@@ -32,13 +32,6 @@ class Rack::Attack
     ip unless safe_list.include?(ip)
   end
 
-  # Watch progress saves: 1 per 3 seconds per user.
-  throttle("progress/user", limit: 1, period: 3.seconds) do |request|
-    next unless request.path == "/streaming/progress" && request.patch?
-
-    authenticated_user_id(request)
-  end
-
   # Fresh stream resolution is expensive, so keep a tight per-user limit.
   throttle("stream_start/user", limit: 2, period: 10.seconds) do |request|
     next unless request.path == "/streaming" && request.post?
