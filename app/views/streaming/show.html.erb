@@ -77,6 +77,15 @@
          style="object-fit: contain; background: #000;">
   </video>
 
+  <%# Shown when the browser allowed only muted autoplay. %>
+  <button type="button" data-video-player-target="unmuteButton"
+          data-action="click->video-player#unmuteAutoplay"
+          class="hidden absolute left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-xl backdrop-blur hover:bg-black/85"
+          style="top: calc(env(safe-area-inset-top, 0px) + 1rem);">
+    <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+    Tap to unmute
+  </button>
+
   <%# Transient, non-blocking notices (e.g. upscaler fallback). Never
      intercepts pointer events. %>
   <div data-video-player-target="playerNotice"
@@ -504,15 +513,17 @@
     </div>
   </div>
 
-  <%# Loading overlay (shown while ffmpeg restarts after a seek, subtitles catch up, or the stream buffers). bg-black/80 so the spinner is visible — with MSE, when the buffer runs dry Chrome shows black, not a frozen frame, so a transparent overlay would be invisible. %>
-  <div data-video-player-target="seekingOverlay" class="hidden absolute inset-0 flex items-center justify-center bg-black/80 z-20">
+  <%# Loading indicator (ffmpeg restart after a seek, or the stream buffers).
+      It does not dim the picture: the spinner and text sit on their own
+      small dark backing, so they stay readable on a black or bright frame. %>
+  <div data-video-player-target="seekingOverlay" class="hidden absolute inset-0 flex items-center justify-center z-20">
     <%# Keep the spinner itself on the exact player center point. The status
         text is absolutely positioned below it so it does not shift the
         spinner above the centered play/pause button. %>
-    <div class="relative h-14 w-14">
+    <div class="relative h-14 w-14 rounded-full bg-black/45 backdrop-blur-sm">
       <div data-player-loading-spinner class="absolute inset-0 border-4 border-white/20 border-t-indigo-500 rounded-full animate-spin" aria-hidden="true"></div>
       <span data-video-player-target="seekingOverlayMessage"
-            class="absolute left-1/2 top-full mt-4 -translate-x-1/2 whitespace-nowrap text-white text-sm font-medium"
+            class="absolute left-1/2 top-full mt-3 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/55 px-3 py-1 text-white text-xs font-medium"
             style="text-shadow: 0 2px 8px rgba(0,0,0,0.95);">Seeking...</span>
     </div>
   </div>

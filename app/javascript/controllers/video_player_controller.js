@@ -65,6 +65,8 @@ const REBUFFER_STALL_TIMEOUT_MS = 20000
 const REBUFFER_MAX_WAIT_MS = 12000
 const VOLUME_PREFERENCE_KEY = "streamvault:volume"
 const SUBTITLE_LOADING_NOTICE = "Loading subtitles…"
+// Server extraction gives up after 45 s; a request older than this hung.
+const SUBTITLE_LOAD_STUCK_MS = 60000
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // The subtitle overlay is pinned just above the controls bar while the
@@ -89,7 +91,7 @@ export default class extends UpscaleMixin(Controller) {
       "subtitleControls", "subtitleMenu", "subtitleOptions", "subtitleButtonLabel", "subtitleOverlay", "subtitleText",
       "hdrControls", "hdrButton", "hdrButtonState",
       "speedButton", "speedMenu", "nextEpisodeCard", "fullscreenButton", "castButton",
-      "volumeSlider", "pipButton"
+      "volumeSlider", "pipButton", "unmuteButton"
     ]
   }
   static get values() {
@@ -960,8 +962,7 @@ export default class extends UpscaleMixin(Controller) {
       }, { once: true })
     }
 
-    const p = this.videoTarget.play()
-    if (p?.catch) p.catch(() => {})
+    this.playAutomatically().catch(() => {})
     // Don't set playbackStarted=true or start progress watchdog here —
     // onVideoReady() sets them when "playing" fires.
   }
@@ -997,7 +998,7 @@ export default class extends UpscaleMixin(Controller) {
     // ready, causing a brief video freeze that catches up abruptly.
     this.loadRemuxSource(() => {
       this.videoTarget.addEventListener("loadeddata", () => {
-        if (!this.userPaused) this.videoTarget.play().catch(() => {})
+        if (!this.userPaused) this.playAutomatically().catch(() => {})
       }, { once: true })
     })
   }
@@ -1236,7 +1237,7 @@ export default class extends UpscaleMixin(Controller) {
       // Native HLS playback — iOS Safari handles the playlist natively.
       this.videoTarget.src = data.playlist_url
       this.videoTarget.load()
-      const p = this.userPaused ? null : this.videoTarget.play()
+      const p = this.userPaused ? null : this.playAutomatically()
       if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
       if (p?.catch) p.catch((err) => {
         if (!this.isHlsOperationCurrent(playbackToken, abortController)) return
@@ -2496,9 +2497,8 @@ export default class extends UpscaleMixin(Controller) {
       if (bufferedAhead >= INITIAL_MSE_AHEAD_SECONDS || deadlineReached) {
         this.playbackStarted = true
         this.bufferAheadDeadline = null
-        const p = this.videoTarget.play()
         this.clearBufferAheadTimer()
-        if (p?.catch) p.catch(() => {})
+        this.playAutomatically().catch(() => {})
       }
       return
     }
@@ -2608,6 +2608,11 @@ export default class extends UpscaleMixin(Controller) {
   }
   onVideoClick(event) {
     event.preventDefault()
+    if (this.autoplayMuted) {
+      this.unmuteAutoplay()
+      this.showOverlayUi()
+      return
+    }
     // On touch screens a tap shows or hides the controls (the centre button
     // pauses), so checking the time never pauses the video by accident.
     if (event.pointerType === "touch" || this.lastPointerType === "touch") {
@@ -2626,6 +2631,7 @@ export default class extends UpscaleMixin(Controller) {
   onKeyDown(event) {
     if (this.isInteractiveElement(event.target)) return
     if (event.metaKey || event.ctrlKey || event.altKey) return
+    if (this.autoplayMuted && event.key !== "m" && event.key !== "M") this.unmuteAutoplay()
     // Held arrow keys repeat: skips accumulate into one debounced seek.
     if (event.repeat && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return
 
@@ -3159,6 +3165,29 @@ export default class extends UpscaleMixin(Controller) {
     this.videoTarget.muted = !this.videoTarget.muted
   }
 
+  // Start playback without a click. Browsers block sound-on autoplay when
+  // the page has no user gesture yet (a full page load from the stream
+  // list); then the video starts muted with a "Tap to unmute" button
+  // instead of waiting on the centre play button.
+  async playAutomatically() {
+    const video = this.videoTarget
+    try {
+      await video.play()
+    } catch (error) {
+      if (error?.name !== "NotAllowedError" || video.muted) throw error
+      video.muted = true
+      await video.play()
+      this.autoplayMuted = true
+      if (this.hasUnmuteButtonTarget) this.unmuteButtonTarget.classList.remove("hidden")
+    }
+  }
+
+  unmuteAutoplay() {
+    this.autoplayMuted = false
+    if (this.hasUnmuteButtonTarget) this.unmuteButtonTarget.classList.add("hidden")
+    this.videoTarget.muted = false
+  }
+
   setVolume(event) {
     const volume = Number(event.currentTarget.value)
     if (!Number.isFinite(volume)) return
@@ -3194,6 +3223,11 @@ export default class extends UpscaleMixin(Controller) {
   }
 
   updateVolumeIcon() {
+    // Any unmute (button, slider, key) ends the muted-autoplay prompt.
+    if (this.autoplayMuted && !this.videoTarget.muted) {
+      this.autoplayMuted = false
+      if (this.hasUnmuteButtonTarget) this.unmuteButtonTarget.classList.add("hidden")
+    }
     const silent = this.videoTarget.muted || this.videoTarget.volume === 0
     if (silent) {
       this.volumeIconTarget.classList.add("hidden")
@@ -3777,6 +3811,7 @@ export default class extends UpscaleMixin(Controller) {
     const loadToken = this.subtitleLoadToken + 1
     this.subtitleLoadToken = loadToken
     this.subtitleLoading = true
+    this.subtitleLoadStartedAt = Date.now()
     this.subtitlePendingWindowStart = windowStart
     this.subtitlePendingWindowEnd = windowEnd
     this.abortSubtitleLoad()
@@ -3941,8 +3976,19 @@ export default class extends UpscaleMixin(Controller) {
     this.subtitleRetryAfter = Date.now() + delayMs
   }
 
+  cancelStuckSubtitleLoad() {
+    console.warn("Subtitle load did not finish; retrying at the playhead")
+    this.subtitleLoadToken += 1
+    this.abortSubtitleLoad()
+    this.subtitlePrefetches.clear()
+    this.subtitleLoading = false
+    this.subtitlePendingWindowStart = null
+    this.subtitlePendingWindowEnd = null
+    this.finishSubtitleLoadingNotice(this.subtitleNoticeToken)
+  }
+
   primeSubtitleContinuation(requestedSubtitleStream) {
-    if (this.subtitleRetryAfter) return
+    if (this.subtitleRetryAfter && Date.now() < this.subtitleRetryAfter) return
     if (this.subtitleWindowEnd === null) return
     if (this.selectedSubtitleStream !== requestedSubtitleStream) return
     if (!this.textSubtitleSelected()) return
@@ -4288,11 +4334,20 @@ export default class extends UpscaleMixin(Controller) {
       this.ensureLiveCaptionWindow(currentPos)
       return
     }
-    if (!this.textSubtitleSelected() || this.subtitleLoading) return
+    if (!this.textSubtitleSelected()) return
+    if (this.subtitleLoading) {
+      // A request that never settles (stalled server or prefetch) would
+      // otherwise block every later window, and the captions stop for good.
+      if (Date.now() - (this.subtitleLoadStartedAt || 0) < SUBTITLE_LOAD_STUCK_MS) return
+      this.cancelStuckSubtitleLoad()
+    }
     if (this.subtitleRetryAfter && Date.now() < this.subtitleRetryAfter) return
 
     const missingWindow = this.subtitleWindowStart === null || this.subtitleWindowEnd === null
-    const beforeWindow = !missingWindow && currentPos < this.subtitleWindowStart
+    // Playback ran past the loaded cues (slow or failed load, or a seek the
+    // window missed): reload at the playhead instead of the old window end.
+    const pastWindow = !missingWindow && currentPos >= this.subtitleWindowEnd
+    const beforeWindow = !missingWindow && (currentPos < this.subtitleWindowStart || pastWindow)
     const windowLength = missingWindow ? SUBTITLE_WINDOW_SECONDS : this.subtitleWindowEnd - this.subtitleWindowStart
     const prefetchSeconds = Math.min(SUBTITLE_PREFETCH_SECONDS, Math.max(1, windowLength / 2))
     const nearWindowEnd = !missingWindow && currentPos >= this.subtitleWindowEnd - prefetchSeconds

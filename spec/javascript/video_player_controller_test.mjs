@@ -2884,3 +2884,72 @@ test("iOS plays direct-playable files natively before trying HLS", async () => {
 
   assert.deepEqual(calls, ["direct"])
 })
+
+function subtitleWindowPlayer() {
+  const player = new VideoPlayerController()
+  const loads = []
+  player.liveCaptionsEnabled = false
+  player.textSubtitleSelected = () => true
+  player.subtitleRetryAfter = 0
+  player.subtitleLoading = false
+  player.subtitleLoadToken = 1
+  player.subtitlePrefetches = new Map()
+  player.subtitleAbortController = null
+  player.subtitleNoticeToken = null
+  player.loadSubtitleTrack = (position) => { loads.push(position) }
+  return { player, loads }
+}
+
+test("captions reload at the playhead when playback ran past the loaded window", () => {
+  const { player, loads } = subtitleWindowPlayer()
+  player.subtitleWindowStart = 100
+  player.subtitleWindowEnd = 160
+
+  player.ensureSubtitleWindow(400)
+
+  assert.deepEqual(loads, [400])
+})
+
+test("a subtitle request that never settles stops blocking later windows", () => {
+  const { player, loads } = subtitleWindowPlayer()
+  player.subtitleWindowStart = 100
+  player.subtitleWindowEnd = 160
+  player.subtitleLoading = true
+  player.subtitleLoadStartedAt = Date.now() - 5000
+
+  player.ensureSubtitleWindow(150)
+  assert.deepEqual(loads, [], "a fresh request is left alone")
+
+  player.subtitleLoadStartedAt = Date.now() - 61000
+  player.ensureSubtitleWindow(150)
+
+  assert.equal(player.subtitleLoading, false)
+  assert.equal(player.subtitleLoadToken, 2, "the hung response can no longer apply")
+  assert.deepEqual(loads, [160])
+})
+
+test("blocked sound-on autoplay starts muted and offers unmute", async () => {
+  const player = new VideoPlayerController()
+  const button = { hidden: true, classList: { add: () => { button.hidden = true }, remove: () => { button.hidden = false } } }
+  let attempts = 0
+  player.hasUnmuteButtonTarget = true
+  player.unmuteButtonTarget = button
+  player.videoTarget = {
+    muted: false,
+    play() {
+      attempts += 1
+      if (!this.muted) return Promise.reject(Object.assign(new Error("blocked"), { name: "NotAllowedError" }))
+      return Promise.resolve()
+    }
+  }
+
+  await player.playAutomatically()
+
+  assert.equal(attempts, 2)
+  assert.equal(player.videoTarget.muted, true)
+  assert.equal(button.hidden, false)
+
+  player.unmuteAutoplay()
+  assert.equal(player.videoTarget.muted, false)
+  assert.equal(button.hidden, true)
+})
