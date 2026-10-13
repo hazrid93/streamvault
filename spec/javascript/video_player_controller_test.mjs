@@ -318,7 +318,6 @@ test("HLS playing clears buffering without requiring MSE buffer ranges", () => {
   player.isSeeking = false
   player.isStalled = true
   player.userPaused = false
-  player.subtitlePlaybackHoldToken = null
   player.pendingSeekSeconds = null
   player.hideStartupOverlay = () => {}
   player.scheduleUiHide = () => { uiHideScheduled += 1 }
@@ -1487,22 +1486,50 @@ test("direct playback does not reconnect while a full native buffer pauses progr
   assert.equal(player.progressWatchdogArmed, true)
 })
 
-test("clearing subtitle cues invalidates an old playback hold", () => {
+test("selecting a text subtitle keeps the video playing and shows a notice", async () => {
   const player = new VideoPlayerController()
-  let played = 0
-  player.videoTarget = {
-    paused: true,
-    ended: false,
-    play: () => { played += 1; return Promise.resolve() }
+  const previousFetch = context.fetch
+  let paused = 0
+  const notice = { textContent: "", classList: new Set(["hidden"]) }
+  notice.classList.add = notice.classList.add.bind(notice.classList)
+  notice.classList.remove = notice.classList.delete.bind(notice.classList)
+  player.videoTarget = { paused: false, ended: false, currentTime: 50, pause: () => { paused += 1 } }
+  player.startSecondsValue = 0
+  player.directPlayActive = true
+  player.remuxDirectPlay = false
+  player.hasPlayerNoticeTarget = true
+  player.playerNoticeTarget = notice
+  player.hasSubtitlesUrlValue = true
+  player.subtitlesUrlValue = "/transcode/subtitles"
+  player.extractRawUrl = () => "https://example.test/movie.mkv"
+  player.subtitleTracks = [{ index: 3, label: "English", text_supported: true }]
+  player.selectedSubtitleStream = null
+  player.renderSubtitleControls = () => {}
+  player.renderHdrControls = () => {}
+  player.closeTrackMenus = () => {}
+  player.primeSubtitleContinuation = () => {}
+  player.subtitlePrefetches = new Map()
+  player.subtitlePrefetchResults = new Map()
+  player.subtitleCues = []
+  player.subtitleLoadToken = 0
+  player.subtitleOffset = 0
+  let seenDuringLoad = null
+  context.fetch = async () => {
+    seenDuringLoad = notice.textContent
+    return { ok: true, status: 200, text: async () => "WEBVTT\n\n00:00:45.000 --> 00:00:52.000\nStill on screen", headers: { get: () => null } }
   }
-  player.subtitlePlaybackHoldToken = 7
-  player.subtitleLoadToken = 7
 
-  player.clearSubtitleCues()
-  player.finishSubtitlePlaybackHold(7)
+  try {
+    player.selectSubtitleTrack({ currentTarget: { dataset: { subtitleStream: "3" } } })
+    await new Promise((resolve) => setTimeout(resolve, 10))
 
-  assert.equal(player.subtitlePlaybackHoldToken, null)
-  assert.equal(played, 0)
+    assert.equal(paused, 0)
+    assert.equal(seenDuringLoad, "Loading subtitles…")
+    assert.equal(notice.classList.has("hidden"), true)
+    assert.ok(player.subtitleCues.some((cue) => cue.text.includes("Still on screen")))
+  } finally {
+    context.fetch = previousFetch
+  }
 })
 
 test("source selection starts from core tracks before optional external subtitle discovery", async () => {
@@ -1796,14 +1823,8 @@ test("MSE starts at an eight second cushion and preserves pause and subtitle-hol
 
   player.userPaused = false
   player.isSeeking = true
-  player.subtitlePlaybackHoldToken = null
   player.maybeStartPlayback()
   assert.equal(plays, 2, "an ordinary seek should start as soon as its buffer is ready")
-
-  player.playbackStarted = false
-  player.subtitlePlaybackHoldToken = 9
-  player.maybeStartPlayback()
-  assert.equal(plays, 2, "subtitle loading should retain its explicit playback hold")
 })
 
 test("a paused MSE seek dismisses its loading overlay after the first frame is buffered", () => {
@@ -1812,7 +1833,6 @@ test("a paused MSE seek dismisses its loading overlay after the first frame is b
   let shown = 0
   player.userPaused = true
   player.isSeeking = true
-  player.subtitlePlaybackHoldToken = null
   player.videoTarget = { currentTime: 0 }
   player.sourceBuffer = { buffered: { length: 1, start: () => 0, end: () => 2 } }
   player.hideSeekingOverlay = () => { hidden += 1; player.isSeeking = false }

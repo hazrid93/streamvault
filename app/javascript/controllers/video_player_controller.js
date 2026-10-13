@@ -64,6 +64,7 @@ const REBUFFER_STALL_TIMEOUT_MS = 20000
 // Twelve seconds keeps that wait bounded; the watchdog handles a dead source.
 const REBUFFER_MAX_WAIT_MS = 12000
 const VOLUME_PREFERENCE_KEY = "streamvault:volume"
+const SUBTITLE_LOADING_NOTICE = "Loading subtitles…"
 const INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [contenteditable='true']"
 const HDR_PREFERENCE_KEY = "streamvault:hdr-enabled"
 // The subtitle overlay is pinned just above the controls bar while the
@@ -140,11 +141,11 @@ export default class extends UpscaleMixin(Controller) {
     this.subtitleOffset = 0
     this.subtitleLoading = false
     this.subtitleLoadToken = 0
+    this.subtitleNoticeToken = null
     this.subtitleAbortController = null
     this.subtitleRetryAfter = 0
     this.subtitlePrefetches = new Map()
     this.subtitlePrefetchResults = new Map()
-    this.subtitlePlaybackHoldToken = null
     this.liveCaptionsEnabled = false
     this.liveCaptionLoadToken = 0
     this.liveCaptionAbortController = null
@@ -701,7 +702,7 @@ export default class extends UpscaleMixin(Controller) {
     this.loadSubtitleTrack(this.currentPlaybackPosition(), {
       durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
       lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-      holdPlayback: true
+      announce: true
     })
   }
 
@@ -943,7 +944,6 @@ export default class extends UpscaleMixin(Controller) {
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
     this.isSeeking = false
-    this.subtitlePlaybackHoldToken = null
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
 
@@ -983,7 +983,6 @@ export default class extends UpscaleMixin(Controller) {
     this.bufferAheadDeadline = null
     this.rebufferDeadline = null
     this.isSeeking = false
-    this.subtitlePlaybackHoldToken = null
     this.streamRecoveryAttempts = 0
     this.streamRecoveryActive = false
 
@@ -2491,7 +2490,7 @@ export default class extends UpscaleMixin(Controller) {
 
     const bufferedAhead = this.bufferedAheadOfCurrent()
 
-    if (this.userPaused || this.subtitlePlaybackHoldToken != null) return
+    if (this.userPaused) return
     if (!this.playbackStarted) {
       const deadlineReached = this.bufferAheadDeadline && Date.now() >= this.bufferAheadDeadline
       if (bufferedAhead >= INITIAL_MSE_AHEAD_SECONDS || deadlineReached) {
@@ -2537,7 +2536,7 @@ export default class extends UpscaleMixin(Controller) {
   }
 
   finishPausedMseSeekIfReady() {
-    if (!this.userPaused || !this.isSeeking || this.subtitlePlaybackHoldToken != null) return
+    if (!this.userPaused || !this.isSeeking) return
     if (this.bufferedAheadOfCurrent() < 0.5) return
 
     this.hideSeekingOverlay()
@@ -2556,7 +2555,6 @@ export default class extends UpscaleMixin(Controller) {
   // overlay once the video is actually playing with >= 2s of buffer.
   maybeHideBufferingOverlay() {
     if (this.isSeeking) return
-    if (this.subtitlePlaybackHoldToken !== null) return
     if (!this.playbackStarted || this.isStalled || this.userPaused) return
     if (this.videoTarget.paused || this.videoTarget.ended) return
     if (!this.hasBufferedAhead(2)) return
@@ -3354,7 +3352,7 @@ export default class extends UpscaleMixin(Controller) {
         this.loadSubtitleTrack(this.currentPlaybackPosition(), {
           durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
           lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-          holdPlayback: true
+          announce: true
         })
       }
     } catch (e) {
@@ -3648,7 +3646,7 @@ export default class extends UpscaleMixin(Controller) {
       this.loadSubtitleTrack(targetSeconds, {
         durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
         lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-        holdPlayback: true
+        announce: true
       })
     } else {
       this.hideSeekingOverlay()
@@ -3663,13 +3661,13 @@ export default class extends UpscaleMixin(Controller) {
     return this.videoTarget.currentTime + this.playbackTimelineOffset()
   }
 
-  reloadTextSubtitlesAt(position, holdPlayback = false) {
+  reloadTextSubtitlesAt(position, announce = false) {
     if (!this.textSubtitleSelected()) return
 
     this.loadSubtitleTrack(position, {
       durationSeconds: SUBTITLE_STARTUP_WINDOW_SECONDS,
       lookBehindSeconds: SUBTITLE_STARTUP_LOOK_BEHIND_SECONDS,
-      holdPlayback: holdPlayback
+      announce
     })
   }
 
@@ -3759,7 +3757,7 @@ export default class extends UpscaleMixin(Controller) {
     {
       durationSeconds = SUBTITLE_WINDOW_SECONDS,
       lookBehindSeconds = SUBTITLE_LOOK_BEHIND_SECONDS,
-      holdPlayback = false
+      announce = false
     } = {}
   ) {
     if (!this.hasSubtitlesUrlValue || !this.textSubtitleSelected()) return
@@ -3784,7 +3782,7 @@ export default class extends UpscaleMixin(Controller) {
     this.abortSubtitleLoad()
     const abortController = new AbortController()
     this.subtitleAbortController = abortController
-    this.beginSubtitlePlaybackHold(holdPlayback, loadToken)
+    if (announce) this.showSubtitleLoadingNotice(loadToken)
 
     const requestKey = this.subtitleRequestKey(requestedSubtitleStream, windowStart, requestedDurationSeconds)
     const cachedPrefetch = this.subtitlePrefetchResults.get(requestKey)
@@ -3814,7 +3812,7 @@ export default class extends UpscaleMixin(Controller) {
         this.subtitlePendingWindowEnd = null
       }
       if (this.subtitleAbortController === abortController) this.subtitleAbortController = null
-      this.finishSubtitlePlaybackHold(loadToken)
+      this.finishSubtitleLoadingNotice(loadToken)
       if (requestStillCurrent && shouldPrimeContinuation) this.primeSubtitleContinuation(requestedSubtitleStream)
     }
   }
@@ -3880,26 +3878,22 @@ export default class extends UpscaleMixin(Controller) {
     return true
   }
 
-  beginSubtitlePlaybackHold(holdPlayback, loadToken) {
-    if (!holdPlayback || this.videoTarget.paused || this.videoTarget.ended) return
-
-    this.subtitlePlaybackHoldToken = loadToken
-    this.isSeeking = true
-    this.videoTarget.pause()
-    this.showSeekingOverlay("Loading subtitles...")
+  // Subtitle loading never pauses the video. A small notice shows while
+  // the first window loads; the look-behind window means a line that is
+  // still on screen when the cues arrive appears at once.
+  showSubtitleLoadingNotice(loadToken) {
+    this.subtitleNoticeToken = loadToken
+    this.showPlayerNotice(SUBTITLE_LOADING_NOTICE, 15000)
   }
 
-  finishSubtitlePlaybackHold(loadToken) {
-    if (this.subtitlePlaybackHoldToken !== loadToken) return
+  finishSubtitleLoadingNotice(loadToken) {
+    if (loadToken == null || this.subtitleNoticeToken !== loadToken) return
 
-    this.subtitlePlaybackHoldToken = null
-    this.hideSeekingOverlay()
-    // Only resume if the stall was caused by the subtitle hold, not by
-    // the user pausing in the meantime.  Without this check, a subtitle
-    // load completing while the user has paused would auto-resume.
-    if (this.userPaused) return
-    const playPromise = this.videoTarget.play()
-    if (playPromise?.catch) playPromise.catch(() => {})
+    this.subtitleNoticeToken = null
+    if (this.hasPlayerNoticeTarget && this.playerNoticeTarget.textContent === SUBTITLE_LOADING_NOTICE) {
+      clearTimeout(this.playerNoticeTimer)
+      this.playerNoticeTarget.classList.add("hidden")
+    }
   }
 
   removeTextSubtitleTrack() {
@@ -4115,9 +4109,9 @@ export default class extends UpscaleMixin(Controller) {
     // A cleared cue buffer cannot keep claiming its old window is loaded.
     // Cancel stale responses and force the next overlay update to fetch the
     // new playback timeline.
-    // A newer seek or track change invalidates any subtitle hold owned by
-    // an older request. Its finally block must not resume old playback.
-    this.subtitlePlaybackHoldToken = null
+    // A newer seek or track change ends the loading notice of an older
+    // request.
+    this.finishSubtitleLoadingNotice(this.subtitleNoticeToken)
     this.subtitleLoadToken += 1
     this.abortSubtitleLoad()
     this.subtitleLoading = Boolean(this.liveCaptionsEnabled && this.liveCaptionAbortController !== null)
@@ -5355,7 +5349,6 @@ export default class extends UpscaleMixin(Controller) {
   }
 
   hideSeekingOverlay() {
-    if (this.subtitlePlaybackHoldToken !== null) return
     this.isSeeking = false
     this.seekingOverlayTarget.classList.add("hidden")
     this.seekingOverlayTarget.classList.remove("pointer-events-none")
