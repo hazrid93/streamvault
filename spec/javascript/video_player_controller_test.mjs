@@ -3,9 +3,15 @@ import fs from "node:fs"
 import test from "node:test"
 import vm from "node:vm"
 
+// The upscaler mixin is inlined in place of its import so the controller
+// and its mixin run as one classic script in the VM context.
+const upscaleSource = fs
+  .readFileSync(new URL("../../app/javascript/controllers/video_player/upscale.js", import.meta.url), "utf8")
+  .replace(/^export /gm, "")
 const source = fs
   .readFileSync(new URL("../../app/javascript/controllers/video_player_controller.js", import.meta.url), "utf8")
-  .replace(/^import .*$/m, "class Controller {}")
+  .replace(/^import \{ Controller \} .*$/m, "class Controller {}")
+  .replace(/^import \{ UpscaleMixin \} .*$/m, () => upscaleSource)
   .replace("export default class", "globalThis.VideoPlayerController = class")
 
 class TestVTTCue {
@@ -1515,6 +1521,8 @@ test("source selection starts from core tracks before optional external subtitle
   player.directPlayEligible = () => true
   player.startDirectPlay = () => { events.push("direct") }
   player.currentPlaybackPosition = () => 0
+  player.updateDurationDisplay = () => {}
+  player.onTimeUpdate = () => {}
 
   context.fetch = async (path) => {
     const includeExternal = new URL(path, "https://streamvault.test").searchParams.get("include_external_subtitles")
@@ -1525,7 +1533,8 @@ test("source selection starts from core tracks before optional external subtitle
         ? {
             audio: [{ index: 0, language: "EN", default: true }],
             subtitles: [{ index: 1, label: "Embedded", text_supported: true }],
-            direct_playable: true
+            direct_playable: true,
+            duration: 7200
           }
         : {
             subtitles: [
@@ -1540,7 +1549,9 @@ test("source selection starts from core tracks before optional external subtitle
     await player.ensureVideoSource()
     await new Promise((resolve) => setImmediate(resolve))
 
+    // The tracks probe carried the duration, so no separate duration probe.
     assert.deepEqual(events, ["core", "direct", "external"])
+    assert.equal(player.knownDuration, 7200)
     assert.equal(Array.from(player.subtitleTracks, (track) => track.index).join(","), "1,external:subdl:english")
   } finally {
     context.fetch = previousFetch
@@ -2721,4 +2732,135 @@ test("engine/profile ids map to real import-map pin names (not engine ids)", () 
       assert.ok(player.upscaleModuleSpecifier(engineId, profileId).startsWith("anime4k"))
     }
   }
+})
+
+function bufferedRanges(...ranges) {
+  return { length: ranges.length, start: (i) => ranges[i][0], end: (i) => ranges[i][1] }
+}
+
+function seekablePlayer() {
+  const player = new VideoPlayerController()
+  const calls = { restarts: [], subtitleReloads: [] }
+  player.knownDuration = 6000
+  player.startSecondsValue = 100
+  player.directPlayActive = true
+  player.remuxDirectPlay = true
+  player.isSeeking = false
+  player.liveCaptionsEnabled = false
+  player.videoTarget = { currentTime: 20, buffered: bufferedRanges([0, 90]) }
+  player.currentTimeTarget = { textContent: "" }
+  player.updateSeekVisuals = () => {}
+  player.showOverlayUi = () => {}
+  player.clearSubtitleCues = () => {}
+  player.reloadTextSubtitlesAt = (position) => { calls.subtitleReloads.push(position) }
+  player.resetProgressBaseline = () => {}
+  player.restartPlaybackAt = (position) => { calls.restarts.push(position) }
+  return { player, calls }
+}
+
+test("a skip into the buffered remux range moves the playhead without a new stream", () => {
+  const { player, calls } = seekablePlayer()
+
+  player.skip(10)
+  player.commitUserSeek()
+
+  assert.deepEqual(calls.restarts, [])
+  assert.equal(player.videoTarget.currentTime, 30)
+  assert.deepEqual(calls.subtitleReloads, [130])
+})
+
+test("a seek outside the buffered range still restarts the stream", () => {
+  const { player, calls } = seekablePlayer()
+
+  player.performSeek(0.5)
+
+  assert.deepEqual(calls.restarts, [3000])
+  assert.equal(player.videoTarget.currentTime, 20)
+})
+
+test("skips work before the duration is known", () => {
+  const { player, calls } = seekablePlayer()
+  player.knownDuration = 0
+  player.videoTarget.buffered = bufferedRanges()
+
+  player.skip(10)
+  player.commitUserSeek()
+
+  assert.deepEqual(calls.restarts, [130])
+})
+
+test("a touch tap toggles the controls instead of pausing", () => {
+  const player = new VideoPlayerController()
+  let toggles = 0
+  let shown = 0
+  let hidden = 0
+  player.togglePlay = () => { toggles += 1 }
+  player.showOverlayUi = () => { shown += 1 }
+  player.hideOverlayUi = () => { hidden += 1 }
+  player.hasControlsTarget = true
+  player.controlsTarget = { style: { opacity: "0" } }
+  const event = { pointerType: "touch", preventDefault() {} }
+
+  player.onVideoClick(event)
+  player.controlsTarget.style.opacity = "1"
+  player.onVideoClick(event)
+  player.onVideoClick({ pointerType: "mouse", preventDefault() {} })
+
+  assert.equal(shown, 2)
+  assert.equal(hidden, 1)
+  assert.equal(toggles, 1)
+})
+
+test("a remux resume starts on the source keyframe and asks the server to copy", async () => {
+  const player = new VideoPlayerController()
+  const previousFetch = context.fetch
+  const requests = []
+  player.tracksData = { remux_direct_url: "/transcode?url=https%3A%2F%2Fexample.test%2Fmovie.mkv&remux=1" }
+  player.directUrlValue = "https://example.test/movie.mkv"
+  player.remuxDirectPlay = true
+  player.directPlayActive = true
+  player.startSecondsValue = 600
+  player.element = { dataset: {} }
+  player.selectedAudioStream = null
+  player.selectedSubtitleStream = null
+  player.subtitleTracks = []
+  player.hdrPassthroughActive = () => false
+  let loaded = null
+  player.videoTarget = { load() { loaded = this.src } }
+  context.fetch = async (path) => {
+    requests.push(path)
+    return { ok: true, json: async () => ({ seconds: 596.04 }) }
+  }
+
+  try {
+    player.loadRemuxSource()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(requests.length, 1)
+    assert.match(requests[0], /^\/transcode\/keyframe\?url=https%3A%2F%2Fexample\.test%2Fmovie\.mkv&t=600$/)
+    assert.equal(player.startSecondsValue, 596.04)
+    const url = new URL(loaded, "https://streamvault.test")
+    assert.equal(url.searchParams.get("start_seconds"), "596.04")
+    assert.equal(url.searchParams.get("keyframe"), "1")
+  } finally {
+    context.fetch = previousFetch
+  }
+})
+
+test("iOS plays direct-playable files natively before trying HLS", async () => {
+  const player = new VideoPlayerController()
+  const calls = []
+  player.streamingUrlValue = "/transcode?url=https%3A%2F%2Fexample.test%2Fmovie.mp4"
+  player.knownDuration = 7200
+  player.isIOS = () => true
+  player.loadMediaTracks = async () => {}
+  player.directPlayEligible = () => true
+  player.startDirectPlay = () => { calls.push("direct") }
+  player.startHlsPlayback = () => { calls.push("hls") }
+  player.loadInitialTextSubtitles = () => {}
+  player.loadExternalSubtitleTracks = () => {}
+
+  await player.ensureVideoSource()
+
+  assert.deepEqual(calls, ["direct"])
 })

@@ -40,6 +40,13 @@ class TranscodeService
   FIRST_SEGMENT_TIMEOUT_SECONDS = 30
   SHUTDOWN_GRACE_SECONDS = 1
   FIRST_DATA_TIMEOUT_SECONDS = 30
+  KEYFRAME_PROBE_TIMEOUT_SECONDS = 8
+  # A keyframe further back than this means the index is unusable; the
+  # caller then falls back to an exact re-encoded start.
+  MAX_KEYFRAME_SNAP_SECONDS = 15
+  STEREO_AUDIO_BITRATE = "160k"
+  SURROUND_AUDIO_BITRATE = "384k"
+  SURROUND_AUDIO_CHANNELS = 6
   # Keep the on-disk fMP4 producer/consumer spool deliberately small. The
   # reader stops draining ffmpeg before this many bytes are pending, letting
   # the pipe apply backpressure instead of accumulating an unbounded file.
@@ -108,6 +115,10 @@ class TranscodeService
     # servers without hardware acceleration.  Without this, libx264
     # defaults to 1 thread and leaves most cores idle.
     "-threads", "auto",
+    # Cap peaks so remote viewers on slower links do not stall on the
+    # bitrate spikes ultrafast/CRF produces in busy scenes.
+    "-maxrate", "8M",
+    "-bufsize", "16M",
     # No B-frames: MSE's fMP4 chunk demuxer requires each fragment to start
     # with a random access point (I-frame).  With B-frames, +frag_keyframe
     # fragments at keyframes in display order but the first packet by DTS
@@ -201,45 +212,10 @@ class TranscodeService
     end
   end
 
-
-  # Extract one small JPEG frame from the source timeline. Successful frames
-  # are cached briefly by source, sanitized credential identity, and timestamp.
-  # Concurrent requests for the same key share one capture so dragging cannot
-  # fan out identical FFmpeg processes within a Puma worker.
-  def self.extract_thumbnail(input_url, headers: {}, timestamp:)
-    numeric_timestamp = Float(timestamp, exception: false)
-    unless numeric_timestamp&.finite?
-      raise ThumbnailExtractionError, "Invalid thumbnail timestamp"
-    end
-
-    second = numeric_timestamp.floor
-    raise ThumbnailExtractionError, "Invalid thumbnail timestamp" unless second.between?(0, MAX_VALID_DURATION_SECONDS)
-
-    cache_key = thumbnail_cache_key(input_url, headers, second)
-    cached, flight, owner = thumbnail_cache_lookup(cache_key)
-    return cached.dup if cached
-
-    unless owner
-      result = wait_for_thumbnail_flight(flight)
-      return result.dup
-    end
-
-    begin
-      jpeg = with_thumbnail_capture_slot do
-        capture_thumbnail(input_url, headers: headers, timestamp: second)
-      end
-      store_thumbnail(cache_key, jpeg)
-      finish_thumbnail_flight(cache_key, flight, result: jpeg)
-      jpeg.dup
-    rescue ThumbnailExtractionError => error
-      finish_thumbnail_flight(cache_key, flight, error: error)
-      raise
-    rescue StandardError
-      error = ThumbnailExtractionError.new("Thumbnail extraction failed")
-      finish_thumbnail_flight(cache_key, flight, error: error)
-      raise error
-    end
-  end
+  # Subtitle extraction and seek thumbnails live in their own files so this
+  # class stays about probing and running FFmpeg for playback.
+  extend Subtitles
+  extend Thumbnails
 
   # Extract an exact, compact mono WAV window for local Whisper. Keeping the
   # sidecar free of FFmpeg limits its attack surface and makes input URL/header
@@ -322,11 +298,12 @@ class TranscodeService
   # (bad URL, auth failure, expired link).  When the caller stops reading
   # (client disconnect → exception propagates through the yield), the
   # ensure block kills ffmpeg.
-  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], remux: false, hdr: false, &block)
+  def self.transcode_to_fmp4(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], remux: false, hdr: false, keyframe_aligned: false, &block)
     cmd = build_ffmpeg_command(
       input_url,
       headers: headers,
       start_seconds: start_seconds,
+      keyframe_aligned: keyframe_aligned,
       audio_stream: audio_stream,
       subtitle_stream: subtitle_stream,
       default_language: default_language,
@@ -358,13 +335,14 @@ class TranscodeService
   # for monitoring ffmpeg and detecting failure — the client polls the
   # playlist endpoint until the playlist file appears.
   # Returns the pid so the caller can kill the group later.
-  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], hdr: false, wait_for_first_segment: true)
+  def self.transcode_to_hls(input_url, segment_dir:, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], hdr: false, keyframe_aligned: false, wait_for_first_segment: true)
     FileUtils.mkdir_p(segment_dir)
 
     cmd = build_ffmpeg_command(
       input_url,
       headers: headers,
       start_seconds: start_seconds,
+      keyframe_aligned: keyframe_aligned,
       audio_stream: audio_stream,
       subtitle_stream: subtitle_stream,
       default_language: default_language,
@@ -633,7 +611,7 @@ class TranscodeService
       cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
       cmd += [
         "-show_entries",
-        "stream=index,codec_type,codec_name,channels,start_time:stream_tags=language,title:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke:format=nb_streams",
+        "stream=index,codec_type,codec_name,channels,start_time,duration:stream_tags=language,title,DURATION:stream_disposition=default,forced,hearing_impaired,comment,lyrics,karaoke:format=nb_streams,duration:format_tags=DURATION",
         "-of",
         "json",
         input_url
@@ -657,11 +635,15 @@ class TranscodeService
             (tracks[:audio].empty? && tracks[:subtitles].empty?)
           )
           unless local_tracks_incomplete
+            # The same probe output carries the duration; caching it saves
+            # the player a separate remote ffprobe at startup.
+            duration = extract_probe_duration(result.stdout)
             cache_store(
               input_url,
               headers: headers,
               media_tracks: tracks,
-              subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout)
+              subtitle_stream_start_times: extract_subtitle_stream_start_times(result.stdout),
+              **(duration.positive? ? { duration: duration } : {})
             )
             return tracks
           end
@@ -698,245 +680,7 @@ class TranscodeService
   end
   private_class_method :probe_output_complete?
 
-  def self.extract_subtitle_stream_start_times(output)
-    data = JSON.parse(output)
-    Array(data["streams"]).each_with_object({}) do |stream, starts|
-      next unless stream["codec_type"].to_s == "subtitle"
-
-      stream_index = non_negative_integer(stream["index"])
-      start_time = finite_float(stream["start_time"])
-      starts[stream_index] = start_time if stream_index && start_time
-    end
-  rescue JSON::ParserError
-    {}
-  end
-  private_class_method :extract_subtitle_stream_start_times
-
-  def self.cached_subtitle_stream_start_time(input_url, stream_index, headers: {})
-    start_time = cache_get(input_url, headers: headers)&.dig(:subtitle_stream_start_times, stream_index)
-    start_time.is_a?(Numeric) && start_time.finite? ? start_time : 0
-  end
-  private_class_method :cached_subtitle_stream_start_time
-
-  def self.extract_subtitles_to_vtt(input_url, headers: {}, subtitle_stream: nil, start_seconds: 0, duration_seconds: SUBTITLE_EXTRACTION_WINDOW_SECONDS)
-    extract_subtitles(
-      input_url,
-      headers: headers,
-      subtitle_stream: subtitle_stream,
-      start_seconds: start_seconds,
-      duration_seconds: duration_seconds
-    ).vtt.to_s
-  end
-
-  def self.extract_subtitles(input_url, headers: {}, subtitle_stream: nil, start_seconds: 0, duration_seconds: SUBTITLE_EXTRACTION_WINDOW_SECONDS)
-    stream_index = normalized_stream_index(subtitle_stream)
-    seek_start_seconds = normalized_start_seconds(start_seconds)
-    extraction_duration_seconds = normalized_subtitle_duration_seconds(duration_seconds)
-    unless stream_index
-      result = subtitle_result(:invalid_stream, diagnostic: "invalid subtitle stream")
-      log_subtitle_result(result, stream_index: subtitle_stream, start_seconds: seek_start_seconds)
-      return result
-    end
-
-    track = probe_media_tracks(input_url, headers: headers)[:subtitles].find { |subtitle| subtitle[:index] == stream_index }
-    subtitle_stream_start_time = cached_subtitle_stream_start_time(input_url, stream_index, headers: headers)
-
-    unless track
-      result = subtitle_result(:unsupported_track, diagnostic: "subtitle stream was not found")
-      log_subtitle_result(result, stream_index: stream_index, start_seconds: seek_start_seconds)
-      return result
-    end
-
-    unless track[:text_supported]
-      result = subtitle_result(:unsupported_track, diagnostic: "subtitle stream is not text based")
-      log_subtitle_result(result, stream_index: stream_index, start_seconds: seek_start_seconds)
-      return result
-    end
-
-    packet_subtitles = extract_subtitle_packets_to_vtt(
-      input_url,
-      headers: headers,
-      track: track,
-      start_seconds: seek_start_seconds,
-      duration_seconds: extraction_duration_seconds
-    )
-    if packet_subtitles.ok? || packet_subtitles.empty_window? || packet_subtitles.status == :timeout
-      log_subtitle_result(packet_subtitles, stream_index: stream_index, start_seconds: seek_start_seconds)
-      return packet_subtitles
-    end
-
-    header_str = ffmpeg_headers(headers)
-    cmd = [ FFMPEG_PATH, "-loglevel", "error" ]
-    cmd += [ "-analyzeduration", "1000000", "-probesize", "1000000" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [ "-ss", seek_start_seconds.to_s ] if seek_start_seconds.positive?
-    cmd += [
-      "-i", input_url,
-      "-t", extraction_duration_seconds.to_s,
-      "-vn",
-      "-an",
-      "-dn",
-      "-map", "0:#{stream_index}",
-      "-c:s", "webvtt"
-    ]
-    # Input seeking and stream start timestamps can both make FFmpeg's
-    # fallback VTT timestamps relative to the subtitle stream. Shift the
-    # muxed output back onto the source timeline used by packet extraction.
-    output_timestamp_offset = seek_start_seconds + subtitle_stream_start_time
-    cmd += [ "-output_ts_offset", output_timestamp_offset.to_s ] unless output_timestamp_offset.zero?
-    cmd += [
-      "-f", "webvtt",
-      "pipe:1"
-    ]
-
-    result = capture_subtitle_stdout_result(cmd)
-    log_subtitle_result(result, stream_index: stream_index, start_seconds: seek_start_seconds)
-    result
-  rescue StandardError => e
-    result = subtitle_result(:failed, diagnostic: e.class.name)
-    log_subtitle_result(result, stream_index: subtitle_stream, start_seconds: start_seconds)
-    result
-  end
-
-  def self.selectable_subtitle_tracks(tracks)
-    tracks = Array(tracks)
-    full_tracks = tracks.reject { |track| partial_subtitle_track?(track) }
-    return sorted_subtitle_tracks(tracks) if full_tracks.empty?
-
-    filtered_tracks = tracks.reject do |track|
-      partial_subtitle_track?(track) && full_dialogue_alternative?(track, full_tracks)
-    end
-    sorted_subtitle_tracks(filtered_tracks)
-  end
-
-  def self.extract_subtitle_packets_to_vtt(input_url, headers:, track:, start_seconds:, duration_seconds:)
-    header_str = ffmpeg_headers(headers)
-    cmd = [ FFPROBE_PATH, "-v", "error" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [
-      "-select_streams", track[:index].to_s,
-      "-read_intervals", "#{start_seconds}%+#{duration_seconds}",
-      "-show_entries", "packet=pts_time,duration_time,data",
-      "-show_data",
-      "-of", "json",
-      input_url
-    ]
-
-    result = capture_command(cmd, timeout_seconds: SUBTITLE_PACKET_EXTRACTION_TIMEOUT_SECONDS)
-    return subtitle_result(:timeout, source: :ffprobe_packets, diagnostic: "ffprobe packet extraction timed out") if result.timed_out
-    return subtitle_result(:failed, source: :ffprobe_packets, diagnostic: "ffprobe packets exited unsuccessfully") unless result.status&.success?
-
-    packet_result = subtitle_packets_to_webvtt(result.stdout, track[:codec], start_seconds, duration_seconds)
-    if packet_result[:failed]
-      subtitle_result(:failed, source: :ffprobe_packets, diagnostic: packet_result[:diagnostic])
-    elsif packet_result[:cue_count].positive?
-      subtitle_result(:ok, vtt: packet_result[:vtt], cue_count: packet_result[:cue_count], source: :ffprobe_packets)
-    elsif packet_result[:packet_count].positive?
-      subtitle_result(:failed, source: :ffprobe_packets, diagnostic: "ffprobe packets had no decodable text cues")
-    else
-      subtitle_result(:empty_window, source: :ffprobe_packets)
-    end
-  rescue StandardError => e
-    subtitle_result(:failed, source: :ffprobe_packets, diagnostic: e.class.name)
-  end
-  private_class_method :extract_subtitle_packets_to_vtt
-
-  def self.subtitle_packets_to_webvtt(output, codec, start_seconds, duration_seconds)
-    data = JSON.parse(output)
-    window_start = [ start_seconds - 5, 0 ].max
-    window_end = start_seconds + duration_seconds
-    cues = Array(data["packets"]).filter_map do |packet|
-      subtitle_packet_to_cue(packet, codec, window_start, window_end)
-    end
-
-    {
-      vtt: webvtt_from_cues(cues),
-      cue_count: cues.length,
-      packet_count: Array(data["packets"]).length
-    }
-  rescue JSON::ParserError
-    { vtt: "", cue_count: 0, packet_count: 0, failed: true, diagnostic: "ffprobe packet JSON could not be parsed" }
-  end
-  private_class_method :subtitle_packets_to_webvtt
-
-  def self.subtitle_packet_to_cue(packet, codec, window_start, window_end)
-    start_time = finite_float(packet["pts_time"])
-    return nil unless start_time
-
-    duration = finite_float(packet["duration_time"]) || SUBTITLE_FALLBACK_DURATION_SECONDS
-    duration = SUBTITLE_FALLBACK_DURATION_SECONDS unless duration.positive?
-    end_time = start_time + duration
-    return nil if end_time < window_start || start_time > window_end
-
-    text = subtitle_packet_text(packet["data"], codec)
-    return nil if text.blank?
-
-    { start: start_time, end: end_time, text: text }
-  end
-  private_class_method :subtitle_packet_to_cue
-
-  def self.subtitle_packet_text(data, codec)
-    text = decode_ffprobe_packet_data(data)
-    return "" if text.blank?
-
-    text = ass_packet_text(text) if %w[ass ssa].include?(codec.to_s)
-    normalize_subtitle_text(text)
-  end
-  private_class_method :subtitle_packet_text
-
-  def self.decode_ffprobe_packet_data(data)
-    bytes = data.to_s.each_line.flat_map do |line|
-      hex = line[/:\s*((?:[[:xdigit:]]{2,4}\s*)+)/, 1]
-      hex ? hex.scan(/[[:xdigit:]]{2}/).map { |byte| byte.to_i(16) } : []
-    end
-    bytes.pack("C*").force_encoding(Encoding::UTF_8).scrub
-  end
-  private_class_method :decode_ffprobe_packet_data
-
-  def self.ass_packet_text(text)
-    text.split(",", 9).last.to_s
-  end
-  private_class_method :ass_packet_text
-
-  def self.normalize_subtitle_text(text)
-    text
-      .gsub(/\{[^}]*\}/, "")
-      .gsub(/\\[Nn]/, "\n")
-      .gsub(/<[^>]+>/, "")
-      .lines
-      .map(&:strip)
-      .reject(&:blank?)
-      .join("\n")
-  end
-  private_class_method :normalize_subtitle_text
-
-  def self.webvtt_from_cues(cues)
-    return "" if cues.empty?
-
-    body = cues
-      .sort_by { |cue| cue[:start] }
-      .map do |cue|
-        "#{format_vtt_timestamp(cue[:start])} --> #{format_vtt_timestamp(cue[:end])}\n#{cue[:text]}"
-      end
-      .join("\n\n")
-    "WEBVTT\n\n#{body}\n"
-  end
-  private_class_method :webvtt_from_cues
-
-  def self.format_vtt_timestamp(seconds)
-    milliseconds = (seconds.to_f * 1000).round
-    hours = milliseconds / 3_600_000
-    milliseconds %= 3_600_000
-    minutes = milliseconds / 60_000
-    milliseconds %= 60_000
-    whole_seconds = milliseconds / 1000
-    milliseconds %= 1000
-
-    format("%02d:%02d:%02d.%03d", hours, minutes, whole_seconds, milliseconds)
-  end
-  private_class_method :format_vtt_timestamp
-
-  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil, remux: false, hdr: false)
+  def self.build_ffmpeg_command(input_url, headers: {}, start_seconds: 0, audio_stream: nil, subtitle_stream: nil, default_language: nil, preferred_languages: [], output_spec: :fmp4, segment_dir: nil, remux: false, hdr: false, keyframe_aligned: false)
     header_str = ffmpeg_headers(headers)
     # Probe video stream and media tracks in parallel — these are
     # independent ffprobe calls that each take 1-3s on a cold cache.
@@ -975,10 +719,16 @@ class TranscodeService
     # can only start at the preceding keyframe, which desynchronizes the UI
     # and subtitles on long GOPs. HDR remains the exception because preserving
     # ten-bit video is more important than GOP-sized seek precision.
+    #
+    # A keyframe-aligned start (the player asked /transcode/keyframe first)
+    # lands exactly on a keyframe, so stream copy starts at the requested
+    # timestamp and can be used for seeks and resumes too.
     hdr_passthrough = hdr && hdr_passthrough_video?(video_stream) && !selected_burn_subtitle_track
     effective_remux = (remux || (output_spec == :hls && hdr_passthrough)) && !selected_burn_subtitle_track
-    copy_video = (effective_remux && (seek_start_seconds.zero? || hdr_passthrough)) ||
-      (browser_safe_video?(video_stream) && seek_start_seconds.zero?)
+    copy_start = seek_start_seconds.zero? || keyframe_aligned
+    copy_safe_video = output_spec == :hls ? hls_copy_safe_video?(video_stream) : browser_safe_video?(video_stream)
+    copy_video = (effective_remux && (copy_start || hdr_passthrough)) ||
+      (copy_safe_video && copy_start && !selected_burn_subtitle_track)
     output_video_filter = video_filter_for(video_stream)
     video_args = if copy_video
       [ "-c:v", "copy" ]
@@ -1086,7 +836,7 @@ class TranscodeService
     # timestamp gaps/discontinuities, while async=1 on other codecs only did
     # hard fill/trim and could not correct gradual clock drift.  first_pts=0
     # also puts delayed/early audio on the same zero-based timeline as video.
-    cmd += [ "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+    cmd += [ "-c:a", "aac", *audio_channel_args(input_url, headers: headers, selected_audio_index: selected_audio_index),
              "-af", AUDIO_SYNC_FILTER ]
     cmd += case output_spec
     when :hls
@@ -1128,6 +878,62 @@ class TranscodeService
     cmd
   end
   private_class_method :build_ffmpeg_command
+
+  # Keep 5.1 surround (7.1 folds down to 5.1); everything else is stereo.
+  def self.audio_channel_args(input_url, headers:, selected_audio_index:)
+    tracks = probe_media_tracks(input_url, headers: headers)[:audio]
+    track = tracks.find { |candidate| candidate[:index] == selected_audio_index } || tracks.first
+    if track&.dig(:channels).to_i >= SURROUND_AUDIO_CHANNELS
+      [ "-b:a", SURROUND_AUDIO_BITRATE, "-ac", SURROUND_AUDIO_CHANNELS.to_s ]
+    else
+      [ "-b:a", STEREO_AUDIO_BITRATE, "-ac", "2" ]
+    end
+  end
+  private_class_method :audio_channel_args
+
+  # Find the video keyframe at or before +seconds+. ffprobe seeks backward
+  # through the container index, so this reads one packet, not the GOP.
+  # Returns nil when the source cannot report one close to the target.
+  def self.keyframe_at_or_before(input_url, seconds:, headers: {})
+    target = normalized_start_seconds(seconds)
+    return nil unless target.positive?
+
+    header_str = ffmpeg_headers(headers)
+    cmd = [ FFPROBE_PATH, "-v", "error" ]
+    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
+    cmd += [
+      "-select_streams", "v:0",
+      "-read_intervals", "#{format('%.3f', target)}%+#1",
+      "-show_entries", "packet=pts_time,dts_time,flags",
+      "-of", "json",
+      input_url
+    ]
+    result = capture_command(cmd, timeout_seconds: KEYFRAME_PROBE_TIMEOUT_SECONDS)
+    return nil if result.timed_out || !result.status&.success?
+
+    packet = Array(JSON.parse(result.stdout)["packets"]).first
+    return nil unless packet && packet["flags"].to_s.include?("K")
+
+    keyframe = finite_float(packet["pts_time"]) || finite_float(packet["dts_time"])
+    return nil unless keyframe && keyframe >= 0
+    return nil if keyframe > target + 0.001 || target - keyframe > MAX_KEYFRAME_SNAP_SECONDS
+
+    keyframe.round(3)
+  rescue StandardError
+    nil
+  end
+
+  # Duration already learned by an earlier probe (the tracks probe also
+  # reads it). Never starts a new ffprobe.
+  def self.cached_probe_duration(input_url, headers: {})
+    cache_get(input_url, headers: headers)&.dig(:duration).to_f
+  end
+
+  # HLS segments are played by native players, which decode B-frames fine.
+  # Only MSE (fMP4 chunk demuxer) needs the B-frame-free check.
+  def self.hls_copy_safe_video?(stream)
+    browser_safe_video?(stream.is_a?(Hash) ? stream.merge(has_b_frames: false) : stream)
+  end
 
   # Return the best available H.264 encoder args.  Order of precedence:
   #   1. FFMPEG_ENCODER env var (for Docker/cloud with a hardware encoder)
@@ -1236,98 +1042,6 @@ class TranscodeService
   end
   private_class_method :subtitle_burn_filter
 
-  def self.capture_subtitle_stdout(cmd)
-    capture_subtitle_stdout_result(cmd).vtt.to_s
-  end
-  private_class_method :capture_subtitle_stdout
-
-  def self.capture_subtitle_stdout_result(cmd)
-    rd, wr = IO.pipe
-    err_rd, err_wr = IO.pipe
-    pid = Process.spawn(*cmd, in: "/dev/null", out: wr, err: err_wr, pgroup: true)
-    wr.close
-    err_wr.close
-
-    stdout_buf = +""
-    reaped = false
-
-    stdout_thread = Thread.new do
-      loop do
-        chunk = rd.readpartial(4096)
-        stdout_buf << chunk
-      end
-    rescue EOFError, IOError, Errno::EBADF
-    end
-
-    stderr_thread = Thread.new do
-      loop { err_rd.readpartial(4096) }
-    rescue EOFError, IOError, Errno::EBADF
-    end
-
-    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SUBTITLE_EXTRACTION_TIMEOUT_SECONDS
-    loop do
-      _, status = Process.waitpid2(pid, Process::WNOHANG)
-      if status
-        reaped = true
-        stdout_thread.join(1)
-        stderr_thread.join(1)
-        return subtitle_result(:ok, vtt: stdout_buf, cue_count: webvtt_cue_count(stdout_buf), source: :ffmpeg) if status.success? && webvtt_has_cues?(stdout_buf)
-        return subtitle_result(:empty_window, source: :ffmpeg) if status.success?
-
-        return subtitle_result(:failed, source: :ffmpeg, diagnostic: "ffmpeg subtitle extraction exited unsuccessfully")
-      end
-
-      if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-        return subtitle_result(:ok, vtt: stdout_buf, cue_count: webvtt_cue_count(stdout_buf), source: :ffmpeg) if webvtt_has_cues?(stdout_buf)
-
-        return subtitle_result(:timeout, source: :ffmpeg, diagnostic: "ffmpeg subtitle extraction timed out")
-      end
-
-      sleep 0.1
-    end
-  ensure
-    kill_process_group(pid) if pid && !reaped
-    stdout_thread&.kill
-    stderr_thread&.kill
-    stdout_thread&.join(1)
-    stderr_thread&.join(1)
-    rd&.close unless rd&.closed?
-    err_rd&.close unless err_rd&.closed?
-  end
-  private_class_method :capture_subtitle_stdout_result
-
-  def self.webvtt_has_cues?(text)
-    text.to_s.match?(/^\d{2}:\d{2}(?::\d{2})?[\.,]\d{3}\s+-->/)
-  end
-  private_class_method :webvtt_has_cues?
-
-  def self.webvtt_cue_count(text)
-    text.to_s.scan(/^\d{2}:\d{2}(?::\d{2})?[\.,]\d{3}\s+-->/).length
-  end
-  private_class_method :webvtt_cue_count
-
-  def self.subtitle_result(status, vtt: "", cue_count: 0, source: nil, diagnostic: nil)
-    SubtitleExtractionResult.new(
-      status: status,
-      vtt: vtt.to_s,
-      cue_count: cue_count.to_i,
-      source: source,
-      diagnostic: diagnostic
-    )
-  end
-  private_class_method :subtitle_result
-
-  def self.log_subtitle_result(result, stream_index:, start_seconds:)
-    return unless defined?(Rails)
-
-    Rails.logger.info(
-      "[Subtitles] status=#{result.status} source=#{result.source || 'none'} " \
-      "stream=#{stream_index.presence || 'none'} start=#{normalized_start_seconds(start_seconds)} " \
-      "cues=#{result.cue_count}"
-    )
-  end
-  private_class_method :log_subtitle_result
-
   # Returns the selected audio stream index or nil. Selection order:
   #   1. Explicit stream index (audio_stream param) if it exists.
   #   2. Preferred language track (lowest position wins on ties).
@@ -1402,77 +1116,6 @@ class TranscodeService
     }
   end
   private_class_method :media_track
-
-  def self.annotate_subtitle_track!(track, stream)
-    disposition = stream["disposition"] || {}
-    title = track[:title].to_s
-    forced = truthy_disposition?(disposition, "forced") || title.match?(/\bforced\b/i)
-    hearing_impaired = truthy_disposition?(disposition, "hearing_impaired") || title.match?(HEARING_IMPAIRED_TITLE_PATTERN)
-    commentary = truthy_disposition?(disposition, "comment") || title.match?(/\bcomment(?:ary)?\b/i)
-    lyrics = truthy_disposition?(disposition, "lyrics") || truthy_disposition?(disposition, "karaoke") || title.match?(/\b(?:lyrics?|karaoke)\b/i)
-    partial = forced || commentary || lyrics || title.match?(PARTIAL_SUBTITLE_TITLE_PATTERN)
-
-    track[:forced] = forced
-    track[:hearing_impaired] = hearing_impaired
-    track[:commentary] = commentary
-    track[:partial] = partial
-    track[:quality] = partial ? "partial" : "full"
-    track[:quality_score] = subtitle_quality_score(track)
-    track[:label] = subtitle_track_label(track)
-  end
-  private_class_method :annotate_subtitle_track!
-
-  def self.truthy_disposition?(disposition, key)
-    disposition[key].to_i == 1
-  end
-  private_class_method :truthy_disposition?
-
-  def self.partial_subtitle_track?(track)
-    track[:partial] == true || track["partial"] == true
-  end
-  private_class_method :partial_subtitle_track?
-
-  def self.full_dialogue_alternative?(track, full_tracks)
-    language = track[:language] || track["language"]
-    return full_tracks.any? if language.blank?
-
-    full_tracks.any? { |candidate| (candidate[:language] || candidate["language"]) == language }
-  end
-  private_class_method :full_dialogue_alternative?
-
-  def self.sorted_subtitle_tracks(tracks)
-    tracks.sort_by do |track|
-      [
-        track[:quality_score] || track["quality_score"] || 0,
-        track[:external] || track["external"] ? 0 : 1,
-        track[:position] || track["position"] || MAX_STREAM_INDEX,
-        track[:label] || track["label"].to_s
-      ]
-    end
-  end
-  private_class_method :sorted_subtitle_tracks
-
-  def self.subtitle_quality_score(track)
-    score = 0
-    score += 100 if track[:partial]
-    score += 20 if track[:hearing_impaired]
-    score += 10 unless track[:text_supported]
-    score -= 5 if track[:default]
-    score
-  end
-  private_class_method :subtitle_quality_score
-
-  def self.subtitle_track_label(track)
-    parts = [ language_label(track[:language]) ]
-    parts << track[:title] if track[:title].present?
-    parts << "Forced" if track[:forced] && !track[:title].to_s.match?(/\bforced\b/i)
-    parts << "SDH" if track[:hearing_impaired] && !track[:title].to_s.match?(HEARING_IMPAIRED_TITLE_PATTERN)
-    parts << "Partial" if track[:partial] && !track[:forced] && !track[:commentary]
-    parts << track[:codec].upcase if track[:codec].present?
-    parts << "Default" if track[:default]
-    parts.compact_blank.uniq.join(" · ")
-  end
-  private_class_method :subtitle_track_label
 
   def self.track_label(language, title, codec, channels, default)
     parts = [ language_label(language) ]
@@ -1698,14 +1341,6 @@ class TranscodeService
   end
   private_class_method :normalized_start_seconds
 
-  def self.normalized_subtitle_duration_seconds(value)
-    seconds = value.to_i
-    return SUBTITLE_EXTRACTION_WINDOW_SECONDS unless seconds.positive?
-
-    seconds.clamp(MIN_SUBTITLE_EXTRACTION_WINDOW_SECONDS, MAX_SUBTITLE_EXTRACTION_WINDOW_SECONDS)
-  end
-  private_class_method :normalized_subtitle_duration_seconds
-
   def self.extract_probe_duration(output)
     data = JSON.parse(output)
     durations = []
@@ -1836,147 +1471,6 @@ class TranscodeService
     end
   end
   private_class_method :with_probe_single_flight
-
-  def self.thumbnail_cache_key(input_url, headers, timestamp)
-    header_identity = ffmpeg_headers(headers).split("\r\n").sort.join("\r\n")
-    Digest::SHA256.hexdigest("#{input_url}\0#{header_identity}\0#{timestamp}")
-  end
-  private_class_method :thumbnail_cache_key
-
-  def self.thumbnail_cache_lookup(cache_key)
-    @thumbnail_cache_mutex.synchronize do
-      prune_thumbnail_cache
-      cached = @thumbnail_cache[cache_key]
-      if cached
-        cached[:last_accessed_at] = monotonic_now
-        return [ cached[:jpeg], nil, false ]
-      end
-
-      flight = @thumbnail_inflight[cache_key]
-      return [ nil, flight, false ] if flight
-
-      flight = ThumbnailFlight.new(condition: ConditionVariable.new, done: false)
-      @thumbnail_inflight[cache_key] = flight
-      [ nil, flight, true ]
-    end
-  end
-  private_class_method :thumbnail_cache_lookup
-
-  def self.wait_for_thumbnail_flight(flight)
-    @thumbnail_cache_mutex.synchronize do
-      flight.condition.wait(@thumbnail_cache_mutex) until flight.done
-      raise flight.error.class, flight.error.message if flight.error
-
-      flight.result
-    end
-  end
-  private_class_method :wait_for_thumbnail_flight
-
-  def self.finish_thumbnail_flight(cache_key, flight, result: nil, error: nil)
-    @thumbnail_cache_mutex.synchronize do
-      flight.result = result
-      flight.error = error
-      flight.done = true
-      @thumbnail_inflight.delete(cache_key) if @thumbnail_inflight[cache_key].equal?(flight)
-      flight.condition.broadcast
-    end
-  end
-  private_class_method :finish_thumbnail_flight
-
-  def self.store_thumbnail(cache_key, jpeg)
-    @thumbnail_cache_mutex.synchronize do
-      prune_thumbnail_cache
-      if (replaced = @thumbnail_cache.delete(cache_key))
-        @thumbnail_cache_bytes -= replaced[:byte_size]
-      end
-      while @thumbnail_cache.any? && (
-        @thumbnail_cache.size >= THUMBNAIL_CACHE_MAX_SIZE ||
-        @thumbnail_cache_bytes + jpeg.bytesize > THUMBNAIL_CACHE_MAX_BYTES
-      )
-        oldest_key, oldest = @thumbnail_cache.min_by { |_key, entry| entry[:last_accessed_at] }
-        @thumbnail_cache.delete(oldest_key)
-        @thumbnail_cache_bytes -= oldest[:byte_size]
-      end
-      now = monotonic_now
-      @thumbnail_cache[cache_key] = {
-        jpeg: jpeg.freeze,
-        stored_at: now,
-        last_accessed_at: now,
-        byte_size: jpeg.bytesize
-      }
-      @thumbnail_cache_bytes += jpeg.bytesize
-    end
-  end
-  private_class_method :store_thumbnail
-
-  def self.prune_thumbnail_cache
-    cutoff = monotonic_now - THUMBNAIL_CACHE_TTL_SECONDS
-    @thumbnail_cache.delete_if do |_key, entry|
-      expired = entry[:stored_at] < cutoff
-      @thumbnail_cache_bytes -= entry[:byte_size] if expired
-      expired
-    end
-  end
-  private_class_method :prune_thumbnail_cache
-
-  def self.with_thumbnail_capture_slot
-    acquired = false
-    @thumbnail_cache_mutex.synchronize do
-      if @thumbnail_active_captures >= THUMBNAIL_MAX_CONCURRENT_CAPTURES
-        raise ThumbnailBusyError, "Thumbnail extraction is busy"
-      end
-
-      @thumbnail_active_captures += 1
-      acquired = true
-    end
-
-    yield
-  ensure
-    if acquired
-      @thumbnail_cache_mutex.synchronize do
-        @thumbnail_active_captures -= 1
-      end
-    end
-  end
-  private_class_method :with_thumbnail_capture_slot
-
-  def self.capture_thumbnail(input_url, headers:, timestamp:)
-    header_str = ffmpeg_headers(headers)
-    cmd = [ FFMPEG_PATH, "-hide_banner", "-loglevel", "error", "-nostdin" ]
-    cmd += [ "-headers", header_str + "\r\n" ] if header_str.present?
-    cmd += [
-      # Keep probing bounded and accept the nearest keyframe. A seek preview
-      # values responsiveness over frame-exact decoding, especially for 4K
-      # remote MKV files whose next non-key frame can be expensive to reach.
-      "-probesize", "1M",
-      "-analyzeduration", "2000000",
-      "-ss", timestamp.to_s,
-      "-noaccurate_seek",
-      "-skip_frame", "nokey",
-      "-i", input_url,
-      "-map", "0:v:0",
-      "-frames:v", "1",
-      "-an", "-sn", "-dn",
-      "-vf", THUMBNAIL_FILTER,
-      "-c:v", "mjpeg",
-      "-q:v", "4",
-      "-f", "image2pipe",
-      "pipe:1"
-    ]
-
-    result = capture_command(cmd, timeout_seconds: THUMBNAIL_TIMEOUT_SECONDS)
-    raise ThumbnailTimeoutError, "Thumbnail extraction timed out" if result.timed_out
-    raise ThumbnailExtractionError, "Thumbnail extraction failed" unless result.status&.success?
-
-    jpeg = result.stdout.to_s.b
-    raise ThumbnailExtractionError, "Thumbnail extraction failed" if jpeg.empty? || jpeg.bytesize > THUMBNAIL_MAX_BYTES
-    unless jpeg.start_with?("\xFF\xD8\xFF".b) && jpeg.end_with?("\xFF\xD9".b)
-      raise ThumbnailExtractionError, "Thumbnail extraction failed"
-    end
-
-    jpeg
-  end
-  private_class_method :capture_thumbnail
 
   def self.ffmpeg_headers(headers)
     headers.filter_map do |key, value|

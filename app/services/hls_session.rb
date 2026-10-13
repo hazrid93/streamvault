@@ -35,7 +35,7 @@ class HlsSession
 
   attr_reader :id, :pid, :segment_dir, :user_id
 
-  def self.create(user_id:, input_url:, headers:, start_seconds:, audio_stream:, subtitle_stream:, default_language:, preferred_languages:, hdr: false)
+  def self.create(user_id:, input_url:, headers:, start_seconds:, audio_stream:, subtitle_stream:, default_language:, preferred_languages:, hdr: false, keyframe_aligned: false)
     session_id = SecureRandom.hex(16)
     dir = Rails.root.join("tmp", "hls", session_id).to_s
     pid = nil
@@ -54,6 +54,7 @@ class HlsSession
         default_language: default_language,
         preferred_languages: preferred_languages,
         hdr: hdr,
+        keyframe_aligned: keyframe_aligned,
         wait_for_first_segment: false
       )
 
@@ -84,7 +85,8 @@ class HlsSession
       subtitle_stream: subtitle_stream,
       default_language: default_language,
       preferred_languages: preferred_languages,
-      hdr: hdr
+      hdr: hdr,
+      keyframe_aligned: keyframe_aligned
     )
 
     new(id: session_id, pid: pid, segment_dir: dir, user_id: user_id)
@@ -252,6 +254,7 @@ class HlsSession
       default_language: transcode_options[:default_language],
       preferred_languages: transcode_options.fetch(:preferred_languages),
       hdr: transcode_options.fetch(:hdr),
+      keyframe_aligned: transcode_options.fetch(:keyframe_aligned, false),
       wait_for_first_segment: false
     )
 

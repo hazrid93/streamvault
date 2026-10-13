@@ -55,6 +55,9 @@ class TranscodeTracksController < ApplicationController
       color_space: video_stream[:color_space],
       color_transfer: video_stream[:color_transfer],
       color_primaries: video_stream[:color_primaries],
+      # Learned by the tracks probe above; lets the player skip a separate
+      # duration probe of the same remote file.
+      duration: TranscodeService.cached_probe_duration(input_url, headers: headers),
       direct_playable: direct_playable?(input_url, tracks, video_stream),
       direct_stream_url: direct_stream_url(input_url),
       remux_direct_playable: remux_direct_playable?(video_stream),

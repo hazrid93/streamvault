@@ -83,7 +83,7 @@ StreamVault (Rails app)
 
 ### Streaming & playback
 - **Adaptive playback paths** — Uses native direct play when possible, low-cost video remuxing when safe, and full transcoding only when required.
-- **Custom video player** — Built from scratch with seeking, volume control, playback speed, and full keyboard support.
+- **Custom video player** — Built from scratch with seeking, volume control, playback speed, picture-in-picture, lock-screen and media-key controls (Media Session), and full keyboard support: Space/K play, ←/→ or J/L skip 10s, ↑/↓ volume, 0–9 jump, M mute, F fullscreen, C subtitles, N next episode, P picture-in-picture, `<`/`>` speed.
 - **Audio track selection** — Switch between audio languages when a stream has multiple tracks.
 - **A/V timestamp synchronisation** — Corrects source timestamp gaps and keeps resumed, sought, and recovered streams aligned.
 - **Subtitles** — Select from embedded subtitle tracks (text and image-based). Falls back to external subtitles from SubDL when none are embedded.
@@ -233,7 +233,7 @@ docker compose up -d --build
 | `POSTGRES_PASSWORD` | PostgreSQL database password (generate with `openssl rand -hex 16`) | Required |
 | `POSTGRES_DB` | PostgreSQL database name | `streamvault` |
 | `PORT` | Host port to expose the app on | `3000` |
-| `RAILS_MAX_THREADS` | Puma threads and matching database pool size; keep at least 5 for HLS polling plus normal requests | `5` |
+| `RAILS_MAX_THREADS` | Puma threads and matching database pool size. Streams, live captions, and cast starts hold a thread for a long time, so keep headroom for browsing | `16` |
 | `WEB_CONCURRENCY` | Rails worker processes; increase only when the host has RAM for each worker and simultaneous FFmpeg jobs | `1` |
 | `LOCAL_TORRENT_ENABLED` | Enable the private TorrServer local-playback alternative | `true` |
 | `TORRSERVER_USERNAME` | Basic-auth username on the private Rails↔TorrServer control network | `streamvault` |

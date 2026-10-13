@@ -830,7 +830,8 @@ RSpec.describe TranscodeService do
 
       pairs = argument_pairs(command)
       expect(pairs).to include([ "-c:a", "aac" ])
-      expect(pairs).to include([ "-b:a", "160k" ])
+      # A 5.1 source keeps surround sound instead of a stereo downmix.
+      expect(pairs).to include([ "-b:a", "384k" ], [ "-ac", "6" ])
       expect(pairs).to include([ "-af", "aresample=async=1000:first_pts=0" ])
       expect(pairs).not_to include([ "-c:a", "copy" ])
     end
@@ -1416,6 +1417,95 @@ RSpec.describe TranscodeService do
       described_class.send(:transcode_to_fmp4_internal, command) { |chunk| chunks << chunk }
 
       expect(chunks.join).to eq("a" * 1024 + "b" * 1024)
+    end
+  end
+
+  describe "copy starts and stream limits" do
+    def stub_probes(video_stream, audio_streams = [ { "index" => 1, "codec_type" => "audio", "codec_name" => "aac", "channels" => 2 } ])
+      video_output = { "streams" => [ video_stream ] }.to_json
+      track_output = { "streams" => audio_streams, "format" => { "nb_streams" => audio_streams.size + 1, "duration" => "5400.0" } }.to_json
+      allow(described_class).to receive(:capture_command) do |cmd, **_kwargs|
+        cmd.include?("-select_streams") ? capture_result(video_output) : capture_result(track_output)
+      end
+    end
+
+    let(:h264_with_b_frames) do
+      { "codec_name" => "h264", "width" => 1920, "height" => 1080, "pix_fmt" => "yuv420p", "has_b_frames" => 2 }
+    end
+
+    it "copies video from a keyframe-aligned seek instead of re-encoding" do
+      stub_probes(h264_with_b_frames)
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv", headers: {}, start_seconds: 600.04, remux: true, keyframe_aligned: true)
+
+      expect(argument_pairs(command)).to include([ "-ss", "600.04" ], [ "-c:v", "copy" ])
+      expect(command).not_to include("libx264")
+    end
+
+    it "still re-encodes an unaligned seek for an exact start" do
+      stub_probes(h264_with_b_frames)
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv", headers: {}, start_seconds: 600.5, remux: true)
+
+      expect(argument_pairs(command)).to include([ "-c:v", "libx264" ], [ "-maxrate", "8M" ], [ "-bufsize", "16M" ])
+    end
+
+    it "copies H.264 with B-frames into HLS but not into MSE fMP4" do
+      stub_probes(h264_with_b_frames)
+
+      hls = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv", headers: {}, start_seconds: 0, output_spec: :hls, segment_dir: "/tmp/hls/x")
+      fmp4 = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv", headers: {}, start_seconds: 0)
+
+      expect(argument_pairs(hls)).to include([ "-c:v", "copy" ])
+      expect(argument_pairs(fmp4)).to include([ "-c:v", "libx264" ])
+    end
+
+    it "keeps stereo sources at stereo bitrate" do
+      stub_probes(h264_with_b_frames)
+
+      command = described_class.send(:build_ffmpeg_command,
+        "https://example.test/video.mkv", headers: {}, start_seconds: 0)
+
+      expect(argument_pairs(command)).to include([ "-b:a", "160k" ], [ "-ac", "2" ])
+    end
+
+    it "caches the duration read by the tracks probe" do
+      stub_probes(h264_with_b_frames)
+
+      described_class.probe_media_tracks("https://example.test/video.mkv", headers: {})
+
+      expect(described_class.cached_probe_duration("https://example.test/video.mkv", headers: {})).to eq(5400.0)
+    end
+  end
+
+  describe ".keyframe_at_or_before" do
+    def packet_output(pts, flags = "K__")
+      { "packets" => [ { "pts_time" => pts, "dts_time" => pts, "flags" => flags } ] }.to_json
+    end
+
+    it "returns the keyframe the container index seeks back to" do
+      allow(described_class).to receive(:capture_command).and_return(capture_result(packet_output("596.040000")))
+
+      expect(described_class.keyframe_at_or_before("https://example.test/v.mkv", seconds: 600)).to eq(596.04)
+      expect(described_class).to have_received(:capture_command) do |cmd, **_kwargs|
+        expect(argument_pairs(cmd)).to include([ "-read_intervals", "600.000%+#1" ])
+      end
+    end
+
+    it "returns nil for a non-keyframe, a keyframe after the target, or a far keyframe" do
+      [ packet_output("599.0", "___"), packet_output("601.0"), packet_output("500.0") ].each do |output|
+        allow(described_class).to receive(:capture_command).and_return(capture_result(output))
+        expect(described_class.keyframe_at_or_before("https://example.test/v.mkv", seconds: 600)).to be_nil
+      end
+    end
+
+    it "returns nil without probing for a zero start" do
+      expect(described_class).not_to receive(:capture_command)
+      expect(described_class.keyframe_at_or_before("https://example.test/v.mkv", seconds: 0)).to be_nil
     end
   end
 

@@ -41,7 +41,8 @@ class TranscodeController < ApplicationController
         default_language: current_user.default_stream_language,
         preferred_languages: current_user.preferred_stream_languages,
         remux: params[:remux] == "1",
-        hdr: params[:hdr] == "1"
+        hdr: params[:hdr] == "1",
+        keyframe_aligned: params[:keyframe] == "1"
       ) do |chunk|
         response.stream.write(chunk)
       end
